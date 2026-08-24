@@ -12,4 +12,6 @@ npm run tauri build
 
 While developing, use `npm run dev:manual` so code changes queue behind an **Update** button in the status bar instead of hot-reloading the UI. Requires `cargo install cargo-watch`. Production updates in Settings also wait for you to click **Update**, show download/install progress, then restart once.
 
-NSIS is per-user. Tag `v*` on GitHub to cut an unsigned installer. For signed auto-updates: `npm run signer:generate`, paste the public key into `src-tauri/tauri.conf.json`, set your GitHub `endpoints` URL, and add `TAURI_SIGNING_PRIVATE_KEY` to CI. Authenticode is the separate Windows trust step.
+NSIS is per-user. Push a `v*` tag to cut a signed NSIS installer and `latest.json` for auto-update.
+
+Repo: https://github.com/rjreny/studio

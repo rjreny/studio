@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
 import { log } from "./log";
 import { relaunchApp } from "./devReload";
 
@@ -34,6 +35,8 @@ type UpdatePreflight = {
   http_status: number | null;
   reachable: boolean;
   message: string;
+  update_available: boolean;
+  available_version: string | null;
 };
 
 function hasTauri(): boolean {
@@ -42,6 +45,9 @@ function hasTauri(): boolean {
 
 function friendlyUpdateError(err: unknown): string {
   const message = String(err);
+  if (message.includes("Failed to fetch dynamically imported module")) {
+    return "Update check failed in dev mode — restart the app or use the installed release build.";
+  }
   if (message.includes("Failed to fetch") || message.includes("failed to fetch")) {
     return "Could not reach the update server. Check your internet connection.";
   }
@@ -51,6 +57,29 @@ function friendlyUpdateError(err: unknown): string {
   return message;
 }
 
+function fromPreflight(preflight: UpdatePreflight): UpdateCheckResult {
+  if (!preflight.reachable) {
+    return {
+      available: false,
+      version: null,
+      notes: null,
+      error: preflight.message,
+      message: null,
+      signingConfigured: preflight.signing_configured,
+    };
+  }
+
+  return {
+    available: preflight.update_available,
+    version: preflight.available_version,
+    notes: null,
+    error: null,
+    message: preflight.message,
+    signingConfigured: preflight.signing_configured,
+  };
+}
+
+/** Check release feed via Rust HTTP (reliable in dev and production). */
 export async function checkAppUpdate(): Promise<UpdateCheckResult> {
   if (!hasTauri()) {
     return {
@@ -65,38 +94,7 @@ export async function checkAppUpdate(): Promise<UpdateCheckResult> {
 
   try {
     const preflight = await invoke<UpdatePreflight>("update_preflight");
-
-    if (!preflight.signing_configured) {
-      return {
-        available: false,
-        version: null,
-        notes: null,
-        error: null,
-        message: preflight.message,
-        signingConfigured: false,
-      };
-    }
-
-    const { check } = await import("@tauri-apps/plugin-updater");
-    const update = await check();
-    if (!update) {
-      return {
-        available: false,
-        version: null,
-        notes: null,
-        error: null,
-        message: preflight.reachable ? "You're up to date" : preflight.message,
-        signingConfigured: true,
-      };
-    }
-    return {
-      available: true,
-      version: update.version,
-      notes: update.body ?? null,
-      error: null,
-      message: null,
-      signingConfigured: true,
-    };
+    return fromPreflight(preflight);
   } catch (err) {
     log("warn", "update check failed", err);
     return {
@@ -124,6 +122,17 @@ export async function downloadAndInstallUpdate(
     return;
   }
 
+  if (import.meta.env.DEV) {
+    onProgress({
+      phase: "error",
+      label: "Install updates from the release build",
+      percent: null,
+      version: null,
+      error: "Dev builds cannot install NSIS updates. Install Studio from the GitHub release, then use Update there.",
+    });
+    return;
+  }
+
   onProgress({
     phase: "checking",
     label: "Checking for updates…",
@@ -137,7 +146,7 @@ export async function downloadAndInstallUpdate(
     if (!preflight.signing_configured) {
       onProgress({
         phase: "error",
-        label: "Update signing is not configured yet",
+        label: "Update signing is not configured",
         percent: null,
         version: null,
         error: preflight.message,
@@ -145,7 +154,6 @@ export async function downloadAndInstallUpdate(
       return;
     }
 
-    const { check } = await import("@tauri-apps/plugin-updater");
     const update = await check();
     if (!update) {
       onProgress({

@@ -8,3 +8,4 @@ src-tauri/gen/
 .cursor/
 .tauri/
 **/.tauri/*.key
+studio/.release-check/

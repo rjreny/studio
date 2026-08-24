@@ -411,6 +411,8 @@ pub struct UpdatePreflight {
     pub http_status: Option<u16>,
     pub reachable: bool,
     pub message: String,
+    pub update_available: bool,
+    pub available_version: Option<String>,
 }
 
 fn updater_config(app: &AppHandle) -> (String, String) {
@@ -453,10 +455,64 @@ fn update_preflight_message(signing_configured: bool, status: u16) -> String {
     format!("Release server returned HTTP {}", status)
 }
 
+fn normalize_version(version: &str) -> String {
+    version.trim().trim_start_matches('v').to_string()
+}
+
+fn finish_update_preflight(
+    signing_configured: bool,
+    endpoint: String,
+    status: u16,
+    body: &str,
+    current_version: &str,
+) -> UpdatePreflight {
+    let mut update_available = false;
+    let mut available_version = None;
+    let mut message = update_preflight_message(signing_configured, status);
+
+    if status >= 200 && status < 300 && !body.is_empty() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(release) = json.get("version").and_then(|v| v.as_str()) {
+                let current = normalize_version(current_version);
+                let release_norm = normalize_version(release);
+                if release_norm != current {
+                    update_available = true;
+                    available_version = Some(release.to_string());
+                    message = if signing_configured {
+                        format!("Update available: {}", release)
+                    } else {
+                        format!(
+                            "Release {} is published — run signer:generate and set pubkey to install",
+                            release
+                        )
+                    };
+                } else {
+                    message = "You're up to date".to_string();
+                }
+            }
+        }
+    }
+
+    UpdatePreflight {
+        signing_configured,
+        endpoint,
+        http_status: Some(status),
+        reachable: true,
+        message,
+        update_available,
+        available_version,
+    }
+}
+
 #[tauri::command]
 pub fn update_preflight(app: AppHandle) -> Result<UpdatePreflight, String> {
     let (pubkey, endpoint) = updater_config(&app);
     let signing_configured = !pubkey.is_empty();
+    let current_version = app
+        .config()
+        .version
+        .as_deref()
+        .unwrap_or("0.0.0");
 
     if endpoint.is_empty() {
         return Ok(UpdatePreflight {
@@ -465,6 +521,8 @@ pub fn update_preflight(app: AppHandle) -> Result<UpdatePreflight, String> {
             http_status: None,
             reachable: false,
             message: "No update endpoint configured in tauri.conf.json".to_string(),
+            update_available: false,
+            available_version: None,
         });
     }
 
@@ -476,27 +534,33 @@ pub fn update_preflight(app: AppHandle) -> Result<UpdatePreflight, String> {
     match response {
         Ok(resp) => {
             let status = resp.status();
-            Ok(UpdatePreflight {
+            let body = resp.into_string().unwrap_or_default();
+            Ok(finish_update_preflight(
                 signing_configured,
                 endpoint,
-                http_status: Some(status),
-                reachable: true,
-                message: update_preflight_message(signing_configured, status),
-            })
+                status,
+                &body,
+                &current_version,
+            ))
         }
-        Err(ureq::Error::Status(code, _)) => Ok(UpdatePreflight {
-            signing_configured,
-            endpoint,
-            http_status: Some(code),
-            reachable: true,
-            message: update_preflight_message(signing_configured, code),
-        }),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Ok(finish_update_preflight(
+                signing_configured,
+                endpoint,
+                code,
+                &body,
+                &current_version,
+            ))
+        }
         Err(e) => Ok(UpdatePreflight {
             signing_configured,
             endpoint,
             http_status: None,
             reachable: false,
             message: format!("Could not reach release server: {}", e),
+            update_available: false,
+            available_version: None,
         }),
     }
 }

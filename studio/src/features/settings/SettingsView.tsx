@@ -235,19 +235,25 @@ export function SettingsView({
           </div>
         </div>
         <p className="file-result">{updateNote}</p>
-        {signingConfigured ? (
+        {import.meta.env.DEV ? (
+          <p className="hint">
+            Dev mode checks the release feed but cannot install updates — use the NSIS installer from{" "}
+            <a href="https://github.com/rjreny/studio/releases" target="_blank" rel="noreferrer">
+              GitHub Releases
+            </a>
+            , then Update works in the installed app.
+          </p>
+        ) : (
           <p className="hint">
             Updates download only when you click Update. Studio shows progress here, then restarts
             once the installer finishes.
           </p>
-        ) : (
-          <p className="hint">
-            This is normal for a local dev build. To enable signed auto-updates: run{" "}
-            <code>npm run signer:generate</code> in <code>studio/</code>, copy the public key into{" "}
-            <code>src-tauri/tauri.conf.json</code> (<code>plugins.updater.pubkey</code>), set your
-            GitHub releases URL in <code>endpoints</code>, and tag a release (<code>v*</code>).
-          </p>
         )}
+        {!signingConfigured && !import.meta.env.DEV ? (
+          <p className="hint">
+            Signing is not configured in this build. Reinstall from a signed GitHub release.
+          </p>
+        ) : null}
       </section>
       <UpdateOverlay
         open={updateOpen}

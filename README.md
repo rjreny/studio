@@ -22,4 +22,16 @@ NSIS installs per-user. Push a `v*` tag to cut a signed NSIS installer and `late
 
 Repo: https://github.com/rjreny/studio
 
+**Auto-update requires a public repo** (or a public mirror of `latest.json`). Private repos return 404 to the app.
+
+```powershell
+gh repo edit rjreny/studio --visibility public --accept-visibility-change-consequences
+```
+
+Set the CI signing secret (PowerShell — `gh` has no `--body-file`):
+
+```powershell
+Get-Content -Raw studio\.tauri\studio-updater.key | gh secret set TAURI_SIGNING_PRIVATE_KEY --repo rjreny/studio
+```
+
 Features must not import `@tauri-apps/*`. Use `src/platform`. `npm run lint` enforces that.
