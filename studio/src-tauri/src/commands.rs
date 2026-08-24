@@ -548,6 +548,30 @@ fn normalize_version(version: &str) -> String {
     version.trim().trim_start_matches('v').to_string()
 }
 
+fn version_parts(version: &str) -> Vec<u32> {
+    normalize_version(version)
+        .split('.')
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let a = version_parts(candidate);
+    let b = version_parts(current);
+    let len = a.len().max(b.len());
+    for idx in 0..len {
+        let av = a.get(idx).copied().unwrap_or(0);
+        let bv = b.get(idx).copied().unwrap_or(0);
+        if av > bv {
+            return true;
+        }
+        if av < bv {
+            return false;
+        }
+    }
+    false
+}
+
 fn finish_update_preflight(
     signing_configured: bool,
     endpoint: String,
@@ -564,7 +588,7 @@ fn finish_update_preflight(
             if let Some(release) = json.get("version").and_then(|v| v.as_str()) {
                 let current = normalize_version(current_version);
                 let release_norm = normalize_version(release);
-                if release_norm != current {
+                if version_is_newer(&release_norm, &current) {
                     update_available = true;
                     available_version = Some(release.to_string());
                     message = if signing_configured {
