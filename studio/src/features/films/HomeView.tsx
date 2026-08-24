@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { isHighQualityBanner } from "../../core/images";
 import { getFilm } from "../../platform/filmLibrary";
 import type { FilmDetail, HomeViewModel, LibraryItem } from "../../platform/types/film";
 import { FilmCard } from "./FilmCard";
@@ -6,7 +7,8 @@ import { RatingDisplay } from "./RatingDisplay";
 import { Shelf } from "./Shelf";
 
 function heroSrc(film: LibraryItem, detail: FilmDetail | null) {
-  return detail?.backdrop || film.backdrop || detail?.poster || film.poster || null;
+  const banner = detail?.backdrop || film.backdrop;
+  return isHighQualityBanner(banner) ? banner : null;
 }
 
 function trimOverview(text: string | null | undefined) {
@@ -35,7 +37,11 @@ export function HomeView({
   onOpenFriends: () => void;
   onSelectFilm: (id: string) => void;
 }) {
-  const slides = useMemo(() => home?.recent.slice(0, 6) ?? [], [home]);
+  const slides = useMemo(() => {
+    const recent = home?.recent ?? [];
+    const banners = recent.filter((film) => isHighQualityBanner(film.backdrop));
+    return (banners.length ? banners : recent).slice(0, 6);
+  }, [home]);
   const [index, setIndex] = useState(0);
   const [detail, setDetail] = useState<FilmDetail | null>(null);
   const featured = slides[index] ?? home?.topRated[0] ?? null;
@@ -77,7 +83,8 @@ export function HomeView({
   }
 
   const image = featured ? heroSrc(featured, detail) : null;
-  const castLine = detail?.cast.slice(0, 3).join("  ").toUpperCase() ?? "";
+  const castLine =
+    (detail?.directors?.length ? detail.directors : detail?.cast ?? []).slice(0, 3).join("  ").toUpperCase();
   const overview = trimOverview(detail?.overview || featured?.overview);
   const runtime = runtimeLabel(detail?.runtime);
   const genre = detail?.genres[0];

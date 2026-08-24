@@ -32,7 +32,7 @@ const GENRES: Record<number, string> = {
 export function posterUrl(path: string | null | undefined): string | null {
   if (!path) return null;
   if (path.startsWith("http")) return path;
-  return `https://image.tmdb.org/t/p/w342${path}`;
+  return `https://image.tmdb.org/t/p/w780${path}`;
 }
 
 export function genreNames(ids: number[] | undefined): string[] {

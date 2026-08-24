@@ -1,11 +1,12 @@
-use crate::letterboxd::posters::poster_from_rss_body;
+use crate::catalog::tmdb::library_item_from_tmdb_value;
+use crate::letterboxd::posters::{backdrop_url, poster_from_rss_body, poster_url};
 use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::{
-    FilmDetail, FriendActivityItem, HomeViewModel, LibraryCoverage, LibraryItem, LibraryPage,
+    FilmDetail, FriendActivityItem, HomeViewModel, LibraryItem, LibraryPage,
     LibraryQuery, ViewingHistoryItem,
 };
 use crate::storage::db::Database;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 use serde_json;
 
 const FILM_KEY: &str =
@@ -154,22 +155,8 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
     })
 }
 
-fn poster_url(path: Option<String>) -> Option<String> {
-    tmdb_image_url(path, "w500")
-}
-
-fn backdrop_url(path: Option<String>) -> Option<String> {
-    tmdb_image_url(path, "w1280")
-}
-
-fn tmdb_image_url(path: Option<String>, size: &str) -> Option<String> {
-    path.filter(|p| !p.is_empty()).map(|p| {
-        if p.starts_with("http") {
-            p
-        } else {
-            format!("https://image.tmdb.org/t/p/{size}{p}")
-        }
-    })
+pub fn parse_tmdb_ref(id: &str) -> Option<i64> {
+    id.strip_prefix("tmdb:")?.parse().ok().filter(|n| *n > 0)
 }
 
 fn map_library_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
@@ -198,12 +185,42 @@ fn parse_raw_title(raw: &str) -> String {
 }
 
 pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
+    if let Some(detail) = get_library_film(db, id)? {
+        return Ok(detail);
+    }
+    get_catalog_film(db, id)?.ok_or_else(|| "Film not found".to_string())
+}
+
+pub fn resolve_source_movie_ids(db: &Database, id: &str) -> Result<Vec<String>, String> {
+    let mut stmt = db
+        .conn()
+        .prepare(
+            r#"
+            SELECT smr.id
+            FROM source_movie_records smr
+            LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+            LEFT JOIN movies m ON m.id = ml.movie_id
+            WHERE smr.id = ?1
+               OR ml.movie_id = ?1
+               OR (smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')) = ?1
+               OR CAST(m.tmdb_id AS TEXT) = ?1
+               OR ('tmdb:' || CAST(m.tmdb_id AS TEXT)) = ?1
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![id], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, String> {
     let row = db
         .conn()
         .query_row(
             r#"
             SELECT
-              COALESCE(ml.movie_id, smr.id),
+              COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')),
               COALESCE(m.canonical_title, smr.raw_identity),
               COALESCE(m.release_year, smr.release_year),
               ums.current_rating,
@@ -214,18 +231,26 @@ pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
               m.genres_json,
               COALESCE(ml.match_state, 'unmatched'),
               smr.source_type,
-              smr.raw_identity,
               m.vote_average,
               m.vote_count,
               m.reviews_json,
               m.cast_json,
               m.crew_json,
-              m.similar_json
+              m.similar_json,
+              m.tmdb_id,
+              m.tagline,
+              m.collection_name,
+              m.collection_json
             FROM source_movie_records smr
             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             LEFT JOIN movies m ON m.id = ml.movie_id
             LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
-            WHERE smr.id = ?1 OR ml.movie_id = ?1
+            WHERE smr.id = ?1
+               OR ml.movie_id = ?1
+               OR (smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')) = ?1
+               OR CAST(m.tmdb_id AS TEXT) = ?1
+               OR ('tmdb:' || CAST(m.tmdb_id AS TEXT)) = ?1
+            ORDER BY CASE WHEN ml.match_state = 'confirmed' THEN 0 ELSE 1 END, ums.last_watched_at DESC
             LIMIT 1
             "#,
             params![id],
@@ -242,10 +267,95 @@ pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, Option<f64>>(12)?,
-                    row.get::<_, Option<i32>>(13)?,
+                    row.get::<_, Option<f64>>(11)?,
+                    row.get::<_, Option<i32>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<i64>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let source_ids = resolve_source_movie_ids(db, id)?;
+    let title = parse_raw_title(&row.1);
+    let your_history = viewing_history(db, &source_ids)?;
+    let crew = json_vec(row.15.as_deref());
+    let similar = relink_catalog_items(db, parse_related(row.16.as_deref()));
+    let collection = relink_catalog_items(db, parse_related(row.20.as_deref()));
+
+    Ok(Some(FilmDetail {
+        id: row.0,
+        title: title.clone(),
+        year: row.2,
+        current_rating: row.3,
+        poster: poster_url(row.4.clone()),
+        backdrop: backdrop_url(row.5.clone()),
+        overview: row.6,
+        runtime: row.7,
+        genres: json_vec(row.8.as_deref()),
+        match_state: row.9,
+        source_identity: row.10,
+        your_history,
+        friends: get_friend_activity_for_movie(db, &title, row.2)?,
+        tmdb_id: row.17,
+        tmdb_vote_average: row.11,
+        tmdb_vote_count: row.12,
+        tmdb_reviews: json_vec(row.13.as_deref()),
+        tagline: row.18.filter(|s| !s.is_empty()),
+        directors: directors_from_crew(&crew),
+        cast: json_vec(row.14.as_deref()),
+        crew,
+        collection_name: row.19.filter(|s| !s.is_empty()),
+        collection,
+        similar,
+        collection_hydrated: row.20.is_some(),
+    }))
+}
+
+fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, String> {
+    let tmdb_id = parse_tmdb_ref(id);
+    let row = db
+        .conn()
+        .query_row(
+            r#"
+            SELECT id, canonical_title, release_year, poster_path, backdrop_path, overview, runtime,
+                   genres_json, vote_average, vote_count, reviews_json, cast_json, crew_json,
+                   similar_json, tmdb_id, tagline, collection_name, collection_json
+            FROM movies
+            WHERE id = ?1
+               OR CAST(tmdb_id AS TEXT) = ?1
+               OR ('tmdb:' || CAST(tmdb_id AS TEXT)) = ?1
+            LIMIT 1
+            "#,
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i32>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i32>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<f64>>(8)?,
+                    row.get::<_, Option<i32>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<i64>>(14)?,
                     row.get::<_, Option<String>>(15)?,
                     row.get::<_, Option<String>>(16)?,
                     row.get::<_, Option<String>>(17)?,
@@ -253,33 +363,62 @@ pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
             },
         )
         .optional()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Film not found".to_string())?;
-
-    let smr_id: String = db
-        .conn()
-        .query_row(
-            "SELECT id FROM source_movie_records WHERE id = ?1
-             UNION SELECT source_movie_record_id FROM movie_links WHERE movie_id = ?1 LIMIT 1",
-            params![id, id],
-            |r| r.get(0),
-        )
         .map_err(|e| e.to_string())?;
 
-    let mut history_stmt = db
-        .conn()
-        .prepare(
-            "SELECT id, occurred_at, published_at, rewatch,
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let crew = json_vec(row.12.as_deref());
+    let catalog_id = tmdb_id
+        .or(row.14)
+        .map(|n| format!("tmdb:{n}"))
+        .unwrap_or(row.0);
+    Ok(Some(FilmDetail {
+        id: catalog_id,
+        title: row.1,
+        year: row.2,
+        current_rating: None,
+        poster: poster_url(row.3.clone()),
+        backdrop: backdrop_url(row.4.clone()),
+        overview: row.5,
+        runtime: row.6,
+        genres: json_vec(row.7.as_deref()),
+        match_state: "catalog".into(),
+        source_identity: "tmdb".into(),
+        your_history: Vec::new(),
+        friends: Vec::new(),
+        tmdb_id: row.14,
+        tmdb_vote_average: row.8,
+        tmdb_vote_count: row.9,
+        tmdb_reviews: json_vec(row.10.as_deref()),
+        tagline: row.15.filter(|s| !s.is_empty()),
+        directors: directors_from_crew(&crew),
+        cast: json_vec(row.11.as_deref()),
+        crew,
+        collection_name: row.16.filter(|s| !s.is_empty()),
+        collection: parse_related(row.17.as_deref()),
+        similar: parse_related(row.13.as_deref()),
+        collection_hydrated: row.17.is_some(),
+    }))
+}
+
+fn viewing_history(db: &Database, source_ids: &[String]) -> Result<Vec<ViewingHistoryItem>, String> {
+    if source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks = source_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id, occurred_at, published_at, rewatch,
               (SELECT rating FROM rating_events re WHERE re.source_movie_record_id = v.source_movie_record_id
                AND COALESCE(re.occurred_at, re.observed_at) = COALESCE(v.occurred_at, v.observed_at) LIMIT 1),
               source_type
-             FROM viewings v WHERE v.source_movie_record_id = ?1
-             ORDER BY COALESCE(occurred_at, observed_at) DESC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let your_history = history_stmt
-        .query_map(params![smr_id], |row| {
+         FROM viewings v WHERE v.source_movie_record_id IN ({marks})
+         ORDER BY COALESCE(occurred_at, observed_at) DESC"
+    );
+    let mut stmt = db.conn().prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(source_ids.iter()), |row| {
             Ok(ViewingHistoryItem {
                 id: row.get(0)?,
                 occurred_at: row.get(1)?,
@@ -289,41 +428,65 @@ pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
                 source: row.get(5)?,
             })
         })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
 
-    let genres = json_vec(row.8.as_deref());
-    let tmdb_reviews = json_vec(row.14.as_deref());
-    let cast = json_vec(row.15.as_deref());
-    let crew = json_vec(row.16.as_deref());
-    let similar: Vec<LibraryItem> = row
-        .17
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+fn directors_from_crew(crew: &[String]) -> Vec<String> {
+    crew.iter()
+        .filter_map(|entry| entry.strip_suffix(" (Director)").map(str::to_string))
+        .collect()
+}
 
-    Ok(FilmDetail {
-        id: row.0,
-        title: parse_raw_title(&row.1),
-        year: row.2,
-        current_rating: row.3,
-        poster: poster_url(row.4.clone()),
-        backdrop: backdrop_url(row.5.clone()),
-        overview: row.6,
-        runtime: row.7,
-        genres,
-        match_state: row.9,
-        source_identity: row.10,
-        your_history,
-        friends: get_friend_activity_for_movie(db, &parse_raw_title(&row.1), row.2)?,
-        tmdb_vote_average: row.12,
-        tmdb_vote_count: row.13,
-        tmdb_reviews,
-        cast,
-        crew,
-        similar,
-    })
+fn parse_related(raw: Option<&str>) -> Vec<LibraryItem> {
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return Vec::new();
+    };
+    if let Ok(items) = serde_json::from_str::<Vec<LibraryItem>>(raw) {
+        if items.iter().any(|item| !item.title.is_empty()) {
+            return items;
+        }
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
+        .ok()
+        .map(|vals| {
+            vals.iter()
+                .filter_map(library_item_from_tmdb_value)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn relink_catalog_items(db: &Database, items: Vec<LibraryItem>) -> Vec<LibraryItem> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            if let Some(tmdb_id) = parse_tmdb_ref(&item.id) {
+                if let Ok(Some(key)) = library_key_for_tmdb(db, tmdb_id) {
+                    item.id = key;
+                }
+            }
+            item
+        })
+        .collect()
+}
+
+fn library_key_for_tmdb(db: &Database, tmdb_id: i64) -> Result<Option<String>, String> {
+    db.conn()
+        .query_row(
+            &format!(
+                "SELECT {FILM_KEY}
+                 FROM source_movie_records smr
+                 JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+                 JOIN movies m ON m.id = ml.movie_id
+                 WHERE m.tmdb_id = ?1
+                 LIMIT 1"
+            ),
+            params![tmdb_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
 }
 
 fn json_vec(raw: Option<&str>) -> Vec<String> {
@@ -343,7 +506,7 @@ fn get_friend_activity_for_movie(
             SELECT f.username, fa.raw_payload, fa.rating, fa.review, fa.watched_at, fa.published_at
             FROM friend_activity fa
             JOIN friends f ON f.id = fa.friend_id
-            WHERE fa.raw_payload LIKE ?1
+            WHERE LOWER(fa.raw_payload) LIKE ?1
             ORDER BY COALESCE(fa.watched_at, fa.published_at) DESC
             LIMIT 20
             "#,
@@ -374,7 +537,7 @@ pub fn get_home(db: &Database) -> Result<HomeViewModel, String> {
             search: None,
             sort: Some("recent".into()),
             filter: None,
-            limit: Some(12),
+            limit: Some(36),
             offset: Some(0),
         },
     )?;
@@ -528,5 +691,130 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].viewing_count, 2);
+    }
+
+    #[test]
+    fn get_film_opens_matched_library_id() {
+        use crate::letterboxd::import::upsert_source_movie;
+        use crate::letterboxd::posters::SourceMovieMeta;
+        use rusqlite::params;
+        use uuid::Uuid;
+
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        let movie_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO movies (id, canonical_title, release_year, tmdb_id, poster_path, backdrop_path, similar_json, collection_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                movie_id,
+                "Ant-Man",
+                2015,
+                102899,
+                "/poster.jpg",
+                "/backdrop.jpg",
+                r#"[{"id":27205,"title":"Inception","release_date":"2010-07-16","poster_path":"/inception.jpg"}]"#,
+                "[]"
+            ],
+        )
+        .expect("movie");
+        let smr = upsert_source_movie(
+            &tx,
+            "letterboxd_export",
+            "export|ant-man",
+            "Ant-Man",
+            Some(2015),
+            "https://letterboxd.com/film/ant-man/",
+            &SourceMovieMeta::default(),
+        )
+        .expect("smr");
+        tx.execute(
+            "UPDATE movie_links SET movie_id = ?2, match_state = 'confirmed' WHERE source_movie_record_id = ?1",
+            params![smr, movie_id],
+        )
+        .expect("link");
+        tx.execute(
+            "INSERT INTO viewings (
+              id, source_movie_record_id, source_record_key, observed_at, source_type, rewatch
+            ) VALUES (?1, ?2, ?3, ?4, 'letterboxd_export', 0)",
+            params![
+                Uuid::new_v4().to_string(),
+                smr,
+                format!("viewing-{smr}"),
+                "2024-01-01T00:00:00Z"
+            ],
+        )
+        .expect("viewing");
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        let page = get_library(
+            &db,
+            &LibraryQuery {
+                search: None,
+                sort: None,
+                filter: None,
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .expect("library");
+        assert_eq!(page.items.len(), 1);
+        let detail = get_film(&db, &page.items[0].id).expect("film");
+        assert_eq!(detail.title, "Ant-Man");
+        assert!(detail.backdrop.unwrap().contains("/original/"));
+        assert_eq!(detail.similar.len(), 1);
+        assert_eq!(detail.similar[0].title, "Inception");
+    }
+
+    #[test]
+    fn get_film_opens_unmatched_title_year_key() {
+        use crate::letterboxd::import::upsert_source_movie;
+        use crate::letterboxd::posters::SourceMovieMeta;
+        use rusqlite::params;
+        use uuid::Uuid;
+
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        let smr = upsert_source_movie(
+            &tx,
+            "letterboxd_export",
+            "export|mystery",
+            "Mystery Film",
+            Some(1999),
+            "https://letterboxd.com/film/mystery-film/",
+            &SourceMovieMeta::default(),
+        )
+        .expect("smr");
+        tx.execute(
+            "INSERT INTO viewings (
+              id, source_movie_record_id, source_record_key, observed_at, source_type, rewatch
+            ) VALUES (?1, ?2, ?3, ?4, 'letterboxd_export', 0)",
+            params![
+                Uuid::new_v4().to_string(),
+                smr,
+                format!("viewing-{smr}"),
+                "2024-01-01T00:00:00Z"
+            ],
+        )
+        .expect("viewing");
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        let page = get_library(
+            &db,
+            &LibraryQuery {
+                search: None,
+                sort: None,
+                filter: None,
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .expect("library");
+        assert_eq!(page.items[0].id.contains(':'), true);
+        let detail = get_film(&db, &page.items[0].id).expect("unmatched film");
+        assert_eq!(detail.title, "Mystery Film");
+        assert_eq!(detail.your_history.len(), 1);
     }
 }

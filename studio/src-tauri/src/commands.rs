@@ -8,7 +8,7 @@ use crate::models::{
     ImportResult, ImportSummary, InstallInfo, JobProgress, LegacyLibrary, LibraryCoverage,
     LibraryPage, LibraryQuery, MigrationResult, SetRatingInput, SyncResult, TmdbKeyStatus,
 };
-use crate::queries::{get_film, get_friend_feed, get_home, get_library};
+use crate::queries::{get_film, get_home, get_library, parse_tmdb_ref, resolve_source_movie_ids};
 use crate::storage::db::Database;
 use chrono::Utc;
 use rusqlite::params;
@@ -146,8 +146,34 @@ pub fn library_get(query: LibraryQuery, state: State<'_, AppState>) -> Result<Li
 
 #[tauri::command]
 pub fn film_get(id: String, state: State<'_, AppState>) -> Result<FilmDetail, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    get_film(&db, &id)
+    let detail = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        get_film(&db, &id)
+    };
+
+    match detail {
+        Ok(d) if d.tmdb_id.is_some() && !d.collection_hydrated => {
+            if let Some(tmdb_id) = d.tmdb_id {
+                if let Ok(worker) = crate::jobs::open_worker_db(&state.db_path) {
+                    let _ = tmdb::refresh_movie_catalog(&worker, tmdb_id, true);
+                }
+            }
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            Ok(get_film(&db, &id).unwrap_or(d))
+        }
+        Ok(d) => Ok(d),
+        Err(err) => {
+            if let Some(tmdb_id) = parse_tmdb_ref(&id) {
+                if let Ok(worker) = crate::jobs::open_worker_db(&state.db_path) {
+                    if tmdb::refresh_movie_catalog(&worker, tmdb_id, true).is_ok() {
+                        let db = state.db.lock().map_err(|e| e.to_string())?;
+                        return get_film(&db, &id);
+                    }
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -512,15 +538,10 @@ pub fn film_set_rating(
 ) -> Result<FilmDetail, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
-    let smr_id: String = db
-        .conn()
-        .query_row(
-            "SELECT id FROM source_movie_records WHERE id = ?1
-             UNION SELECT source_movie_record_id FROM movie_links WHERE movie_id = ?1 LIMIT 1",
-            params![input.id, input.id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let smr_id: String = resolve_source_movie_ids(&db, &input.id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Film not found".to_string())?;
     let rating_key = format!("manual|{smr_id}|{now}");
     db.conn()
         .execute(

@@ -72,6 +72,15 @@ impl Database {
                 [],
             );
         }
+        if version < 3 {
+            let _ = self.conn.execute("ALTER TABLE movies ADD COLUMN tagline TEXT", []);
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN collection_name TEXT", []);
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN collection_json TEXT", []);
+        }
         Ok(())
     }
 
@@ -308,7 +317,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("2".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("3".into()));
     }
 
     #[test]

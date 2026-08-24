@@ -142,13 +142,47 @@ pub struct LibraryItem {
     pub backdrop: Option<String>,
     #[serde(default)]
     pub overview: Option<String>,
+    #[serde(default)]
     pub watched: bool,
+    #[serde(default)]
     pub watchlist: bool,
+    #[serde(default)]
     pub liked: bool,
+    #[serde(default)]
     pub viewing_count: u32,
+    #[serde(default)]
     pub match_state: String,
+    #[serde(default)]
     pub source_type: String,
     pub last_watched_at: Option<String>,
+}
+
+impl LibraryItem {
+    pub fn catalog(
+        id: String,
+        title: String,
+        year: Option<i32>,
+        poster: Option<String>,
+        backdrop: Option<String>,
+        overview: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            year,
+            current_rating: None,
+            poster,
+            backdrop,
+            overview,
+            watched: false,
+            watchlist: false,
+            liked: false,
+            viewing_count: 0,
+            match_state: "catalog".into(),
+            source_type: "tmdb".into(),
+            last_watched_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,12 +233,19 @@ pub struct FilmDetail {
     pub source_identity: String,
     pub your_history: Vec<ViewingHistoryItem>,
     pub friends: Vec<FriendActivityItem>,
+    pub tmdb_id: Option<i64>,
     pub tmdb_vote_average: Option<f64>,
     pub tmdb_vote_count: Option<i32>,
     pub tmdb_reviews: Vec<String>,
+    pub tagline: Option<String>,
+    pub directors: Vec<String>,
     pub cast: Vec<String>,
     pub crew: Vec<String>,
+    pub collection_name: Option<String>,
+    pub collection: Vec<LibraryItem>,
     pub similar: Vec<LibraryItem>,
+    #[serde(skip)]
+    pub collection_hydrated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

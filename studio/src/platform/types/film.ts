@@ -116,11 +116,16 @@ export type FilmDetail = {
   sourceIdentity: string;
   yourHistory: ViewingHistoryItem[];
   friends: FriendActivityItem[];
+  tmdbId?: number | null;
   tmdbVoteAverage: number | null;
   tmdbVoteCount: number | null;
   tmdbReviews: string[];
+  tagline?: string | null;
+  directors?: string[];
   cast: string[];
   crew: string[];
+  collectionName?: string | null;
+  collection?: LibraryItem[];
   similar: LibraryItem[];
 };
 

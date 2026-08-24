@@ -256,6 +256,7 @@ export default function App() {
                 onBack={() => setSelectedFilmId(null)}
                 onUpdated={refresh}
                 onStatus={setStatus}
+                onSelectFilm={setSelectedFilmId}
               />
             ) : (
               <>

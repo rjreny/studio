@@ -35,11 +35,97 @@ fn extract_attr(tag: &str, name: &str) -> Option<String> {
 }
 
 pub fn full_poster_url(path: &str) -> String {
-    if path.starts_with("http") {
-        path.to_string()
-    } else {
-        format!("https://image.tmdb.org/t/p/w500{path}")
+    poster_url(Some(path.to_string())).unwrap_or_default()
+}
+
+pub fn poster_url(path: Option<String>) -> Option<String> {
+    tmdb_image_url(path, "w780")
+}
+
+pub fn backdrop_url(path: Option<String>) -> Option<String> {
+    tmdb_image_url(path, "original")
+}
+
+pub fn is_banner_quality(url: &str) -> bool {
+    if url.contains("image.tmdb.org/t/p/original")
+        || url.contains("image.tmdb.org/t/p/w1280")
+        || url.contains("image.tmdb.org/t/p/w1920")
+    {
+        return true;
     }
+    if url.contains("ltrbxd.com") && url.contains("/sm/upload/") {
+        return letterboxd_crop_width(url).unwrap_or(0) >= 1000;
+    }
+    false
+}
+
+pub fn tmdb_image_url(path: Option<String>, size: &str) -> Option<String> {
+    path.filter(|p| !p.is_empty()).map(|p| {
+        if p.starts_with("http") {
+            upgrade_remote_image(&p, size == "original")
+        } else {
+            let p = if p.starts_with('/') {
+                p
+            } else {
+                format!("/{p}")
+            };
+            format!("https://image.tmdb.org/t/p/{size}{p}")
+        }
+    })
+}
+
+pub fn upgrade_remote_image(url: &str, for_banner: bool) -> String {
+    let mut out = url.to_string();
+    if out.contains("image.tmdb.org/t/p/") {
+        let target = if for_banner { "original" } else { "w780" };
+        for size in [
+            "w92", "w154", "w185", "w342", "w500", "w300", "w780", "w1280",
+        ] {
+            let from = format!("/t/p/{size}");
+            if !out.contains(&from) {
+                continue;
+            }
+            if !for_banner && (size == "w780" || size == "w1280") {
+                break;
+            }
+            out = out.replace(&from, &format!("/t/p/{target}"));
+            break;
+        }
+        return out;
+    }
+    if out.contains("ltrbxd.com") {
+        return upgrade_letterboxd_resized(&out, for_banner);
+    }
+    out
+}
+
+fn upgrade_letterboxd_resized(url: &str, for_banner: bool) -> String {
+    let target = if for_banner {
+        "-0-2000-0-3000-crop"
+    } else {
+        "-0-1000-0-1500-crop"
+    };
+    for crop in [
+        "-0-70-0-105-crop",
+        "-0-150-0-225-crop",
+        "-0-230-0-345-crop",
+        "-0-250-0-375-crop",
+        "-0-500-0-750-crop",
+        "-0-600-0-900-crop",
+    ] {
+        if url.contains(crop) {
+            return url.replace(crop, target);
+        }
+    }
+    url.to_string()
+}
+
+fn letterboxd_crop_width(url: &str) -> Option<u32> {
+    let marker = "-0-";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let end = rest.find('-')?;
+    rest[..end].parse().ok()
 }
 
 pub fn letterboxd_oembed_poster(uri: &str) -> Result<Option<String>, String> {
@@ -71,7 +157,7 @@ pub fn letterboxd_oembed_poster(uri: &str) -> Result<Option<String>, String> {
                 return Ok(v["thumbnail_url"]
                     .as_str()
                     .filter(|s| !s.is_empty())
-                    .map(String::from));
+                    .map(|s| upgrade_remote_image(s, false)));
             }
             Err(ureq::Error::Status(code, _)) if code == 404 => return Ok(None),
             Err(err) => last_err = Some(err.to_string()),
@@ -326,5 +412,29 @@ mod tests {
     #[test]
     fn percent_encodes_utf8_bytes() {
         assert_eq!(percent_encode("Amélie"), "Am%C3%A9lie");
+    }
+
+    #[test]
+    fn upgrades_small_tmdb_and_letterboxd_urls() {
+        assert_eq!(
+            upgrade_remote_image(
+                "https://image.tmdb.org/t/p/w342/abc.jpg",
+                true
+            ),
+            "https://image.tmdb.org/t/p/original/abc.jpg"
+        );
+        assert_eq!(
+            upgrade_remote_image(
+                "https://a.ltrbxd.com/resized/film-poster/1/2/3/inception-0-230-0-345-crop.jpg",
+                false
+            ),
+            "https://a.ltrbxd.com/resized/film-poster/1/2/3/inception-0-1000-0-1500-crop.jpg"
+        );
+        assert!(is_banner_quality(
+            "https://image.tmdb.org/t/p/original/backdrop.jpg"
+        ));
+        assert!(!is_banner_quality(
+            "https://a.ltrbxd.com/resized/film-poster/1/2/3/inception-0-230-0-345-crop.jpg"
+        ));
     }
 }

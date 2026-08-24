@@ -1,6 +1,8 @@
 use crate::letterboxd::normalize::{normalize_title, parse_year};
-use crate::letterboxd::posters::{backfill_letterboxd_posters, cache_poster_for_siblings, full_poster_url};
-use crate::models::{EnrichReport, JobProgress, TmdbKeyStatus};
+use crate::letterboxd::posters::{
+    backfill_letterboxd_posters, backdrop_url, cache_poster_for_siblings, full_poster_url, poster_url,
+};
+use crate::models::{EnrichReport, JobProgress, LibraryItem, TmdbKeyStatus};
 use crate::storage::db::Database;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -530,20 +532,33 @@ fn release_year(result: &TmdbSearchResult) -> Option<i32> {
 }
 
 fn upsert_tmdb_movie(db: &Database, tmdb_id: i64) -> Result<String, String> {
-    if let Some(existing) = db
-        .conn()
-        .query_row(
-            "SELECT id, COALESCE(poster_path, '') FROM movies WHERE tmdb_id = ?1",
-            params![tmdb_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?
-    {
-        if !existing.1.is_empty() {
-            return Ok(existing.0);
+    refresh_movie_catalog(db, tmdb_id, false)
+}
+
+pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result<String, String> {
+    if !force {
+        if let Some((existing_id, poster, collection_json)) = db
+            .conn()
+            .query_row(
+                "SELECT id, COALESCE(poster_path, ''), collection_json FROM movies WHERE tmdb_id = ?1",
+                params![tmdb_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        {
+            if !poster.is_empty() && collection_json.is_some() {
+                return Ok(existing_id);
+            }
         }
     }
+
     let api_key = get_api_key()?.ok_or("missing api key")?;
     let path = format!(
         "/movie/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar"
@@ -556,67 +571,97 @@ fn upsert_tmdb_movie(db: &Database, tmdb_id: i64) -> Result<String, String> {
         .and_then(|d| d.get(0..4))
         .and_then(parse_year);
     let poster = v["poster_path"].as_str().unwrap_or("").to_string();
-
-    if let Some((existing_id, _)) = db
+    let tagline = v["tagline"].as_str().map(str::to_string).filter(|s| !s.is_empty());
+    let (collection_name, collection_items) = collection_from_movie(&api_key, &v);
+    let similar = related_items(&v);
+    let existing_id: Option<String> = db
         .conn()
         .query_row(
-            "SELECT id, COALESCE(poster_path, '') FROM movies WHERE tmdb_id = ?1",
+            "SELECT id FROM movies WHERE tmdb_id = ?1",
             params![tmdb_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get(0),
         )
         .optional()
-        .map_err(|e| e.to_string())?
-    {
+        .map_err(|e| e.to_string())?;
+
+    let id = existing_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let poster_store = if poster.is_empty() {
+        None::<String>
+    } else {
+        Some(poster)
+    };
+    let backdrop = v["backdrop_path"].as_str().map(str::to_string);
+    let overview = v["overview"].as_str().map(str::to_string);
+    let runtime = v["runtime"].as_i64();
+    let vote_average = v["vote_average"].as_f64();
+    let vote_count = v["vote_count"].as_i64();
+    let genres = serde_json::to_string(&genre_names(&v)).unwrap_or_else(|_| "[]".into());
+    let cast = serde_json::to_string(&cast_names(&v)).unwrap_or_else(|_| "[]".into());
+    let crew = serde_json::to_string(&crew_names(&v)).unwrap_or_else(|_| "[]".into());
+    let similar_json = serde_json::to_string(&similar).unwrap_or_else(|_| "[]".into());
+    let reviews = serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into());
+    let collection_json =
+        serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
+
+    if existing_id.is_some() {
         db.conn()
             .execute(
-                "UPDATE movies SET canonical_title = ?2, release_year = ?3, poster_path = ?4,
-                 backdrop_path = ?5, overview = ?6, runtime = ?7, vote_average = ?8, vote_count = ?9,
-                 genres_json = ?10, cast_json = ?11, crew_json = ?12, similar_json = ?13,
-                 reviews_json = ?14, enriched_at = datetime('now')
+                "UPDATE movies SET canonical_title = ?2, release_year = ?3, tmdb_id = ?4, poster_path = ?5,
+                 backdrop_path = ?6, overview = ?7, runtime = ?8, vote_average = ?9, vote_count = ?10,
+                 genres_json = ?11, cast_json = ?12, crew_json = ?13, similar_json = ?14,
+                 reviews_json = ?15, tagline = ?16, collection_name = ?17, collection_json = ?18,
+                 enriched_at = datetime('now')
                  WHERE id = ?1",
                 params![
-                    existing_id,
+                    id,
                     title,
                     year,
-                    if poster.is_empty() { None::<String> } else { Some(poster.clone()) },
-                    v["backdrop_path"].as_str(),
-                    v["overview"].as_str(),
-                    v["runtime"].as_i64(),
-                    v["vote_average"].as_f64(),
-                    v["vote_count"].as_i64(),
-                    serde_json::to_string(&genre_names(&v)).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&cast_names(&v)).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&crew_names(&v)).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&similar_titles(&v)).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into()),
+                    tmdb_id,
+                    poster_store,
+                    backdrop,
+                    overview,
+                    runtime,
+                    vote_average,
+                    vote_count,
+                    genres,
+                    cast,
+                    crew,
+                    similar_json,
+                    reviews,
+                    tagline,
+                    collection_name,
+                    collection_json,
                 ],
             )
             .map_err(|e| e.to_string())?;
-        return Ok(existing_id);
+        return Ok(id);
     }
 
-    let id = Uuid::new_v4().to_string();
     db.conn()
         .execute(
             "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, poster_path, backdrop_path,
-             overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json, reviews_json, enriched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))",
+             overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json,
+             reviews_json, tagline, collection_name, collection_json, enriched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, datetime('now'))",
             params![
                 id,
                 title,
                 year,
                 tmdb_id,
-                if poster.is_empty() { None::<String> } else { Some(poster) },
-                v["backdrop_path"].as_str(),
-                v["overview"].as_str(),
-                v["runtime"].as_i64(),
-                v["vote_average"].as_f64(),
-                v["vote_count"].as_i64(),
-                serde_json::to_string(&genre_names(&v)).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&cast_names(&v)).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&crew_names(&v)).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&similar_titles(&v)).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into()),
+                poster_store,
+                backdrop,
+                overview,
+                runtime,
+                vote_average,
+                vote_count,
+                genres,
+                cast,
+                crew,
+                similar_json,
+                reviews,
+                tagline,
+                collection_name,
+                collection_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -668,8 +713,16 @@ fn cast_names(v: &serde_json::Value) -> Vec<String> {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .take(12)
-                .filter_map(|g| g["name"].as_str().map(String::from))
+                .take(16)
+                .filter_map(|g| {
+                    let name = g["name"].as_str()?;
+                    let character = g["character"].as_str().unwrap_or("").trim();
+                    if character.is_empty() {
+                        Some(name.to_string())
+                    } else {
+                        Some(format!("{name} as {character}"))
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -702,11 +755,69 @@ fn crew_names(v: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn similar_titles(v: &serde_json::Value) -> Vec<serde_json::Value> {
-    v["similar"]["results"]
+pub fn library_item_from_tmdb_value(v: &serde_json::Value) -> Option<LibraryItem> {
+    let tmdb_id = v["id"].as_i64()?;
+    let title = v
+        .get("title")
+        .or_else(|| v.get("name"))
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let year = v
+        .get("release_date")
+        .or_else(|| v.get("first_air_date"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.get(0..4))
+        .and_then(|y| y.parse().ok());
+    Some(LibraryItem::catalog(
+        format!("tmdb:{tmdb_id}"),
+        title,
+        year,
+        poster_url(v["poster_path"].as_str().map(str::to_string)),
+        backdrop_url(v["backdrop_path"].as_str().map(str::to_string)),
+        v["overview"].as_str().map(str::to_string),
+    ))
+}
+
+fn related_items(v: &serde_json::Value) -> Vec<LibraryItem> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for key in ["recommendations", "similar"] {
+        if let Some(arr) = v[key]["results"].as_array() {
+            for item in arr.iter().take(12) {
+                if let Some(lib) = library_item_from_tmdb_value(item) {
+                    if seen.insert(lib.id.clone()) {
+                        items.push(lib);
+                    }
+                }
+            }
+        }
+    }
+    items.into_iter().take(16).collect()
+}
+
+fn collection_from_movie(api_key: &str, v: &serde_json::Value) -> (Option<String>, Vec<LibraryItem>) {
+    let Some(col) = v.get("belongs_to_collection") else {
+        return (None, Vec::new());
+    };
+    if col.is_null() {
+        return (None, Vec::new());
+    }
+    let name = col["name"].as_str().map(str::to_string).filter(|s| !s.is_empty());
+    let Some(collection_id) = col["id"].as_i64() else {
+        return (name, Vec::new());
+    };
+    let Ok(body) = tmdb_get(api_key, &format!("/collection/{collection_id}")) else {
+        return (name, Vec::new());
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return (name, Vec::new());
+    };
+    let parts = parsed["parts"]
         .as_array()
-        .map(|arr| arr.iter().take(8).cloned().collect())
-        .unwrap_or_default()
+        .map(|arr| arr.iter().filter_map(library_item_from_tmdb_value).collect())
+        .unwrap_or_default();
+    (name, parts)
 }
 
 #[cfg(test)]
