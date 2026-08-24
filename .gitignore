@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+src-tauri/target/
+src-tauri/gen/
+**/*.exe
+.DS_Store
+.cursor/
+.tauri/
+**/.tauri/*.key

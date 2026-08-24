@@ -1,0 +1,290 @@
+import { useCallback, useEffect, useState } from "react";
+import { DevUpdateButton } from "./app/shell/DevUpdateButton";
+import { TitleBar } from "./app/shell/TitleBar";
+import { ConnectView } from "./features/films/ConnectView";
+import { FilmDetailView } from "./features/films/FilmDetailView";
+import { FilmsView } from "./features/films/FilmsView";
+import { FriendsView } from "./features/films/FriendsView";
+import { HomeView } from "./features/films/HomeView";
+import { RecsView } from "./features/films/RecsView";
+import { StatsView } from "./features/films/StatsView";
+import { SettingsView } from "./features/settings/SettingsView";
+import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type Theme } from "./core/types";
+import { appVersion } from "./platform/app";
+import {
+  formatCoverage,
+  getCoverage,
+  getHome,
+  migrateFromLegacy,
+  tmdbEnrich,
+  tmdbHasKey,
+} from "./platform/filmLibrary";
+import type { HomeViewModel, LibraryCoverage } from "./platform/types/film";
+import { log } from "./platform/log";
+import { getSetting, setSetting } from "./platform/settings";
+import { persistWindowBounds, restoreWindowBounds } from "./platform/window";
+import "./styles.css";
+import "./materials.css";
+
+const NAV: { id: Route; label: string }[] = [
+  { id: "home", label: "Home" },
+  { id: "films", label: "Films" },
+  { id: "friends", label: "Friends" },
+  { id: "stats", label: "Stats" },
+  { id: "recs", label: "Taste" },
+  { id: "settings", label: "Settings" },
+];
+
+export default function App() {
+  const [route, setRoute] = useState<Route>("home");
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [accent, setAccent] = useState<Accent>("app");
+  const [username, setUsername] = useState("");
+  const [coverage, setCoverage] = useState<LibraryCoverage | null>(null);
+  const [home, setHome] = useState<HomeViewModel | null>(null);
+  const [status, setStatus] = useState("Ready");
+  const [version, setVersion] = useState("…");
+  const [palette, setPalette] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [selectedFilmId, setSelectedFilmId] = useState<string | null>(null);
+  const [legacyLibrary, setLegacyLibrary] = useState<Library>(emptyLibrary);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [c, h] = await Promise.all([getCoverage(), getHome()]);
+      setCoverage(c);
+      setHome(h);
+    } catch (err) {
+      log("warn", "refresh failed", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolveTheme(theme);
+    document.documentElement.dataset.accent = accent;
+  }, [theme, accent]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [r, t, a, u, migrated, lib, v] = await Promise.all([
+          getSetting<Route>("route"),
+          getSetting<Theme>("theme"),
+          getSetting<Accent>("accent"),
+          getSetting<string>("username"),
+          getSetting<boolean>("sqlite_migrated"),
+          getSetting<Library>("library"),
+          appVersion().catch(() => "dev"),
+        ]);
+        if (r && NAV.some((n) => n.id === r)) setRoute(r);
+        if (t) setTheme(t);
+        if (a) setAccent(a);
+        if (u) setUsername(u);
+        if (lib) setLegacyLibrary({ ...emptyLibrary(), ...lib });
+        setVersion(v);
+        await restoreWindowBounds();
+
+        if (lib && !migrated && (lib.films?.length || lib.username)) {
+          try {
+            const result = await migrateFromLegacy(lib);
+            if (result.status === "completed") {
+              await setSetting("sqlite_migrated", true);
+              setStatus(`Migrated legacy library · ${result.validationResult}`);
+            }
+          } catch (err) {
+            log("warn", "legacy migration skipped", err);
+          }
+        }
+
+        await refresh();
+
+        void (async () => {
+          try {
+            const enriched = await tmdbEnrich();
+            if (enriched > 0) {
+              setStatus(`Loaded ${enriched} poster${enriched === 1 ? "" : "s"} from catalog`);
+              await refresh();
+            } else if (await tmdbHasKey()) {
+              setStatus("Matching films to TMDB — click Enrich again if posters are still missing");
+            }
+          } catch (err) {
+            log("warn", "poster enrich skipped", err);
+          }
+        })();
+
+        setHydrated(true);
+        log("info", "shell hydrated");
+      } catch (err) {
+        log("error", "hydrate failed", err);
+        setHydrated(true);
+      }
+    })();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    void setSetting("route", route);
+    void setSetting("theme", theme);
+    void setSetting("accent", accent);
+    void setSetting("username", username);
+  }, [route, theme, accent, username, hydrated]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void persistWindowBounds().then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    function onFocus() {
+      void refresh();
+    }
+    window.addEventListener("focus", onFocus);
+    const timer = window.setInterval(() => void refresh(), 60 * 60 * 1000);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
+
+  const closePalette = useCallback(() => setPalette(false), []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (selectedFilmId) {
+          setSelectedFilmId(null);
+          return;
+        }
+        if (palette) {
+          e.preventDefault();
+          closePalette();
+        }
+      }
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette(true);
+      }
+      if (meta && e.key === ",") {
+        e.preventDefault();
+        setRoute("settings");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [palette, closePalette, selectedFilmId]);
+
+  const connected = Boolean(coverage && (coverage.totalViewings > 0 || coverage.uniqueMovies > 0));
+  const title = selectedFilmId ? "Film" : "";
+
+  return (
+    <div className="app canvas-surface">
+      <TitleBar collapsed={false} title={title} />
+      <header className="top-nav glass">
+        <div className="shell top-nav-inner">
+          <nav className="top-nav-links" aria-label="Primary">
+            {NAV.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`top-nav-link${route === item.id && !selectedFilmId ? " is-active" : ""}`}
+                onClick={() => {
+                  setSelectedFilmId(null);
+                  setRoute(item.id);
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          {coverage ? (
+            <p className="coverage-chip" title={coverage.warnings.join("\n")}>
+              {formatCoverage(coverage)}
+            </p>
+          ) : null}
+        </div>
+      </header>
+      <main className="main-shell">
+        <div className={`shell main-content${!connected && route === "home" ? " is-connect" : ""}`}>
+          {!connected && route === "home" ? (
+            <ConnectView
+              username={username}
+              onUsername={setUsername}
+              onStatus={setStatus}
+              onConnected={refresh}
+            />
+          ) : selectedFilmId ? (
+            <FilmDetailView
+              filmId={selectedFilmId}
+              onBack={() => setSelectedFilmId(null)}
+              onUpdated={refresh}
+              onStatus={setStatus}
+            />
+          ) : (
+            <>
+              {route === "home" ? (
+                <HomeView
+                  home={home}
+                  onOpenFilms={() => setRoute("films")}
+                  onOpenFriends={() => setRoute("friends")}
+                  onSelectFilm={setSelectedFilmId}
+                />
+              ) : null}
+              {route === "films" ? (
+                <FilmsView onSelectFilm={setSelectedFilmId} onStatus={setStatus} />
+              ) : null}
+              {route === "friends" ? (
+                <FriendsView onStatus={setStatus} onRefresh={refresh} />
+              ) : null}
+              {route === "stats" ? <StatsView /> : null}
+              {route === "recs" ? <RecsView library={legacyLibrary} /> : null}
+              {route === "settings" ? (
+                <SettingsView
+                  theme={theme}
+                  accent={accent}
+                  version={version}
+                  username={username}
+                  coverage={coverage}
+                  onTheme={setTheme}
+                  onAccent={setAccent}
+                  onUsername={setUsername}
+                  onStatus={setStatus}
+                  onRefresh={refresh}
+                />
+              ) : null}
+            </>
+          )}
+        </div>
+      </main>
+      <footer className="status solid">
+        <span>{status}</span>
+        <div className="status-actions">
+          <DevUpdateButton />
+          <span>{username ? `@${username}` : "Studio"}</span>
+        </div>
+      </footer>
+      {palette ? (
+        <div className="overlay" onMouseDown={closePalette}>
+          <div className="palette glass" onMouseDown={(e) => e.stopPropagation()}>
+            <input autoFocus placeholder="Command" readOnly />
+            {NAV.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setRoute(item.id);
+                  closePalette();
+                }}
+              >
+                Go to {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

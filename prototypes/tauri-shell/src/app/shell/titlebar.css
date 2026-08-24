@@ -1,0 +1,76 @@
+.titlebar {
+  height: var(--titlebar-height);
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr auto;
+  align-items: stretch;
+  background: var(--bg-title);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  z-index: var(--z-titlebar);
+  transition: grid-template-columns var(--dur) var(--ease);
+}
+
+.body.is-collapsed ~ * .titlebar,
+.app.is-collapsed .titlebar {
+  grid-template-columns: var(--sidebar-collapsed) 1fr auto;
+}
+
+.tb-brand,
+.tb-drag {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.tb-brand {
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.tb-mark {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.tb-drag {
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+}
+
+.tb-controls {
+  display: flex;
+}
+
+.tb-btn {
+  width: var(--caption-width);
+  height: var(--titlebar-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+}
+
+.tb-btn:hover {
+  background: var(--surface-hover);
+}
+
+.tb-btn.close:hover {
+  background: var(--danger);
+  color: white;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-3);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-title);
+  border-top: 1px solid var(--border);
+}

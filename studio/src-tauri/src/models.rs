@@ -1,0 +1,211 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCoverage {
+    pub unique_movies: u32,
+    pub total_viewings: u32,
+    pub rating_events: u32,
+    pub unresolved_movies: u32,
+    pub source: String,
+    pub full_history_available: bool,
+    pub rss_window_limit: Option<u32>,
+    pub last_full_import: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub import_id: String,
+    pub movies: u32,
+    pub viewings: u32,
+    pub ratings: u32,
+    pub skipped: u32,
+    pub warnings: Vec<String>,
+    pub coverage: LibraryCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDiagnostics {
+    pub imports: Vec<ImportSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub id: String,
+    pub content_hash: String,
+    pub imported_at: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncResult {
+    pub username: String,
+    pub entries_seen: u32,
+    pub entries_added: u32,
+    pub coverage: LibraryCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendSyncResult {
+    pub friends_synced: u32,
+    pub entries_added: u32,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryQuery {
+    pub search: Option<String>,
+    pub sort: Option<String>,
+    pub filter: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryItem {
+    pub id: String,
+    pub title: String,
+    pub year: Option<i32>,
+    pub current_rating: Option<f64>,
+    pub poster: Option<String>,
+    pub watched: bool,
+    pub watchlist: bool,
+    pub liked: bool,
+    pub viewing_count: u32,
+    pub match_state: String,
+    pub source_type: String,
+    pub last_watched_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPage {
+    pub items: Vec<LibraryItem>,
+    pub total: u32,
+    pub coverage: LibraryCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewingHistoryItem {
+    pub id: String,
+    pub occurred_at: Option<String>,
+    pub published_at: Option<String>,
+    pub rewatch: bool,
+    pub rating: Option<f64>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendActivityItem {
+    pub username: String,
+    pub title: String,
+    pub year: Option<i32>,
+    pub rating: Option<f64>,
+    pub review: Option<String>,
+    pub watched_at: Option<String>,
+    pub published_at: Option<String>,
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmDetail {
+    pub id: String,
+    pub title: String,
+    pub year: Option<i32>,
+    pub current_rating: Option<f64>,
+    pub poster: Option<String>,
+    pub backdrop: Option<String>,
+    pub overview: Option<String>,
+    pub runtime: Option<i32>,
+    pub genres: Vec<String>,
+    pub match_state: String,
+    pub source_identity: String,
+    pub your_history: Vec<ViewingHistoryItem>,
+    pub friends: Vec<FriendActivityItem>,
+    pub tmdb_vote_average: Option<f64>,
+    pub tmdb_vote_count: Option<i32>,
+    pub tmdb_reviews: Vec<String>,
+    pub cast: Vec<String>,
+    pub crew: Vec<String>,
+    pub similar: Vec<LibraryItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeViewModel {
+    pub coverage: LibraryCoverage,
+    pub recent: Vec<LibraryItem>,
+    pub top_rated: Vec<LibraryItem>,
+    pub friend_feed: Vec<FriendActivityItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRatingInput {
+    pub id: String,
+    pub rating: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationResult {
+    pub status: String,
+    pub migration_version: i32,
+    pub validation_result: String,
+    pub coverage: LibraryCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyLibrary {
+    pub username: Option<String>,
+    pub films: Option<Vec<LegacyFilm>>,
+    pub friends: Option<Vec<LegacyFriend>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyFilm {
+    pub key: Option<String>,
+    pub name: String,
+    pub year: Option<i32>,
+    pub uri: Option<String>,
+    pub rating: Option<f64>,
+    pub watched: Option<bool>,
+    pub watchlist: Option<bool>,
+    pub liked: Option<bool>,
+    pub rewatch: Option<bool>,
+    pub watched_date: Option<String>,
+    pub tmdb_id: Option<String>,
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyFriend {
+    pub username: String,
+    pub entries: Vec<LegacyFriendEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyFriendEntry {
+    pub name: String,
+    pub year: Option<i32>,
+    pub rating: Option<f64>,
+    pub liked: Option<bool>,
+    pub watched_date: Option<String>,
+    pub link: Option<String>,
+    pub poster: Option<String>,
+}
