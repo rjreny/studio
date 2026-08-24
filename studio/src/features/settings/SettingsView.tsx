@@ -156,10 +156,13 @@ export function SettingsView({
     try {
       setBusy(true);
       const status = await tmdbSetKey(keyInput.trim());
-      setKeyStatus(status);
+      const confirmed = status.stored ? await tmdbKeyStatus().catch(() => status) : status;
+      setKeyStatus(confirmed);
       setKeyInput("");
-      if (status.valid !== true) {
-        onStatus(status.lastError ?? "TMDB rejected this key — it was not saved");
+      if (confirmed.valid !== true || !confirmed.stored) {
+        onStatus(
+          confirmed.lastError ?? "TMDB accepted this key, but Windows did not keep it — it was not saved",
+        );
         return;
       }
       setReplacing(false);

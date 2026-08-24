@@ -12,7 +12,15 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
     keyring::Entry::new("studio", "tmdb_api_key")
         .map_err(|e| e.to_string())?
         .set_password(key)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    match get_api_key()? {
+        Some(stored) if stored == key => Ok(()),
+        Some(_) => Err("Windows Credential Manager stored a different TMDB key than the one just saved".into()),
+        None => Err(
+            "Windows Credential Manager did not keep the TMDB key. Studio cannot match ZIP films without it."
+                .into(),
+        ),
+    }
 }
 
 pub fn store_api_key(key: &str) -> Result<TmdbKeyStatus, String> {
@@ -726,6 +734,16 @@ mod tests {
     fn percent_encodes_utf8_bytes() {
         assert_eq!(percent_encode("Amélie"), "Am%C3%A9lie");
         assert_eq!(percent_encode("The Matrix"), "The%20Matrix");
+    }
+
+    #[test]
+    fn tmdb_keyring_persists_beyond_the_entry() {
+        use keyring::credential::{CredentialBuilderApi as _, CredentialPersistence};
+        let persistence = keyring::default::default_credential_builder().persistence();
+        assert!(
+            !matches!(persistence, CredentialPersistence::EntryOnly),
+            "keyring is using the in-memory mock store; enable windows-native so the TMDB key survives across Entry::new calls"
+        );
     }
 }
 

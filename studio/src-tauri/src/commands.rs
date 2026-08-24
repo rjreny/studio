@@ -525,7 +525,9 @@ pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<EnrichR
     crate::app_log::write(
         &app,
         &format!(
-            "enrich finished matched={} posters={} remaining_unmatched={} remaining_without_poster={} errors={} last_error={:?}",
+            "enrich finished has_key={} key_valid={:?} matched={} posters={} remaining_unmatched={} remaining_without_poster={} errors={} last_error={:?}",
+            report.has_key,
+            report.key_valid,
             report.matched,
             report.posters,
             report.remaining_unmatched,
