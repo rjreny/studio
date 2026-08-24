@@ -1,14 +1,16 @@
 export function RatingDisplay({
   value,
   compact = false,
+  starsOnly = false,
 }: {
   value: number | null | undefined;
   compact?: boolean;
+  starsOnly?: boolean;
 }) {
   if (value == null) {
     return (
       <span className="rating-display is-empty" aria-label="Unrated">
-        {compact ? "—" : "Unrated"}
+        {starsOnly || compact ? "—" : "Unrated"}
       </span>
     );
   }
@@ -17,7 +19,7 @@ export function RatingDisplay({
   const half = value - full >= 0.5;
 
   return (
-    <span className="rating-display" aria-label={`Rated ${value} out of 5`}>
+    <span className={`rating-display${starsOnly ? " is-stars-only" : ""}`} aria-label={`Rated ${value} out of 5`}>
       <span className="rating-stars" aria-hidden>
         {Array.from({ length: 5 }, (_, i) => {
           const filled = i < full;
@@ -27,12 +29,13 @@ export function RatingDisplay({
               key={i}
               className={`rating-star${filled ? " is-filled" : ""}${isHalf ? " is-half" : ""}`}
             >
-              ★
+              <span className="rating-star-base">★</span>
+              {filled || isHalf ? <span className="rating-star-fill">★</span> : null}
             </span>
           );
         })}
       </span>
-      <span className="rating-number">{value.toFixed(1)}</span>
+      {starsOnly ? null : <span className="rating-number">{value.toFixed(1)}</span>}
     </span>
   );
 }

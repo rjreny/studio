@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { DevUpdateButton } from "./app/shell/DevUpdateButton";
+import { NavTabs } from "./app/shell/NavTabs";
 import { TitleBar } from "./app/shell/TitleBar";
 import { ConnectView } from "./features/films/ConnectView";
 import { FilmDetailView } from "./features/films/FilmDetailView";
@@ -13,7 +14,6 @@ import { SettingsView } from "./features/settings/SettingsView";
 import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type Theme } from "./core/types";
 import { appVersion } from "./platform/app";
 import {
-  formatCoverage,
   getHome,
   getSession,
   migrateFromLegacy,
@@ -52,6 +52,7 @@ export default function App() {
   const [session, setSession] = useState<AppSession | null>(null);
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [job, setJob] = useState<JobProgress | null>(null);
+  const [libraryQuery, setLibraryQuery] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -206,8 +207,6 @@ export default function App() {
   }, [palette, closePalette, selectedFilmId]);
 
   const connected = Boolean(session?.hasSetup);
-  const immersive =
-    Boolean(selectedFilmId) || (connected && route === "home") || (!connected && route === "home");
   const title = selectedFilmId ? "Film" : "";
 
   function go(id: Route) {
@@ -215,30 +214,31 @@ export default function App() {
     setRoute(id);
   }
 
+  function onNavSearch(value: string) {
+    setLibraryQuery(value);
+    if (route !== "films") {
+      setSelectedFilmId(null);
+      setRoute("films");
+    }
+  }
+
   return (
-    <div className={`app canvas-surface${immersive ? " is-immersive" : ""}`}>
+    <div className="app canvas-surface">
       <TitleBar collapsed={false} title={title} />
       <div className="stage">
         <header className="cinema-nav">
           <div className="cinema-nav-inner">
             <p className="coverage-chip" title={coverage?.warnings.join("\n") ?? undefined}>
-              {coverage ? formatCoverage(coverage) : ""}
+              {coverage ? `${coverage.uniqueMovies} films` : "Studio"}
             </p>
-            <nav className="nav-pill glass" aria-label="Primary">
-              {NAV.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`nav-pill-link${route === item.id && !selectedFilmId ? " is-active" : ""}`}
-                  onClick={() => go(item.id)}
-                >
-                  {item.label}
-                </button>
-              ))}
-              <button type="button" className="nav-pill-link" onClick={() => setPalette(true)}>
-                Search
-              </button>
-            </nav>
+            <input
+              className="nav-search glass"
+              value={libraryQuery}
+              onChange={(e) => onNavSearch(e.target.value)}
+              placeholder="Search your log"
+              spellCheck={false}
+            />
+            <NavTabs items={NAV} active={route} onGo={go} />
           </div>
         </header>
         <main className="main-shell">
@@ -272,6 +272,7 @@ export default function App() {
                     onSelectFilm={setSelectedFilmId}
                     onStatus={setStatus}
                     reloadToken={libraryEpoch}
+                    query={libraryQuery}
                   />
                 ) : null}
                 {route === "friends" ? (

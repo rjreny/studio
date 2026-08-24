@@ -81,9 +81,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   display: grid; grid-template-columns: 140px 1fr; align-items: center;
   min-height: 40px; border-bottom: 1px solid var(--border); gap: var(--space-3);
 }
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.seg button { height: var(--control-sm); padding: 0 var(--space-3); color: var(--text-muted); }
-.seg button.is-on { background: var(--surface-hover); color: var(--text); }
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.seg button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: var(--text-muted);
+}
+.seg button.is-on {
+  background: var(--nav-active-bg);
+  color: var(--nav-active-fg);
+}
 .primary {
   height: var(--control-md); padding: 0 var(--space-3); background: var(--accent);
   color: oklch(0.18 0.04 145); border-radius: var(--radius); font-weight: 600;
@@ -223,13 +237,34 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .stars .is-half { opacity: 0.55; }
 .avg { font-variant-numeric: tabular-nums; color: var(--text-muted); }
 .chart {
-  display: flex; align-items: flex-end; gap: 8px; height: 160px; padding: var(--space-4);
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 8px;
+  height: 200px;
+  align-items: stretch;
+  padding: 4px 0 0;
 }
-.bar { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; }
-.bar span {
-  width: 100%; max-width: 28px; background: var(--accent); border-radius: 3px 3px 0 0;
+.bar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 6px;
+  align-items: stretch;
+}
+.bar-track {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+}
+.bar-track span {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 8px 8px 3px 3px;
   display: block;
 }
+.bar small { text-align: center; color: var(--text-muted); font-size: 11px; }
 .decade-bars { list-style: none; margin: 0; padding: var(--space-4); display: flex; flex-direction: column; gap: 8px; }
 .decade-bars li { display: grid; grid-template-columns: 52px 1fr 40px; gap: var(--space-3); align-items: center; }
 .decade-bars div { height: 8px; background: var(--surface-hover); border-radius: 99px; overflow: hidden; }

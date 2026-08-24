@@ -20,4 +20,11 @@ describe("RatingDisplay", () => {
     render(<RatingDisplay value={null} compact />);
     expect(screen.getByText("—")).toBeInTheDocument();
   });
+
+  it("clips a half star instead of dimming a full star", () => {
+    const { container } = render(<RatingDisplay value={3.5} />);
+    expect(container.querySelectorAll(".rating-star.is-filled").length).toBe(3);
+    expect(container.querySelectorAll(".rating-star.is-half").length).toBe(1);
+    expect(container.querySelector(".rating-star.is-half .rating-star-fill")).toBeTruthy();
+  });
 });

@@ -14,17 +14,19 @@ export function FilmCard({
   onSelect?: (id: string) => void;
   caption?: string;
 }) {
+  const seen = film.viewingCount && film.viewingCount > 1 ? `Seen ${film.viewingCount}×` : "";
+
   const body = (
     <>
-      <Poster name={film.title} poster={film.poster} large />
-      <strong>{film.title}</strong>
-      <span className="title-year">{film.year ?? ""}</span>
-      {caption ? <span className="muted">{caption}</span> : null}
-      <RatingDisplay value={film.currentRating} compact />
-      {film.viewingCount && film.viewingCount > 1 ? (
-        <span className="rewatch-badge">{film.viewingCount} viewings</span>
-      ) : null}
-      {film.matchState === "ambiguous" ? <span className="source-badge">{film.matchState}</span> : null}
+      <div className="film-card-poster">
+        <Poster name={film.title} poster={film.poster} large />
+      </div>
+      <strong className="film-card-title" title={film.title}>
+        {film.title}
+      </strong>
+      <span className="title-year">{caption || (film.year ?? "")}</span>
+      <RatingDisplay value={film.currentRating} starsOnly />
+      <span className={`film-card-seen${seen ? "" : " is-empty"}`}>{seen || "\u00a0"}</span>
     </>
   );
 

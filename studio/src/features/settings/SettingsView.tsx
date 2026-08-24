@@ -227,226 +227,145 @@ export function SettingsView({
 
   return (
     <div className="settings-page page-pad">
-      <h1>Settings</h1>
-      <section className="settings-group solid-card">
-        <h2>Library</h2>
-        {coverage ? <p className="coverage-line">{formatCoverage(coverage)}</p> : null}
-        {diagnostics.map((w) => (
-          <p key={w} className="hint">
-            {w}
-          </p>
-        ))}
-        <div className="setting-row">
-          <label>Letterboxd user</label>
-          <input
-            value={username}
-            onChange={(e) => onUsername(e.target.value)}
-            placeholder="username"
-          />
+      <header className="page-head">
+        <div>
+          <h1>Settings</h1>
+          <p className="muted">{coverage ? formatCoverage(coverage) : "Your library and this install"}</p>
         </div>
-        <div className="setting-row">
-          <label>Letterboxd export</label>
-          <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
-            {busy ? "Working…" : "Import ZIP"}
-          </button>
-        </div>
-        {lastImport ? (
-          <div className="result-card">
-            <dl>
-              <div>
-                <dt>Films</dt>
-                <dd>{lastImport.movies}</dd>
-              </div>
-              <div>
-                <dt>Viewings</dt>
-                <dd>{lastImport.viewings}</dd>
-              </div>
-              <div>
-                <dt>Ratings</dt>
-                <dd>{lastImport.ratings}</dd>
-              </div>
-              <div>
-                <dt>Already present</dt>
-                <dd>{lastImport.skipped}</dd>
-              </div>
-            </dl>
-            <p className="hint">{formatImport(lastImport)}</p>
-            {lastImport.warnings.map((w) => (
-              <p key={w} className="hint">
-                {w}
-              </p>
-            ))}
-          </div>
-        ) : null}
-      </section>
-      <section className="settings-group solid-card">
-        <h2>Catalog</h2>
-        <p className="hint">
-          TMDB key is stored in Windows Credential Manager, never in studio.json. Studio asks TMDB
-          whether the key works before saving it.
-        </p>
-        {keyConnected ? (
-          <p className="key-status is-ok">
-            TMDB accepted this key{keyStatus?.kind ? ` · ${keyStatus.kind}` : ""}. The insert field stays
-            hidden until you replace it.
-          </p>
-        ) : keyStatus?.stored && keyStatus.valid === false ? (
-          <p className="key-status is-bad">{keyStatus.lastError ?? "TMDB rejected this key."}</p>
-        ) : keyStatus?.stored && keyStatus.valid == null ? (
-          <p className="key-status is-warn">
-            A key is stored, but Studio could not reach TMDB to verify it.
-            {keyStatus.lastError ? ` ${keyStatus.lastError}` : ""}
-          </p>
-        ) : (
-          <p className="key-status is-warn">
-            No TMDB key yet. ZIP import still works; posters need this key or Letterboxd oEmbed.
-          </p>
-        )}
-        {!keyConnected ? (
-          <div className="setting-row">
-            <label>TMDB API key</label>
+      </header>
+      <div className="settings-grid">
+        <section className="settings-group solid-card">
+          <h2>Library</h2>
+          <div className="field">
+            <label htmlFor="settings-user">Letterboxd user</label>
             <input
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              placeholder={
-                keyStatus?.stored
-                  ? "Paste a replacement key"
-                  : "API Key (v3) from themoviedb.org/settings/api"
-              }
-              spellCheck={false}
-              disabled={busy}
+              id="settings-user"
+              value={username}
+              onChange={(e) => onUsername(e.target.value)}
+              placeholder="username"
             />
           </div>
-        ) : null}
-        <div className="row-actions">
-          {!keyConnected ? (
-            <button type="button" className="ghost" disabled={busy || !keyInput.trim()} onClick={() => void saveKey()}>
-              Save key
+          <div className="field-row">
+            <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
+              {busy ? "Working…" : "Import ZIP"}
             </button>
-          ) : (
-            <button type="button" className="ghost" disabled={busy} onClick={() => setReplacing(true)}>
-              Replace key
+            <button type="button" className="ghost-pill" disabled={busy} onClick={() => void runEnrich()}>
+              Match posters
             </button>
-          )}
-          <button
-            type="button"
-            className="ghost"
-            disabled={busy || !keyStatus?.stored}
-            onClick={() =>
-              void tmdbClearKey().then((status) => {
-                setKeyStatus(status);
-                setReplacing(false);
-                onStatus("TMDB key removed");
-              })
-            }
-          >
-            Remove key
-          </button>
-          <button type="button" className="ghost" disabled={busy} onClick={() => void runEnrich()}>
-            Enrich unmatched
-          </button>
-        </div>
-        {lastEnrich ? (
-          <div className="result-card">
-            <dl>
-              <div>
-                <dt>Matched</dt>
-                <dd>
-                  {lastEnrich.matched}/{lastEnrich.attempted}
-                </dd>
-              </div>
-              <div>
-                <dt>Posters</dt>
-                <dd>{lastEnrich.posters}</dd>
-              </div>
-              <div>
-                <dt>Still unmatched</dt>
-                <dd>{lastEnrich.remainingUnmatched}</dd>
-              </div>
-              <div>
-                <dt>Missing poster</dt>
-                <dd>{lastEnrich.remainingWithoutPoster}</dd>
-              </div>
-            </dl>
-            <p className="hint">{formatEnrich(lastEnrich)}</p>
           </div>
-        ) : null}
-      </section>
-      <section className="settings-group solid-card">
-        <h2>Appearance</h2>
-        <div className="setting-row">
-          <label>Theme</label>
-          <div className="seg">
-            {(["system", "dark", "light"] as const).map((t) => (
-              <button key={t} type="button" className={theme === t ? "is-on" : ""} onClick={() => onTheme(t)}>
-                {t[0].toUpperCase() + t.slice(1)}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="setting-row">
-          <label>Accent</label>
-          <div className="seg">
-            {(["app", "system"] as const).map((a) => (
-              <button key={a} type="button" className={accent === a ? "is-on" : ""} onClick={() => onAccent(a)}>
-                {a === "app" ? "App" : "System"}
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-      <section className="settings-group solid-card">
-        <h2>Installation</h2>
-        {installInfo ? (
-          <>
-            <div className="setting-row">
-              <label>Build</label>
-              <span>{installKindLabel(installInfo.installKind)}</span>
-            </div>
-            <div className="setting-row">
-              <label>Data folder</label>
-              <span className="mono-path">{installInfo.appDataDir}</span>
-            </div>
-            <p className="hint">
-              Library, friends, posters, and your username live in one SQLite database here. Reinstalling
-              or updating Studio keeps this folder unless you reset it.
+          {diagnostics.map((w) => (
+            <p key={w} className="hint">
+              {w}
             </p>
-            {installInfo.installKind === "dev" ? (
-              <p className="hint">
-                You are running a dev build. Use the installed release from GitHub for normal install,
-                update, and uninstall behavior.
-              </p>
-            ) : null}
-          </>
-        ) : null}
-        <div className="row-actions">
-          <button type="button" className="ghost" onClick={() => void openDataFolder().catch(() => onStatus("Could not open data folder"))}>
-            Open data folder
-          </button>
-          <button type="button" className="ghost" onClick={() => void openLogFile().catch(() => onStatus("Could not open studio.log"))}>
-            Open log
-          </button>
-          {installInfo?.uninstallerPath ? (
-            <button type="button" className="ghost" onClick={() => void runUninstaller()}>
-              Uninstall Studio
-            </button>
+          ))}
+          {lastImport ? (
+            <p className="hint">{formatImport(lastImport)}</p>
           ) : null}
-          <button type="button" className="ghost" onClick={() => void confirmResetData()}>
-            Reset all data
-          </button>
-        </div>
-      </section>
-      <section className="settings-group solid-card">
-        <h2>About</h2>
-        <div className="setting-row">
-          <label>Version</label>
-          <span>{version}</span>
-        </div>
-        <div className="setting-row">
-          <label>Updates</label>
-          <div className="row-actions">
-            <button type="button" className="ghost" onClick={() => void checkUpdates()}>
-              Check for updates
+          <div className="field">
+            <label htmlFor="settings-tmdb">TMDB API key</label>
+            {keyConnected ? (
+              <p className="key-status is-ok">Saved in Windows Credential Manager</p>
+            ) : (
+              <input
+                id="settings-tmdb"
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                placeholder={keyStatus?.stored ? "Paste a replacement key" : "v3 key from themoviedb.org"}
+                spellCheck={false}
+                disabled={busy}
+              />
+            )}
+          </div>
+          {keyStatus?.stored && keyStatus.valid === false ? (
+            <p className="key-status is-bad">{keyStatus.lastError ?? "TMDB rejected this key."}</p>
+          ) : null}
+          <div className="field-row">
+            {!keyConnected ? (
+              <button type="button" className="ghost-pill" disabled={busy || !keyInput.trim()} onClick={() => void saveKey()}>
+                Save key
+              </button>
+            ) : (
+              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setReplacing(true)}>
+                Replace key
+              </button>
+            )}
+            <button
+              type="button"
+              className="ghost-pill"
+              disabled={busy || !keyStatus?.stored}
+              onClick={() =>
+                void tmdbClearKey().then((status) => {
+                  setKeyStatus(status);
+                  setReplacing(false);
+                  onStatus("TMDB key removed");
+                })
+              }
+            >
+              Remove key
+            </button>
+          </div>
+          {lastEnrich ? <p className="hint">{formatEnrich(lastEnrich)}</p> : null}
+        </section>
+
+        <section className="settings-group solid-card">
+          <h2>Look</h2>
+          <div className="field">
+            <span className="field-label">Theme</span>
+            <div className="seg">
+              {(["system", "dark", "light"] as const).map((t) => (
+                <button key={t} type="button" className={theme === t ? "is-on" : ""} onClick={() => onTheme(t)}>
+                  {t[0].toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <span className="field-label">Accent</span>
+            <div className="seg">
+              {(["app", "system"] as const).map((a) => (
+                <button key={a} type="button" className={accent === a ? "is-on" : ""} onClick={() => onAccent(a)}>
+                  {a === "app" ? "App" : "System"}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-group solid-card">
+          <h2>This PC</h2>
+          {installInfo ? (
+            <>
+              <p className="hint">
+                {installKindLabel(installInfo.installKind)} · v{version}
+              </p>
+              <p className="mono-path">{installInfo.appDataDir}</p>
+            </>
+          ) : (
+            <p className="hint">Version {version}</p>
+          )}
+          <div className="field-row">
+            <button type="button" className="ghost-pill" onClick={() => void openDataFolder().catch(() => onStatus("Could not open data folder"))}>
+              Data folder
+            </button>
+            <button type="button" className="ghost-pill" onClick={() => void openLogFile().catch(() => onStatus("Could not open studio.log"))}>
+              Log
+            </button>
+            {installInfo?.uninstallerPath ? (
+              <button type="button" className="ghost-pill" onClick={() => void runUninstaller()}>
+                Uninstall
+              </button>
+            ) : null}
+            <button type="button" className="ghost-pill" onClick={() => void confirmResetData()}>
+              Reset data
+            </button>
+          </div>
+        </section>
+
+        <section className="settings-group solid-card">
+          <h2>Updates</h2>
+          <div className="field-row">
+            <button type="button" className="ghost-pill" onClick={() => void checkUpdates()}>
+              Check
             </button>
             {pendingVersion ? (
               <button type="button" className="primary" onClick={() => void installUpdate()}>
@@ -454,28 +373,23 @@ export function SettingsView({
               </button>
             ) : null}
           </div>
-        </div>
-        <p className="file-result">{updateNote}</p>
-        {import.meta.env.DEV ? (
-          <p className="hint">
-            Dev mode checks the release feed but cannot install updates — use the NSIS installer from{" "}
-            <a href="https://github.com/rjreny/studio/releases" target="_blank" rel="noreferrer">
-              GitHub Releases
-            </a>
-            , then Update works in the installed app.
-          </p>
-        ) : (
-          <p className="hint">
-            Updates download only when you click Update. Installing a new release replaces the existing
-            Studio install and keeps your library data.
-          </p>
-        )}
-        {!signingConfigured && !import.meta.env.DEV ? (
-          <p className="hint">
-            Signing is not configured in this build. Reinstall from a signed GitHub release.
-          </p>
-        ) : null}
-      </section>
+          <p className="file-result">{updateNote}</p>
+          {import.meta.env.DEV ? (
+            <p className="hint">
+              Dev builds cannot install updates. Use the installer from{" "}
+              <a href="https://github.com/rjreny/studio/releases" target="_blank" rel="noreferrer">
+                GitHub Releases
+              </a>
+              .
+            </p>
+          ) : (
+            <p className="hint">Updates download only when you click Update. Your library stays on this PC.</p>
+          )}
+          {!signingConfigured && !import.meta.env.DEV ? (
+            <p className="hint">Signing is not configured in this build. Reinstall from a signed GitHub release.</p>
+          ) : null}
+        </section>
+      </div>
       <UpdateOverlay
         open={updateOpen}
         title="Installing update"

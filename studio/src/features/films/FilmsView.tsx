@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getLibrary } from "../../platform/filmLibrary";
 import { log } from "../../platform/log";
 import type { LibraryItem } from "../../platform/types/film";
+import { Menu } from "../ui/Menu";
 import { FilmCard } from "./FilmCard";
 
 const SORTS = [
@@ -11,19 +12,29 @@ const SORTS = [
   { id: "year", label: "Release year" },
 ] as const;
 
+const FILTERS = [
+  { id: "all", label: "All films" },
+  { id: "watched", label: "Watched" },
+  { id: "watchlist", label: "Watchlist" },
+  { id: "unresolved", label: "Needs a match" },
+] as const;
+
 export function FilmsView({
   onSelectFilm,
   onStatus,
   reloadToken = 0,
+  query = "",
 }: {
   onSelectFilm: (id: string) => void;
   onStatus: (s: string) => void;
   reloadToken?: number;
+  query?: string;
 }) {
-  const [query, setQuery] = useState("");
   const [sort, setSort] = useState<(typeof SORTS)[number]["id"]>("recent");
-  const [filter, setFilter] = useState<"all" | "watched" | "watchlist" | "unresolved">("all");
+  const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
+  const [decade, setDecade] = useState("any");
   const [items, setItems] = useState<LibraryItem[]>([]);
+  const [pool, setPool] = useState<LibraryItem[]>([]);
   const [total, setTotal] = useState(0);
   const [busy, setBusy] = useState(false);
 
@@ -40,6 +51,11 @@ export function FilmsView({
         if (filter === "watchlist") rows = rows.filter((f) => f.watchlist);
         if (filter === "watched") rows = rows.filter((f) => f.watched);
         if (filter === "unresolved") rows = rows.filter((f) => f.matchState !== "confirmed");
+        setPool(rows);
+        if (decade !== "any") {
+          const start = Number(decade);
+          rows = rows.filter((f) => f.year && f.year >= start && f.year < start + 10);
+        }
         setItems(rows);
         setTotal(page.total);
         onStatus(`${rows.length} shown · ${page.coverage.uniqueMovies} unique films`);
@@ -50,15 +66,21 @@ export function FilmsView({
         setBusy(false);
       }
     })();
-  }, [query, sort, filter, onStatus, reloadToken]);
+  }, [query, sort, filter, decade, onStatus, reloadToken]);
 
-  const decades = useMemo(() => {
+  const decadeOptions = useMemo(() => {
     const set = new Set<number>();
-    items.forEach((f) => {
+    pool.forEach((f) => {
       if (f.year) set.add(Math.floor(f.year / 10) * 10);
     });
-    return [...set].sort((a, b) => b - a);
-  }, [items]);
+    return [
+      { id: "any", label: "Any decade" },
+      ...[...set]
+        .sort((a, b) => b - a)
+        .filter((d) => d >= 1920 && d <= 2020)
+        .map((d) => ({ id: String(d), label: `${d}s` })),
+    ];
+  }, [pool]);
 
   return (
     <div className="films page-pad">
@@ -67,41 +89,12 @@ export function FilmsView({
           <h1>Films</h1>
           <p className="muted">{total} in your library</p>
         </div>
-        <form
-          className="search"
-          onSubmit={(e) => {
-            e.preventDefault();
-          }}
-        >
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search your log"
-          />
-        </form>
-      </header>
-      <div className="filter-bar glass">
-        <label>
-          Sort
-          <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-            {SORTS.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Filter
-          <select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}>
-            <option value="all">All</option>
-            <option value="watched">Watched</option>
-            <option value="watchlist">Watchlist</option>
-            <option value="unresolved">Unresolved identity</option>
-          </select>
-        </label>
-        {decades.length ? <span className="muted">Decades: {decades.join(", ")}</span> : null}
         {busy ? <span className="muted">Updating…</span> : null}
+      </header>
+      <div className="filter-bar">
+        <Menu label="Sort" value={sort} options={[...SORTS]} onChange={(id) => setSort(id)} />
+        <Menu label="Show" value={filter} options={[...FILTERS]} onChange={(id) => setFilter(id)} />
+        <Menu label="Decade" value={decade} options={decadeOptions} onChange={setDecade} />
       </div>
       <div className="film-grid">
         {items.map((film) => (

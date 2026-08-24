@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { getFilm } from "../../platform/filmLibrary";
 import type { FilmDetail, HomeViewModel, LibraryItem } from "../../platform/types/film";
 import { FilmCard } from "./FilmCard";
-import { Poster } from "./Poster";
 import { RatingDisplay } from "./RatingDisplay";
 import { Shelf } from "./Shelf";
 
@@ -177,14 +176,19 @@ export function HomeView({
             )
           }
         >
-          {home.friendFeed.slice(0, 12).map((entry, idx) => (
-            <div key={`${entry.username}-${entry.title}-${idx}`} className="film-card">
-              <Poster name={entry.title} poster={entry.poster} large />
-              <strong>{entry.title}</strong>
-              <span className="muted">@{entry.username}</span>
-              <RatingDisplay value={entry.rating} compact />
-            </div>
-          ))}
+            {home.friendFeed.slice(0, 12).map((entry, idx) => (
+              <FilmCard
+                key={`${entry.username}-${entry.title}-${idx}`}
+                film={{
+                  id: `${entry.username}-${idx}`,
+                  title: entry.title,
+                  year: entry.year,
+                  poster: entry.poster,
+                  currentRating: entry.rating,
+                }}
+                caption={`@${entry.username}`}
+              />
+            ))}
         </Shelf>
       </div>
     </div>
