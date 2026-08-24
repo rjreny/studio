@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { importExportZip, syncSelf } from "../../platform/filmLibrary";
+import { importExportZip, syncSelf, tmdbEnrich } from "../../platform/filmLibrary";
 import { pickExportZipPath } from "../../platform/files";
 import { log } from "../../platform/log";
 
@@ -47,8 +47,16 @@ export function ConnectView({
       const path = await pickExportZipPath();
       if (!path) return;
       const result = await importExportZip(path);
+      let posters = 0;
+      try {
+        posters = await tmdbEnrich();
+      } catch (err) {
+        log("warn", "poster enrich after import failed", err);
+      }
       onStatus(
-        `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
+        posters > 0
+          ? `Imported · ${result.viewings} viewings · ${posters} posters fetched`
+          : `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
       );
       await onConnected();
     } catch (err) {

@@ -119,8 +119,16 @@ export function SettingsView({
       const path = await pickExportZipPath();
       if (!path) return;
       const result = await importExportZip(path);
+      let posters = 0;
+      try {
+        posters = await tmdbEnrich();
+      } catch (err) {
+        log("warn", "poster enrich after import failed", err);
+      }
       onStatus(
-        `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
+        posters > 0
+          ? `Imported · ${result.viewings} viewings · ${posters} posters fetched`
+          : `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
       );
       await onRefresh();
     } catch (err) {
@@ -131,10 +139,22 @@ export function SettingsView({
 
   async function saveKey() {
     if (!keyInput.trim()) return;
-    await tmdbSetKey(keyInput.trim());
-    setKeyInput("");
-    setHasKey(true);
-    onStatus("TMDB key stored in Windows Credential Manager");
+    try {
+      await tmdbSetKey(keyInput.trim());
+      setKeyInput("");
+      setHasKey(true);
+      onStatus("TMDB key stored — fetching posters…");
+      const count = await tmdbEnrich();
+      onStatus(
+        count > 0
+          ? `TMDB key stored · fetched ${count} poster${count === 1 ? "" : "s"}`
+          : "TMDB key stored — click Enrich unmatched if posters are still missing",
+      );
+      await onRefresh();
+    } catch (err) {
+      log("error", "tmdb key save failed", err);
+      onStatus("Could not store TMDB key or fetch posters");
+    }
   }
 
   async function confirmResetData() {
@@ -216,14 +236,19 @@ export function SettingsView({
             type="button"
             className="ghost"
             onClick={() =>
-              void tmdbEnrich().then((count) => {
-                onStatus(
-                  count > 0
-                    ? `Enriched ${count} poster${count === 1 ? "" : "s"}`
-                    : "No new posters to fetch — add a TMDB key or re-import",
-                );
-                return onRefresh();
-              })
+              void tmdbEnrich()
+                .then((count) => {
+                  onStatus(
+                    count > 0
+                      ? `Enriched ${count} poster${count === 1 ? "" : "s"}`
+                      : "No new posters to fetch — add a TMDB key or re-import",
+                  );
+                  return onRefresh();
+                })
+                .catch((err) => {
+                  log("error", "enrich failed", err);
+                  onStatus("Poster fetch failed — check your TMDB key");
+                })
             }
           >
             Enrich unmatched

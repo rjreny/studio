@@ -116,7 +116,7 @@ pub fn cache_poster_for_smr(
     conn.execute(
         "UPDATE source_movie_records
          SET cached_poster_url = ?2,
-             raw_identity = json_set(COALESCE(NULLIF(raw_identity, ''), '{}'), '$.poster', json(?2))
+             raw_identity = json_set(COALESCE(NULLIF(raw_identity, ''), '{}'), '$.poster', json_quote(?2))
          WHERE id = ?1",
         params![smr_id, poster_url.trim()],
     )
@@ -140,7 +140,7 @@ pub fn cache_poster_for_siblings(
     conn.execute(
         "UPDATE source_movie_records
          SET cached_poster_url = ?3,
-             raw_identity = json_set(COALESCE(NULLIF(raw_identity, ''), '{}'), '$.poster', json(?3))
+             raw_identity = json_set(COALESCE(NULLIF(raw_identity, ''), '{}'), '$.poster', json_quote(?3))
          WHERE normalized_title = ?1 AND release_year IS ?2
          AND (cached_poster_url IS NULL OR TRIM(cached_poster_url) = '')",
         params![normalized, year, poster_url.trim()],
@@ -174,7 +174,7 @@ pub fn merge_source_movie_metadata(
              SET cached_poster_url = ?2,
                  raw_identity = json_set(
                    COALESCE(NULLIF(raw_identity, ''), '{}'),
-                   '$.poster', json(?2)
+                   '$.poster', json_quote(?2)
                  )
              WHERE source_record_key = ?1
              AND (cached_poster_url IS NULL OR TRIM(cached_poster_url) = '')",
@@ -256,6 +256,8 @@ fn urlencoding_simple(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::letterboxd::import::upsert_source_movie;
+    use crate::storage::db::Database;
 
     #[test]
     fn extracts_poster_from_rss_description() {
@@ -264,5 +266,45 @@ mod tests {
             poster_from_rss_body(body),
             Some("https://a.ltrbxd.com/resized/film-poster/240/240/70/68/abc.jpg".into())
         );
+    }
+
+    #[test]
+    fn caches_http_poster_url_on_source_record() {
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        let smr_id = upsert_source_movie(
+            &tx,
+            "letterboxd_export",
+            "export|inception",
+            "Inception",
+            Some(2010),
+            "https://letterboxd.com/film/inception/",
+            &SourceMovieMeta::default(),
+        )
+        .expect("smr");
+        tx.commit().expect("commit");
+
+        let poster = "https://image.tmdb.org/t/p/w500/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg";
+        cache_poster_for_smr(db.conn(), &smr_id, poster).expect("cache poster URL");
+
+        let cached: String = db
+            .conn()
+            .query_row(
+                "SELECT cached_poster_url FROM source_movie_records WHERE id = ?1",
+                rusqlite::params![smr_id],
+                |row| row.get(0),
+            )
+            .expect("cached url");
+        assert_eq!(cached, poster);
+
+        let identity: String = db
+            .conn()
+            .query_row(
+                "SELECT json_extract(raw_identity, '$.poster') FROM source_movie_records WHERE id = ?1",
+                rusqlite::params![smr_id],
+                |row| row.get(0),
+            )
+            .expect("identity poster");
+        assert_eq!(identity, poster);
     }
 }

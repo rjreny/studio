@@ -42,6 +42,31 @@ pub fn clear_api_key() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+fn is_bearer_token(key: &str) -> bool {
+    let k = key.trim();
+    k.starts_with("eyJ") || (k.len() > 48 && k.bytes().filter(|b| *b == b'.').count() >= 2)
+}
+
+fn tmdb_get(key: &str, path_and_query: &str) -> Result<String, String> {
+    let key = key.trim();
+    let url = if is_bearer_token(key) {
+        format!("{TMDB_BASE}{path_and_query}")
+    } else {
+        let sep = if path_and_query.contains('?') { '&' } else { '?' };
+        format!("{TMDB_BASE}{path_and_query}{sep}api_key={key}")
+    };
+    let mut req = ureq::get(&url)
+        .set("User-Agent", "Studio/0.1 (local film app)")
+        .timeout(std::time::Duration::from_secs(20));
+    if is_bearer_token(key) {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    req.call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Deserialize)]
 struct TmdbSearchResponse {
     results: Vec<TmdbSearchResult>,
@@ -56,7 +81,6 @@ struct TmdbSearchResult {
 
 pub fn enrich_catalog(db: &Database) -> Result<u32, String> {
     let mut total = 0u32;
-    let has_key = get_api_key()?.is_some();
     if let Some(api_key) = get_api_key()? {
         for _ in 0..40 {
             let batch = enrich_unmatched_batch(db, &api_key, 50)?;
@@ -66,14 +90,13 @@ pub fn enrich_catalog(db: &Database) -> Result<u32, String> {
             }
         }
     }
-    // Only hit Letterboxd oEmbed when there is no TMDB key configured.
-    if !has_key {
-        for _ in 0..8 {
-            let batch = backfill_letterboxd_posters(db, 40)?;
-            total += batch;
-            if batch == 0 {
-                break;
-            }
+    // ZIP exports have no poster URLs. Use Letterboxd oEmbed for anything TMDB
+    // did not match, including when a TMDB key is stored.
+    for _ in 0..8 {
+        let batch = backfill_letterboxd_posters(db, 40)?;
+        total += batch;
+        if batch == 0 {
+            break;
         }
     }
     Ok(total)
@@ -105,19 +128,29 @@ fn enrich_unmatched_batch(db: &Database, api_key: &str, limit: u32) -> Result<u3
 
     let mut enriched = 0u32;
     for (smr_id, raw, normalized, year) in rows {
-        if try_tmdb_id_from_raw(db, &smr_id, &raw)? {
-            enriched += 1;
-            continue;
-        }
-        if try_exact_match(db, &smr_id, &normalized, year)? {
-            enriched += 1;
-            continue;
-        }
-        if search_and_queue(db, api_key, &smr_id, &raw, &normalized, year)? > 0 {
-            enriched += 1;
+        match enrich_one_film(db, api_key, &smr_id, &raw, &normalized, year) {
+            Ok(true) => enriched += 1,
+            Ok(false) | Err(_) => {}
         }
     }
     Ok(enriched)
+}
+
+fn enrich_one_film(
+    db: &Database,
+    api_key: &str,
+    smr_id: &str,
+    raw: &str,
+    normalized: &str,
+    year: Option<i32>,
+) -> Result<bool, String> {
+    if try_tmdb_id_from_raw(db, smr_id, raw)? {
+        return Ok(true);
+    }
+    if try_exact_match(db, smr_id, normalized, year)? {
+        return Ok(true);
+    }
+    Ok(search_and_queue(db, api_key, smr_id, raw, normalized, year)? > 0)
 }
 
 fn try_tmdb_id_from_raw(db: &Database, smr_id: &str, raw: &str) -> Result<bool, String> {
@@ -216,18 +249,14 @@ fn search_and_queue(
     year: Option<i32>,
 ) -> Result<u32, String> {
     let title = parse_raw_title(raw);
-    let mut url = format!(
-        "{TMDB_BASE}/search/movie?api_key={api_key}&query={}",
+    let mut path = format!(
+        "/search/movie?query={}",
         urlencoding_simple(&title)
     );
     if let Some(y) = year {
-        url.push_str(&format!("&primary_release_year={y}"));
+        path.push_str(&format!("&primary_release_year={y}"));
     }
-    let response = ureq::get(&url)
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())?;
+    let response = tmdb_get(api_key, &path)?;
     let parsed: TmdbSearchResponse = serde_json::from_str(&response).map_err(|e| e.to_string())?;
 
     if let Some(result) = pick_search_match(&parsed.results, normalized, year) {
@@ -322,14 +351,10 @@ fn upsert_tmdb_movie(db: &Database, tmdb_id: i64) -> Result<String, String> {
         }
     }
     let api_key = get_api_key()?.ok_or("missing api key")?;
-    let url = format!(
-        "{TMDB_BASE}/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,reviews,recommendations,similar"
+    let path = format!(
+        "/movie/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar"
     );
-    let body = ureq::get(&url)
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())?;
+    let body = tmdb_get(&api_key, &path)?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let title = v["title"].as_str().unwrap_or("Unknown").to_string();
     let year = v["release_date"]
@@ -487,6 +512,19 @@ fn similar_titles(v: &serde_json::Value) -> Vec<serde_json::Value> {
         .as_array()
         .map(|arr| arr.iter().take(8).cloned().collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn treats_jwt_read_token_as_bearer() {
+        assert!(is_bearer_token(
+            "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.signature"
+        ));
+        assert!(!is_bearer_token("a1b2c3d4e5f678901234567890123456"));
+    }
 }
 
 fn review_authors(v: &serde_json::Value) -> Vec<String> {
