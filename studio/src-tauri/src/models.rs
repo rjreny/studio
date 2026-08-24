@@ -32,6 +32,43 @@ pub struct InstallInfo {
     pub database_path: String,
     pub executable_path: Option<String>,
     pub uninstaller_path: Option<String>,
+    pub log_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmdbKeyStatus {
+    pub stored: bool,
+    pub valid: Option<bool>,
+    pub kind: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrichReport {
+    pub has_key: bool,
+    pub key_valid: Option<bool>,
+    pub attempted: u32,
+    pub matched: u32,
+    pub posters: u32,
+    pub remaining_unmatched: u32,
+    pub remaining_without_poster: u32,
+    pub errors: u32,
+    pub last_error: Option<String>,
+    pub log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobProgress {
+    pub job: String,
+    pub label: String,
+    pub current: u32,
+    pub total: u32,
+    pub posters: u32,
+    pub errors: u32,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,19 +4,22 @@ import { type Accent, type Theme } from "../../core/types";
 import { pickExportZipPath } from "../../platform/files";
 import {
   formatCoverage,
+  formatEnrich,
+  formatImport,
   importExportZip,
   importGetDiagnostics,
   tmdbClearKey,
   tmdbEnrich,
-  tmdbHasKey,
+  tmdbKeyStatus,
   tmdbSetKey,
 } from "../../platform/filmLibrary";
-import type { InstallInfo, LibraryCoverage } from "../../platform/types/film";
+import type { EnrichReport, ImportResult, InstallInfo, LibraryCoverage, TmdbKeyStatus } from "../../platform/types/film";
 import {
   getInstallInfo,
   installKindLabel,
   launchUninstaller,
   openDataFolder,
+  openLogFile,
   resetStudioData,
 } from "../../platform/install";
 import { log } from "../../platform/log";
@@ -63,14 +66,23 @@ export function SettingsView({
   const [pendingVersion, setPendingVersion] = useState<string | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>(idleProgress);
-  const [hasKey, setHasKey] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<TmdbKeyStatus | null>(null);
+  const [replacing, setReplacing] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [keyInput, setKeyInput] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [installInfo, setInstallInfo] = useState<InstallInfo | null>(null);
+  const [lastImport, setLastImport] = useState<ImportResult | null>(null);
+  const [lastEnrich, setLastEnrich] = useState<EnrichReport | null>(null);
 
   useEffect(() => {
     void (async () => {
-      setHasKey(await tmdbHasKey());
+      try {
+        const status = await tmdbKeyStatus();
+        setKeyStatus(status);
+      } catch {
+        /* dev without tauri */
+      }
       try {
         const d = await importGetDiagnostics();
         setDiagnostics(d.warnings);
@@ -118,44 +130,68 @@ export function SettingsView({
     try {
       const path = await pickExportZipPath();
       if (!path) return;
+      setBusy(true);
       const result = await importExportZip(path);
-      let posters = 0;
+      setLastImport(result);
+      onStatus(formatImport(result));
+      await onRefresh();
       try {
-        posters = await tmdbEnrich();
+        const report = await tmdbEnrich();
+        setLastEnrich(report);
+        onStatus(`${formatImport(result)} · ${formatEnrich(report)}`);
       } catch (err) {
         log("warn", "poster enrich after import failed", err);
       }
-      onStatus(
-        posters > 0
-          ? `Imported · ${result.viewings} viewings · ${posters} posters fetched`
-          : `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
-      );
       await onRefresh();
     } catch (err) {
       log("error", "settings import failed", err);
       onStatus("Import failed — library unchanged");
+    } finally {
+      setBusy(false);
     }
   }
 
   async function saveKey() {
     if (!keyInput.trim()) return;
     try {
-      await tmdbSetKey(keyInput.trim());
+      setBusy(true);
+      const status = await tmdbSetKey(keyInput.trim());
+      setKeyStatus(status);
       setKeyInput("");
-      setHasKey(true);
-      onStatus("TMDB key stored — fetching posters…");
-      const count = await tmdbEnrich();
-      onStatus(
-        count > 0
-          ? `TMDB key stored · fetched ${count} poster${count === 1 ? "" : "s"}`
-          : "TMDB key stored — click Enrich unmatched if posters are still missing",
-      );
+      if (status.valid !== true) {
+        onStatus(status.lastError ?? "TMDB rejected this key — it was not saved");
+        return;
+      }
+      setReplacing(false);
+      onStatus("TMDB accepted this key — fetching posters…");
+      const report = await tmdbEnrich();
+      setLastEnrich(report);
+      onStatus(formatEnrich(report));
       await onRefresh();
     } catch (err) {
       log("error", "tmdb key save failed", err);
       onStatus("Could not store TMDB key or fetch posters");
+    } finally {
+      setBusy(false);
     }
   }
+
+  async function runEnrich() {
+    try {
+      setBusy(true);
+      const report = await tmdbEnrich();
+      setLastEnrich(report);
+      onStatus(formatEnrich(report));
+      await onRefresh();
+    } catch (err) {
+      log("error", "enrich failed", err);
+      onStatus("Poster fetch failed — open studio.log for details");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const keyConnected = Boolean(keyStatus?.stored && keyStatus.valid === true && !replacing);
 
   async function confirmResetData() {
     const ok = await ask(
@@ -202,58 +238,131 @@ export function SettingsView({
         </div>
         <div className="setting-row">
           <label>Letterboxd export</label>
-          <button type="button" className="primary" onClick={() => void importExport()}>
-            Import ZIP
+          <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
+            {busy ? "Working…" : "Import ZIP"}
           </button>
         </div>
+        {lastImport ? (
+          <div className="result-card">
+            <dl>
+              <div>
+                <dt>Films</dt>
+                <dd>{lastImport.movies}</dd>
+              </div>
+              <div>
+                <dt>Viewings</dt>
+                <dd>{lastImport.viewings}</dd>
+              </div>
+              <div>
+                <dt>Ratings</dt>
+                <dd>{lastImport.ratings}</dd>
+              </div>
+              <div>
+                <dt>Already present</dt>
+                <dd>{lastImport.skipped}</dd>
+              </div>
+            </dl>
+            <p className="hint">{formatImport(lastImport)}</p>
+            {lastImport.warnings.map((w) => (
+              <p key={w} className="hint">
+                {w}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </section>
       <section className="settings-group solid-card">
         <h2>Catalog</h2>
         <p className="hint">
-          TMDB key is stored in Windows Credential Manager, never in studio.json.
+          TMDB key is stored in Windows Credential Manager, never in studio.json. Studio asks TMDB
+          whether the key works before saving it.
         </p>
-        <div className="setting-row">
-          <label>TMDB API key</label>
-          <input
-            value={keyInput}
-            onChange={(e) => setKeyInput(e.target.value)}
-            placeholder={hasKey ? "Key saved — paste to replace" : "optional enrichment key"}
-            spellCheck={false}
-          />
-        </div>
+        {keyConnected ? (
+          <p className="key-status is-ok">
+            TMDB accepted this key{keyStatus?.kind ? ` · ${keyStatus.kind}` : ""}. The insert field stays
+            hidden until you replace it.
+          </p>
+        ) : keyStatus?.stored && keyStatus.valid === false ? (
+          <p className="key-status is-bad">{keyStatus.lastError ?? "TMDB rejected this key."}</p>
+        ) : keyStatus?.stored && keyStatus.valid == null ? (
+          <p className="key-status is-warn">
+            A key is stored, but Studio could not reach TMDB to verify it.
+            {keyStatus.lastError ? ` ${keyStatus.lastError}` : ""}
+          </p>
+        ) : (
+          <p className="key-status is-warn">
+            No TMDB key yet. ZIP import still works; posters need this key or Letterboxd oEmbed.
+          </p>
+        )}
+        {!keyConnected ? (
+          <div className="setting-row">
+            <label>TMDB API key</label>
+            <input
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder={
+                keyStatus?.stored
+                  ? "Paste a replacement key"
+                  : "API Key (v3) from themoviedb.org/settings/api"
+              }
+              spellCheck={false}
+              disabled={busy}
+            />
+          </div>
+        ) : null}
         <div className="row-actions">
-          <button type="button" className="ghost" onClick={() => void saveKey()}>
-            Save key
-          </button>
+          {!keyConnected ? (
+            <button type="button" className="ghost" disabled={busy || !keyInput.trim()} onClick={() => void saveKey()}>
+              Save key
+            </button>
+          ) : (
+            <button type="button" className="ghost" disabled={busy} onClick={() => setReplacing(true)}>
+              Replace key
+            </button>
+          )}
           <button
             type="button"
             className="ghost"
-            onClick={() => void tmdbClearKey().then(() => setHasKey(false))}
-          >
-            Clear key
-          </button>
-          <button
-            type="button"
-            className="ghost"
+            disabled={busy || !keyStatus?.stored}
             onClick={() =>
-              void tmdbEnrich()
-                .then((count) => {
-                  onStatus(
-                    count > 0
-                      ? `Enriched ${count} poster${count === 1 ? "" : "s"}`
-                      : "No new posters to fetch — add a TMDB key or re-import",
-                  );
-                  return onRefresh();
-                })
-                .catch((err) => {
-                  log("error", "enrich failed", err);
-                  onStatus("Poster fetch failed — check your TMDB key");
-                })
+              void tmdbClearKey().then((status) => {
+                setKeyStatus(status);
+                setReplacing(false);
+                onStatus("TMDB key removed");
+              })
             }
           >
+            Remove key
+          </button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => void runEnrich()}>
             Enrich unmatched
           </button>
         </div>
+        {lastEnrich ? (
+          <div className="result-card">
+            <dl>
+              <div>
+                <dt>Matched</dt>
+                <dd>
+                  {lastEnrich.matched}/{lastEnrich.attempted}
+                </dd>
+              </div>
+              <div>
+                <dt>Posters</dt>
+                <dd>{lastEnrich.posters}</dd>
+              </div>
+              <div>
+                <dt>Still unmatched</dt>
+                <dd>{lastEnrich.remainingUnmatched}</dd>
+              </div>
+              <div>
+                <dt>Missing poster</dt>
+                <dd>{lastEnrich.remainingWithoutPoster}</dd>
+              </div>
+            </dl>
+            <p className="hint">{formatEnrich(lastEnrich)}</p>
+          </div>
+        ) : null}
       </section>
       <section className="settings-group solid-card">
         <h2>Appearance</h2>
@@ -305,6 +414,9 @@ export function SettingsView({
         <div className="row-actions">
           <button type="button" className="ghost" onClick={() => void openDataFolder().catch(() => onStatus("Could not open data folder"))}>
             Open data folder
+          </button>
+          <button type="button" className="ghost" onClick={() => void openLogFile().catch(() => onStatus("Could not open studio.log"))}>
+            Open log
           </button>
           {installInfo?.uninstallerPath ? (
             <button type="button" className="ghost" onClick={() => void runUninstaller()}>

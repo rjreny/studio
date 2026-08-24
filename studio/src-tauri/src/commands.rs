@@ -4,9 +4,9 @@ use crate::letterboxd::rss::{rss_url, sync_rss};
 use crate::letterboxd::zip::discover_zip;
 use crate::migration::migrate_legacy;
 use crate::models::{
-    AppSession, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics, ImportResult,
-    ImportSummary, InstallInfo, LegacyLibrary, LibraryCoverage, LibraryPage, LibraryQuery,
-    MigrationResult, SetRatingInput, SyncResult,
+    AppSession, EnrichReport, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics,
+    ImportResult, ImportSummary, InstallInfo, JobProgress, LegacyLibrary, LibraryCoverage,
+    LibraryPage, LibraryQuery, MigrationResult, SetRatingInput, SyncResult, TmdbKeyStatus,
 };
 use crate::queries::{get_film, get_friend_feed, get_home, get_library};
 use crate::storage::db::Database;
@@ -15,7 +15,7 @@ use rusqlite::params;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 pub struct AppState {
@@ -28,6 +28,7 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn init_state(app: &AppHandle) -> Result<AppState, String> {
+    crate::app_log::write(app, "app started");
     let path = db_path(app)?;
     let db = Database::open(&path)?;
     Ok(AppState { db: Mutex::new(db) })
@@ -107,6 +108,9 @@ pub fn get_install_info(app: AppHandle) -> Result<InstallInfo, String> {
         database_path: db_path.to_string_lossy().into_owned(),
         executable_path: exe.map(|p| p.to_string_lossy().into_owned()),
         uninstaller_path: uninstaller.map(|p| p.to_string_lossy().into_owned()),
+        log_path: crate::app_log::log_path(&app)?
+            .to_string_lossy()
+            .into_owned(),
     })
 }
 
@@ -147,11 +151,37 @@ pub fn home_get(state: State<'_, AppState>) -> Result<HomeViewModel, String> {
 }
 
 #[tauri::command]
-pub fn import_export_zip(path: String, state: State<'_, AppState>) -> Result<ImportResult, String> {
+pub fn import_export_zip(
+    path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ImportResult, String> {
+    crate::app_log::write(&app, &format!("zip import start {path}"));
     let discovery = discover_zip(&path)?;
+    crate::app_log::write(
+        &app,
+        &format!(
+            "zip discovered files={} unknown={} warnings={}",
+            discovery.files.len(),
+            discovery.unknown_paths.len(),
+            discovery.warnings.len()
+        ),
+    );
+    for file in &discovery.files {
+        crate::app_log::write(
+            &app,
+            &format!("zip file {} kind={}", file.relative_path, file.kind.as_str()),
+        );
+    }
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let result = import_zip_discovery(&mut db, &discovery)?;
-    let _ = tmdb::enrich_catalog(&db);
+    crate::app_log::write(
+        &app,
+        &format!(
+            "zip import done movies={} viewings={} ratings={} skipped={} warnings={:?}",
+            result.movies, result.viewings, result.ratings, result.skipped, result.warnings
+        ),
+    );
     Ok(result)
 }
 
@@ -188,7 +218,6 @@ pub fn sync_self(username: String, state: State<'_, AppState>) -> Result<SyncRes
     let xml = crate::fetch_url(&url)?;
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let result = sync_rss(&mut db, &clean, &xml)?;
-    let _ = tmdb::enrich_catalog(&db);
     Ok(result)
 }
 
@@ -433,23 +462,28 @@ pub fn migrate_from_legacy(
 }
 
 #[tauri::command]
-pub fn tmdb_set_key(key: String, state: State<'_, AppState>) -> Result<(), String> {
-    tmdb::set_api_key(&key)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn()
-        .execute(
-            "UPDATE movie_links SET match_state = 'unmatched'
-             WHERE match_state = 'ambiguous'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-    let _ = tmdb::enrich_catalog(&db);
-    Ok(())
+pub fn tmdb_set_key(key: String, app: AppHandle) -> Result<TmdbKeyStatus, String> {
+    let status = tmdb::store_api_key(&key)?;
+    crate::app_log::write(
+        &app,
+        &format!(
+            "tmdb key save stored={} valid={:?} kind={:?} error={:?}",
+            status.stored, status.valid, status.kind, status.last_error
+        ),
+    );
+    Ok(status)
 }
 
 #[tauri::command]
-pub fn tmdb_clear_key() -> Result<(), String> {
-    tmdb::clear_api_key()
+pub fn tmdb_clear_key(app: AppHandle) -> Result<TmdbKeyStatus, String> {
+    tmdb::clear_api_key()?;
+    crate::app_log::write(&app, "tmdb key cleared");
+    Ok(TmdbKeyStatus {
+        stored: false,
+        valid: None,
+        kind: None,
+        last_error: None,
+    })
 }
 
 #[tauri::command]
@@ -460,7 +494,14 @@ pub fn tmdb_has_key() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn tmdb_enrich(state: State<'_, AppState>) -> Result<u32, String> {
+pub fn tmdb_key_status() -> Result<TmdbKeyStatus, String> {
+    tmdb::key_status()
+}
+
+#[tauri::command]
+pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<EnrichReport, String> {
+    let log_file = crate::app_log::log_path(&app)?;
+    crate::app_log::write(&app, "enrich started");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.conn()
         .execute(
@@ -469,7 +510,46 @@ pub fn tmdb_enrich(state: State<'_, AppState>) -> Result<u32, String> {
             [],
         )
         .map_err(|e| e.to_string())?;
-    tmdb::enrich_catalog(&db)
+    let app_for_progress = app.clone();
+    let mut report = tmdb::enrich_catalog_with(&db, &mut |progress| {
+        let _ = app_for_progress.emit("studio-job", &progress);
+        crate::app_log::write(
+            &app_for_progress,
+            &format!(
+                "{} {}/{} posters={} errors={}",
+                progress.label, progress.current, progress.total, progress.posters, progress.errors
+            ),
+        );
+    })?;
+    report.log_path = Some(log_file.to_string_lossy().into_owned());
+    crate::app_log::write(
+        &app,
+        &format!(
+            "enrich finished matched={} posters={} remaining_unmatched={} remaining_without_poster={} errors={} last_error={:?}",
+            report.matched,
+            report.posters,
+            report.remaining_unmatched,
+            report.remaining_without_poster,
+            report.errors,
+            report.last_error
+        ),
+    );
+    let _ = app.emit(
+        "studio-job",
+        JobProgress {
+            job: "enrich".into(),
+            label: format!(
+                "Finished · {} posters · {} still missing",
+                report.posters, report.remaining_without_poster
+            ),
+            current: report.attempted,
+            total: report.attempted,
+            posters: report.posters,
+            errors: report.errors,
+            done: true,
+        },
+    );
+    Ok(report)
 }
 
 #[tauri::command]

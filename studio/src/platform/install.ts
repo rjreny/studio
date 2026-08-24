@@ -25,6 +25,11 @@ export async function openDataFolder(): Promise<void> {
   await revealItemInDir(info.databasePath);
 }
 
+export async function openLogFile(): Promise<void> {
+  const info = await getInstallInfo();
+  await revealItemInDir(info.logPath);
+}
+
 export async function resetStudioData(): Promise<void> {
   await resetAllData();
   await clearAllSettings();

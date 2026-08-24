@@ -1,4 +1,4 @@
-use super::csv::{classify_csv, parse_csv, CsvKind};
+use super::csv::{classify_csv, parse_headers, CsvKind};
 use super::fingerprint::content_hash;
 use std::collections::HashMap;
 use std::io::Read;
@@ -52,15 +52,8 @@ pub fn discover_zip(path: &str) -> Result<ZipDiscovery, String> {
         }
         let mut text = String::new();
         entry.read_to_string(&mut text).map_err(|e| e.to_string())?;
-        let headers: Vec<String> = text
-            .lines()
-            .next()
-            .map(|line| {
-                line.split(',')
-                    .map(|s| s.trim().trim_matches('"').to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let text = text.trim_start_matches('\u{feff}').to_string();
+        let headers = parse_headers(&text);
         match classify_csv(&relative, &headers) {
             Some(kind) => files.push(ZipCsvFile {
                 relative_path: relative,
@@ -133,15 +126,8 @@ pub fn discover_zip_bytes(bytes: &[u8]) -> Result<ZipDiscovery, String> {
         }
         let mut text = String::new();
         entry.read_to_string(&mut text).map_err(|e| e.to_string())?;
-        let headers: Vec<String> = text
-            .lines()
-            .next()
-            .map(|line| {
-                line.split(',')
-                    .map(|s| s.trim().trim_matches('"').to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let text = text.trim_start_matches('\u{feff}').to_string();
+        let headers = parse_headers(&text);
         match classify_csv(&relative, &headers) {
             Some(kind) => files.push(ZipCsvFile {
                 relative_path: relative,
@@ -163,13 +149,5 @@ pub fn discover_zip_bytes(bytes: &[u8]) -> Result<ZipDiscovery, String> {
 }
 
 pub fn headers_of(text: &str) -> Vec<String> {
-    text.lines()
-        .next()
-        .map(|line| {
-            parse_csv(text)
-                .first()
-                .map(|_| Vec::new())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default()
+    parse_headers(text)
 }

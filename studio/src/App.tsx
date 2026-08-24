@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { DevUpdateButton } from "./app/shell/DevUpdateButton";
 import { TitleBar } from "./app/shell/TitleBar";
 import { ConnectView } from "./features/films/ConnectView";
@@ -13,14 +14,14 @@ import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type
 import { appVersion } from "./platform/app";
 import {
   formatCoverage,
+  formatEnrich,
   getHome,
   getSession,
   migrateFromLegacy,
   setSelfUsername,
   tmdbEnrich,
-  tmdbHasKey,
 } from "./platform/filmLibrary";
-import type { AppSession, HomeViewModel, LibraryCoverage } from "./platform/types/film";
+import type { AppSession, HomeViewModel, JobProgress, LibraryCoverage } from "./platform/types/film";
 import { log } from "./platform/log";
 import { getSetting, setSetting } from "./platform/settings";
 import { persistWindowBounds, restoreWindowBounds } from "./platform/window";
@@ -50,6 +51,8 @@ export default function App() {
   const [selectedFilmId, setSelectedFilmId] = useState<string | null>(null);
   const [legacyLibrary, setLegacyLibrary] = useState<Library>(emptyLibrary);
   const [session, setSession] = useState<AppSession | null>(null);
+  const [libraryEpoch, setLibraryEpoch] = useState(0);
+  const [job, setJob] = useState<JobProgress | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -57,6 +60,7 @@ export default function App() {
       setSession(s);
       setCoverage(s.coverage);
       setHome(h);
+      setLibraryEpoch((n) => n + 1);
     } catch (err) {
       log("warn", "refresh failed", err);
     }
@@ -118,12 +122,10 @@ export default function App() {
 
         void (async () => {
           try {
-            const enriched = await tmdbEnrich();
-            if (enriched > 0) {
-              setStatus(`Loaded ${enriched} poster${enriched === 1 ? "" : "s"} from catalog`);
+            const report = await tmdbEnrich();
+            setStatus(formatEnrich(report));
+            if (report.posters > 0 || report.matched > 0) {
               await refresh();
-            } else if (await tmdbHasKey()) {
-              setStatus("Matching films to TMDB — click Enrich again if posters are still missing");
             }
           } catch (err) {
             log("warn", "poster enrich skipped", err);
@@ -151,6 +153,18 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void persistWindowBounds().then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<JobProgress>("studio-job", (event) => {
+      const next = event.payload;
+      setJob(next.done ? null : next);
+      setStatus(next.label);
+    }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
@@ -253,7 +267,11 @@ export default function App() {
                 />
               ) : null}
               {route === "films" ? (
-                <FilmsView onSelectFilm={setSelectedFilmId} onStatus={setStatus} />
+                <FilmsView
+                  onSelectFilm={setSelectedFilmId}
+                  onStatus={setStatus}
+                  reloadToken={libraryEpoch}
+                />
               ) : null}
               {route === "friends" ? (
                 <FriendsView onStatus={setStatus} onRefresh={refresh} />
@@ -278,6 +296,14 @@ export default function App() {
           )}
         </div>
       </main>
+      {job && !job.done ? (
+        <div className="job-banner">
+          <span>{job.label}</span>
+          <span>
+            {job.current}/{job.total} · {job.posters} posters · {job.errors} errors
+          </span>
+        </div>
+      ) : null}
       <footer className="status solid">
         <span>{status}</span>
         <div className="status-actions">

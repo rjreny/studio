@@ -1,5 +1,6 @@
 use crate::letterboxd::normalize::{normalize_title, parse_year};
 use crate::letterboxd::posters::{backfill_letterboxd_posters, cache_poster_for_siblings, full_poster_url};
+use crate::models::{EnrichReport, JobProgress, TmdbKeyStatus};
 use crate::storage::db::Database;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -12,6 +13,80 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .set_password(key)
         .map_err(|e| e.to_string())
+}
+
+pub fn store_api_key(key: &str) -> Result<TmdbKeyStatus, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("Paste a TMDB API key first".into());
+    }
+    let status = probe_key(trimmed)?;
+    if status.valid != Some(true) {
+        let previous = get_api_key()?.is_some();
+        let mut rejected = status;
+        rejected.stored = previous;
+        if previous {
+            rejected.last_error = Some(format!(
+                "{}. Previous key is still stored.",
+                rejected
+                    .last_error
+                    .unwrap_or_else(|| "TMDB rejected this key".into())
+            ));
+        }
+        return Ok(rejected);
+    }
+    set_api_key(trimmed)?;
+    Ok(TmdbKeyStatus {
+        stored: true,
+        valid: Some(true),
+        kind: status.kind,
+        last_error: None,
+    })
+}
+
+pub fn key_status() -> Result<TmdbKeyStatus, String> {
+    match get_api_key()? {
+        Some(key) => {
+            let mut status = probe_key(&key)?;
+            status.stored = true;
+            Ok(status)
+        }
+        None => Ok(TmdbKeyStatus {
+            stored: false,
+            valid: None,
+            kind: None,
+            last_error: None,
+        }),
+    }
+}
+
+fn probe_key(key: &str) -> Result<TmdbKeyStatus, String> {
+    let kind = if is_bearer_token(key) {
+        "accessToken"
+    } else {
+        "apiKey"
+    };
+    match tmdb_get(key, "/configuration") {
+        Ok(_) => Ok(TmdbKeyStatus {
+            stored: false,
+            valid: Some(true),
+            kind: Some(kind.into()),
+            last_error: None,
+        }),
+        Err(err) => {
+            let invalid = err.contains("401") || err.contains("403") || err.contains("Unauthorized");
+            Ok(TmdbKeyStatus {
+                stored: false,
+                valid: if invalid { Some(false) } else { None },
+                kind: Some(kind.into()),
+                last_error: Some(if invalid {
+                    "TMDB rejected this key. Use the API Key (v3) from themoviedb.org/settings/api.".into()
+                } else {
+                    format!("Could not reach TMDB: {err}")
+                }),
+            })
+        }
+    }
 }
 
 pub fn get_api_key() -> Result<Option<String>, String> {
@@ -79,34 +154,127 @@ struct TmdbSearchResult {
     release_date: Option<String>,
 }
 
-pub fn enrich_catalog(db: &Database) -> Result<u32, String> {
-    let mut total = 0u32;
+pub fn enrich_catalog(db: &Database) -> Result<EnrichReport, String> {
+    enrich_catalog_with(db, &mut |_| {})
+}
+
+pub fn enrich_catalog_with(
+    db: &Database,
+    progress: &mut dyn FnMut(JobProgress),
+) -> Result<EnrichReport, String> {
+    let mut report = EnrichReport {
+        has_key: false,
+        key_valid: None,
+        attempted: 0,
+        matched: 0,
+        posters: 0,
+        remaining_unmatched: 0,
+        remaining_without_poster: 0,
+        errors: 0,
+        last_error: None,
+        log_path: None,
+    };
+
     if let Some(api_key) = get_api_key()? {
-        for _ in 0..40 {
-            let batch = enrich_unmatched_batch(db, &api_key, 50)?;
-            total += batch;
-            if batch == 0 {
+        report.has_key = true;
+        match tmdb_get(&api_key, "/configuration") {
+            Ok(_) => report.key_valid = Some(true),
+            Err(err) => {
+                report.key_valid = Some(false);
+                report.last_error = Some(err);
+            }
+        }
+        if report.key_valid == Some(true) {
+            for _ in 0..40 {
+                let batch = enrich_unmatched_batch(db, &api_key, 50, progress, &mut report)?;
+                if batch == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = db.conn().execute(
+        "UPDATE source_movie_records SET poster_fetch_failed = 0
+         WHERE cached_poster_url IS NULL OR TRIM(cached_poster_url) = ''",
+        [],
+    );
+
+    for _ in 0..12 {
+        let before = report.posters;
+        match backfill_letterboxd_posters(db, 40) {
+            Ok(n) => {
+                report.posters += n;
+                progress(JobProgress {
+                    job: "enrich".into(),
+                    label: format!("Letterboxd posters · {} fetched", report.posters),
+                    current: report.posters,
+                    total: report.posters.max(1),
+                    posters: report.posters,
+                    errors: report.errors,
+                    done: false,
+                });
+                if n == 0 || report.posters == before {
+                    break;
+                }
+            }
+            Err(err) => {
+                report.errors += 1;
+                report.last_error = Some(err);
                 break;
             }
         }
     }
-    // ZIP exports have no poster URLs. Use Letterboxd oEmbed for anything TMDB
-    // did not match, including when a TMDB key is stored.
-    for _ in 0..8 {
-        let batch = backfill_letterboxd_posters(db, 40)?;
-        total += batch;
-        if batch == 0 {
-            break;
-        }
-    }
-    Ok(total)
+
+    report.remaining_unmatched = count_unmatched(db)?;
+    report.remaining_without_poster = count_without_poster(db)?;
+    progress(JobProgress {
+        job: "enrich".into(),
+        label: "Catalog pass complete".into(),
+        current: report.attempted,
+        total: report.attempted.max(1),
+        posters: report.posters,
+        errors: report.errors,
+        done: true,
+    });
+    Ok(report)
 }
 
-pub fn enrich_unmatched(db: &Database) -> Result<u32, String> {
+pub fn enrich_unmatched(db: &Database) -> Result<EnrichReport, String> {
     enrich_catalog(db)
 }
 
-fn enrich_unmatched_batch(db: &Database, api_key: &str, limit: u32) -> Result<u32, String> {
+fn count_unmatched(db: &Database) -> Result<u32, String> {
+    db.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM movie_links WHERE match_state IN ('unmatched', 'ambiguous')",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn count_without_poster(db: &Database) -> Result<u32, String> {
+    db.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM source_movie_records smr
+             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+             LEFT JOIN movies m ON m.id = ml.movie_id
+             WHERE (smr.cached_poster_url IS NULL OR TRIM(smr.cached_poster_url) = '')
+               AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn enrich_unmatched_batch(
+    db: &Database,
+    api_key: &str,
+    limit: u32,
+    progress: &mut dyn FnMut(JobProgress),
+    report: &mut EnrichReport,
+) -> Result<u32, String> {
     let mut stmt = db
         .conn()
         .prepare(
@@ -126,14 +294,33 @@ fn enrich_unmatched_batch(db: &Database, api_key: &str, limit: u32) -> Result<u3
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut enriched = 0u32;
-    for (smr_id, raw, normalized, year) in rows {
+    let total = rows.len() as u32;
+    let mut matched = 0u32;
+    for (index, (smr_id, raw, normalized, year)) in rows.into_iter().enumerate() {
+        report.attempted += 1;
         match enrich_one_film(db, api_key, &smr_id, &raw, &normalized, year) {
-            Ok(true) => enriched += 1,
-            Ok(false) | Err(_) => {}
+            Ok(true) => {
+                matched += 1;
+                report.matched += 1;
+                report.posters += 1;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                report.errors += 1;
+                report.last_error = Some(err);
+            }
         }
+        progress(JobProgress {
+            job: "enrich".into(),
+            label: format!("Matching TMDB · {}/{}", index as u32 + 1, total.max(1)),
+            current: index as u32 + 1,
+            total: total.max(1),
+            posters: report.posters,
+            errors: report.errors,
+            done: false,
+        });
     }
-    Ok(enriched)
+    Ok(matched)
 }
 
 fn enrich_one_film(
@@ -240,6 +427,19 @@ fn try_exact_match(
     Ok(false)
 }
 
+fn search_movies(
+    api_key: &str,
+    title: &str,
+    year: Option<i32>,
+) -> Result<TmdbSearchResponse, String> {
+    let mut path = format!("/search/movie?query={}", percent_encode(title));
+    if let Some(y) = year {
+        path.push_str(&format!("&primary_release_year={y}"));
+    }
+    let response = tmdb_get(api_key, &path)?;
+    serde_json::from_str(&response).map_err(|e| e.to_string())
+}
+
 fn search_and_queue(
     db: &Database,
     api_key: &str,
@@ -249,15 +449,10 @@ fn search_and_queue(
     year: Option<i32>,
 ) -> Result<u32, String> {
     let title = parse_raw_title(raw);
-    let mut path = format!(
-        "/search/movie?query={}",
-        urlencoding_simple(&title)
-    );
-    if let Some(y) = year {
-        path.push_str(&format!("&primary_release_year={y}"));
+    let mut parsed = search_movies(api_key, &title, year)?;
+    if pick_search_match(&parsed.results, normalized, year).is_none() && year.is_some() {
+        parsed = search_movies(api_key, &title, None)?;
     }
-    let response = tmdb_get(api_key, &path)?;
-    let parsed: TmdbSearchResponse = serde_json::from_str(&response).map_err(|e| e.to_string())?;
 
     if let Some(result) = pick_search_match(&parsed.results, normalized, year) {
         let movie_id = upsert_tmdb_movie(db, result.id)?;
@@ -445,16 +640,17 @@ fn parse_raw_title(raw: &str) -> String {
     raw.to_string()
 }
 
-fn urlencoding_simple(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
             }
-        })
-        .collect()
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn genre_names(v: &serde_json::Value) -> Vec<String> {
@@ -524,6 +720,12 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.signature"
         ));
         assert!(!is_bearer_token("a1b2c3d4e5f678901234567890123456"));
+    }
+
+    #[test]
+    fn percent_encodes_utf8_bytes() {
+        assert_eq!(percent_encode("Amélie"), "Am%C3%A9lie");
+        assert_eq!(percent_encode("The Matrix"), "The%20Matrix");
     }
 }
 

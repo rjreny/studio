@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSession,
+  EnrichReport,
   FilmDetail,
   FriendRow,
   HomeViewModel,
@@ -9,6 +10,7 @@ import type {
   LibraryCoverage,
   LibraryPage,
   LibraryQuery,
+  TmdbKeyStatus,
 } from "./types/film";
 
 export async function getSession(): Promise<AppSession> {
@@ -93,11 +95,11 @@ export async function migrateFromLegacy(legacy: {
   return invoke("migrate_from_legacy", { legacy });
 }
 
-export async function tmdbSetKey(key: string) {
+export async function tmdbSetKey(key: string): Promise<TmdbKeyStatus> {
   return invoke("tmdb_set_key", { key });
 }
 
-export async function tmdbClearKey() {
+export async function tmdbClearKey(): Promise<TmdbKeyStatus> {
   return invoke("tmdb_clear_key");
 }
 
@@ -105,8 +107,32 @@ export async function tmdbHasKey(): Promise<boolean> {
   return invoke("tmdb_has_key");
 }
 
-export async function tmdbEnrich(): Promise<number> {
+export async function tmdbKeyStatus(): Promise<TmdbKeyStatus> {
+  return invoke("tmdb_key_status");
+}
+
+export async function tmdbEnrich(): Promise<EnrichReport> {
   return invoke("tmdb_enrich");
+}
+
+export function formatEnrich(r: EnrichReport): string {
+  if (r.keyValid === false) {
+    return r.lastError ?? "TMDB rejected the saved key";
+  }
+  const parts = [
+    `matched ${r.matched}/${r.attempted}`,
+    `${r.posters} posters`,
+    `${r.remainingUnmatched} unmatched`,
+    `${r.remainingWithoutPoster} still without a poster`,
+  ];
+  if (!r.hasKey) parts.unshift("no TMDB key");
+  if (r.errors) parts.push(`${r.errors} errors`);
+  if (r.lastError) parts.push(r.lastError);
+  return parts.join(" · ");
+}
+
+export function formatImport(r: ImportResult): string {
+  return `Imported ${r.movies} films · ${r.viewings} viewings · ${r.ratings} ratings · ${r.skipped} already present`;
 }
 
 export async function listFriends(): Promise<FriendRow[]> {

@@ -1,11 +1,26 @@
+fn strip_bom(s: &str) -> &str {
+    s.trim_start_matches('\u{feff}')
+}
+
+pub fn parse_headers(text: &str) -> Vec<String> {
+    match strip_bom(text).lines().next() {
+        Some(line) => split_csv_line(line)
+            .into_iter()
+            .map(|h| strip_bom(&h).trim().to_string())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 pub fn parse_csv(text: &str) -> Vec<Record> {
+    let text = strip_bom(text);
     let mut records = Vec::new();
     let mut lines = text.lines();
     let header_line = match lines.next() {
         Some(line) => line,
         None => return records,
     };
-    let headers: Vec<String> = split_csv_line(header_line);
+    let headers: Vec<String> = parse_headers(header_line);
     for (idx, line) in lines.enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -118,5 +133,22 @@ impl CsvKind {
             Self::Watchlist => "watchlist",
             Self::Reviews => "reviews",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_utf8_bom_from_headers() {
+        let text = "\u{feff}Date,Name,Year\n2020-01-01,Inception,2010\n";
+        let rows = parse_csv(text);
+        assert_eq!(parse_headers(text), vec!["Date", "Name", "Year"]);
+        assert_eq!(rows[0].get(&["Name"]), "Inception");
+        assert_eq!(
+            classify_csv("diary.csv", &parse_headers(text)),
+            Some(CsvKind::Diary)
+        );
     }
 }

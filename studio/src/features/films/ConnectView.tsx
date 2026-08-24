@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { importExportZip, syncSelf, tmdbEnrich } from "../../platform/filmLibrary";
+import { importExportZip, formatEnrich, formatImport, syncSelf, tmdbEnrich } from "../../platform/filmLibrary";
 import { pickExportZipPath } from "../../platform/files";
 import { log } from "../../platform/log";
 
@@ -47,18 +47,15 @@ export function ConnectView({
       const path = await pickExportZipPath();
       if (!path) return;
       const result = await importExportZip(path);
-      let posters = 0;
+      onStatus(formatImport(result));
+      await onConnected();
       try {
-        posters = await tmdbEnrich();
+        const report = await tmdbEnrich();
+        onStatus(`${formatImport(result)} · ${formatEnrich(report)}`);
+        await onConnected();
       } catch (err) {
         log("warn", "poster enrich after import failed", err);
       }
-      onStatus(
-        posters > 0
-          ? `Imported · ${result.viewings} viewings · ${posters} posters fetched`
-          : `Imported · ${result.viewings} viewings · ${result.coverage.uniqueMovies} unique films`,
-      );
-      await onConnected();
     } catch (err) {
       log("error", "export import failed", err);
       setError("Could not read that export. Use an official Letterboxd ZIP.");

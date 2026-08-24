@@ -52,18 +52,32 @@ pub fn letterboxd_oembed_poster(uri: &str) -> Result<Option<String>, String> {
     } else {
         format!("https://letterboxd.com{trimmed}")
     };
-    let url = format!(
-        "https://letterboxd.com/oembed?url={}",
-        urlencoding_simple(&page)
-    );
-    let body = ureq::get(&url)
-        .set("User-Agent", "Studio/0.1 (local film app)")
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    Ok(v["thumbnail_url"].as_str().map(String::from))
+    let encoded = percent_encode(&page);
+    let endpoints = [
+        format!("https://letterboxd.com/services/oembed?url={encoded}"),
+        format!("https://letterboxd.com/oembed?url={encoded}"),
+    ];
+    let mut last_err = None;
+    for url in endpoints {
+        match ureq::get(&url)
+            .set("User-Agent", "Studio/0.1 (local film app)")
+            .timeout(std::time::Duration::from_secs(15))
+            .call()
+        {
+            Ok(resp) => {
+                let body = resp.into_string().map_err(|e| e.to_string())?;
+                let v: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                return Ok(v["thumbnail_url"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from));
+            }
+            Err(ureq::Error::Status(code, _)) if code == 404 => return Ok(None),
+            Err(err) => last_err = Some(err.to_string()),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "Letterboxd oEmbed failed".into()))
 }
 
 /// Letterboxd oEmbed is a last resort when no TMDB key is configured.
@@ -98,7 +112,7 @@ pub fn backfill_letterboxd_posters(db: &Database, limit: u32) -> Result<u32, Str
                 mark_poster_fetch_failed(db.conn(), &smr_id)?;
             }
             Err(_) => {
-                mark_poster_fetch_failed(db.conn(), &smr_id)?;
+                // Network / 5xx: leave unmarked so Enrich can retry.
             }
         }
     }
@@ -241,16 +255,17 @@ fn rss_tag(xml: &str, name: &str) -> Option<String> {
     None
 }
 
-fn urlencoding_simple(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
             }
-        })
-        .collect()
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -306,5 +321,10 @@ mod tests {
             )
             .expect("identity poster");
         assert_eq!(identity, poster);
+    }
+
+    #[test]
+    fn percent_encodes_utf8_bytes() {
+        assert_eq!(percent_encode("Amélie"), "Am%C3%A9lie");
     }
 }

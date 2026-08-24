@@ -15,9 +15,11 @@ const SORTS = [
 export function FilmsView({
   onSelectFilm,
   onStatus,
+  reloadToken = 0,
 }: {
   onSelectFilm: (id: string) => void;
   onStatus: (s: string) => void;
+  reloadToken?: number;
 }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<(typeof SORTS)[number]["id"]>("recent");
@@ -49,7 +51,7 @@ export function FilmsView({
         setBusy(false);
       }
     })();
-  }, [query, sort, filter, onStatus]);
+  }, [query, sort, filter, onStatus, reloadToken]);
 
   const decades = useMemo(() => {
     const set = new Set<number>();

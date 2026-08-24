@@ -24,6 +24,37 @@ export type InstallInfo = {
   databasePath: string;
   executablePath: string | null;
   uninstallerPath: string | null;
+  logPath: string;
+};
+
+export type TmdbKeyStatus = {
+  stored: boolean;
+  valid: boolean | null;
+  kind: string | null;
+  lastError: string | null;
+};
+
+export type EnrichReport = {
+  hasKey: boolean;
+  keyValid: boolean | null;
+  attempted: number;
+  matched: number;
+  posters: number;
+  remainingUnmatched: number;
+  remainingWithoutPoster: number;
+  errors: number;
+  lastError: string | null;
+  logPath: string | null;
+};
+
+export type JobProgress = {
+  job: string;
+  label: string;
+  current: number;
+  total: number;
+  posters: number;
+  errors: number;
+  done: boolean;
 };
 
 export type LibraryItem = {

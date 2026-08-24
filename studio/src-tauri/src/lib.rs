@@ -1,3 +1,4 @@
+mod app_log;
 mod catalog;
 mod commands;
 mod letterboxd;
@@ -140,6 +141,7 @@ pub fn run() {
             commands::tmdb_set_key,
             commands::tmdb_clear_key,
             commands::tmdb_has_key,
+            commands::tmdb_key_status,
             commands::tmdb_enrich,
             commands::list_friends,
             commands::update_preflight,
