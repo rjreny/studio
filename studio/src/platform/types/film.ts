@@ -10,6 +10,22 @@ export type LibraryCoverage = {
   warnings: string[];
 };
 
+export type AppSession = {
+  selfUsername: string | null;
+  friendCount: number;
+  hasSetup: boolean;
+  coverage: LibraryCoverage;
+};
+
+export type InstallInfo = {
+  version: string;
+  installKind: "dev" | "installed" | "portable" | "unknown";
+  appDataDir: string;
+  databasePath: string;
+  executablePath: string | null;
+  uninstallerPath: string | null;
+};
+
 export type LibraryItem = {
   id: string;
   title: string;

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { type Accent, type Theme } from "../../core/types";
 import { pickExportZipPath } from "../../platform/files";
 import {
@@ -10,7 +11,14 @@ import {
   tmdbHasKey,
   tmdbSetKey,
 } from "../../platform/filmLibrary";
-import type { LibraryCoverage } from "../../platform/types/film";
+import type { InstallInfo, LibraryCoverage } from "../../platform/types/film";
+import {
+  getInstallInfo,
+  installKindLabel,
+  launchUninstaller,
+  openDataFolder,
+  resetStudioData,
+} from "../../platform/install";
 import { log } from "../../platform/log";
 import {
   checkAppUpdate,
@@ -58,6 +66,7 @@ export function SettingsView({
   const [hasKey, setHasKey] = useState(false);
   const [keyInput, setKeyInput] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [installInfo, setInstallInfo] = useState<InstallInfo | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -67,6 +76,11 @@ export function SettingsView({
         setDiagnostics(d.warnings);
       } catch {
         /* dev without tauri */
+      }
+      try {
+        setInstallInfo(await getInstallInfo());
+      } catch (err) {
+        log("warn", "install info unavailable", err);
       }
     })();
   }, []);
@@ -121,6 +135,30 @@ export function SettingsView({
     setKeyInput("");
     setHasKey(true);
     onStatus("TMDB key stored in Windows Credential Manager");
+  }
+
+  async function confirmResetData() {
+    const ok = await ask(
+      "This removes your library, friends, posters, and saved preferences from this device. It cannot be undone.",
+      { title: "Reset Studio?", kind: "warning", okLabel: "Reset everything", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+    try {
+      await resetStudioData();
+    } catch (err) {
+      log("error", "reset failed", err);
+      onStatus("Could not reset Studio data");
+    }
+  }
+
+  async function runUninstaller() {
+    try {
+      await launchUninstaller();
+      onStatus("Uninstaller opened — your library data stays until you reset it or remove the data folder");
+    } catch (err) {
+      log("warn", "uninstaller unavailable", err);
+      onStatus("No uninstaller for this build — remove dev shortcuts manually or use Installed apps in Windows Settings");
+    }
   }
 
   return (
@@ -216,6 +254,44 @@ export function SettingsView({
         </div>
       </section>
       <section className="settings-group solid-card">
+        <h2>Installation</h2>
+        {installInfo ? (
+          <>
+            <div className="setting-row">
+              <label>Build</label>
+              <span>{installKindLabel(installInfo.installKind)}</span>
+            </div>
+            <div className="setting-row">
+              <label>Data folder</label>
+              <span className="mono-path">{installInfo.appDataDir}</span>
+            </div>
+            <p className="hint">
+              Library, friends, posters, and your username live in one SQLite database here. Reinstalling
+              or updating Studio keeps this folder unless you reset it.
+            </p>
+            {installInfo.installKind === "dev" ? (
+              <p className="hint">
+                You are running a dev build. Use the installed release from GitHub for normal install,
+                update, and uninstall behavior.
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        <div className="row-actions">
+          <button type="button" className="ghost" onClick={() => void openDataFolder().catch(() => onStatus("Could not open data folder"))}>
+            Open data folder
+          </button>
+          {installInfo?.uninstallerPath ? (
+            <button type="button" className="ghost" onClick={() => void runUninstaller()}>
+              Uninstall Studio
+            </button>
+          ) : null}
+          <button type="button" className="ghost" onClick={() => void confirmResetData()}>
+            Reset all data
+          </button>
+        </div>
+      </section>
+      <section className="settings-group solid-card">
         <h2>About</h2>
         <div className="setting-row">
           <label>Version</label>
@@ -245,8 +321,8 @@ export function SettingsView({
           </p>
         ) : (
           <p className="hint">
-            Updates download only when you click Update. Studio shows progress here, then restarts
-            once the installer finishes.
+            Updates download only when you click Update. Installing a new release replaces the existing
+            Studio install and keeps your library data.
           </p>
         )}
         {!signingConfigured && !import.meta.env.DEV ? (

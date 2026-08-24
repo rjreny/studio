@@ -1,5 +1,5 @@
 use super::schema::{MIGRATION_SQL, SCHEMA_VERSION};
-use crate::models::LibraryCoverage;
+use crate::models::{AppSession, LibraryCoverage};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::Path;
@@ -241,6 +241,51 @@ impl Database {
             last_full_import,
             warnings,
         })
+    }
+
+    pub fn get_session(&self) -> Result<AppSession, String> {
+        let coverage = self.compute_coverage()?;
+        let self_username = self
+            .get_meta("self_username")?
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
+        let friend_count = self.count_table("friends")?;
+        let friend_activity = self.count_table("friend_activity")?;
+        let imports = self.count_table("imports")?;
+        let has_setup = self_username.is_some()
+            || friend_count > 0
+            || friend_activity > 0
+            || imports > 0
+            || coverage.total_viewings > 0
+            || coverage.unique_movies > 0;
+        Ok(AppSession {
+            self_username,
+            friend_count,
+            has_setup,
+            coverage,
+        })
+    }
+
+    pub fn reset_all_data(&self) -> Result<(), String> {
+        self.conn()
+            .execute_batch(
+                r#"
+                DELETE FROM friend_activity;
+                DELETE FROM friends;
+                DELETE FROM import_entries;
+                DELETE FROM imports;
+                DELETE FROM rating_events;
+                DELETE FROM viewings;
+                DELETE FROM user_movie_state;
+                DELETE FROM movie_aliases;
+                DELETE FROM movie_links;
+                DELETE FROM movies;
+                DELETE FROM source_movie_records;
+                DELETE FROM app_meta;
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        self.set_meta("schema_version", &SCHEMA_VERSION.to_string())
     }
 }
 

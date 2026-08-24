@@ -33,3 +33,14 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
     log("warn", `setSetting ${key} failed`, err);
   }
 }
+
+export async function clearAllSettings(): Promise<void> {
+  memory.clear();
+  if (!store) return;
+  try {
+    await store.clear();
+    await store.save();
+  } catch (err) {
+    log("warn", "clearAllSettings failed", err);
+  }
+}

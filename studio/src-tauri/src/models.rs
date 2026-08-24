@@ -16,6 +16,26 @@ pub struct LibraryCoverage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppSession {
+    pub self_username: Option<String>,
+    pub friend_count: u32,
+    pub has_setup: bool,
+    pub coverage: LibraryCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallInfo {
+    pub version: String,
+    pub install_kind: String,
+    pub app_data_dir: String,
+    pub database_path: String,
+    pub executable_path: Option<String>,
+    pub uninstaller_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub import_id: String,
     pub movies: u32,

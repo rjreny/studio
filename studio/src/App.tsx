@@ -13,13 +13,14 @@ import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type
 import { appVersion } from "./platform/app";
 import {
   formatCoverage,
-  getCoverage,
   getHome,
+  getSession,
   migrateFromLegacy,
+  setSelfUsername,
   tmdbEnrich,
   tmdbHasKey,
 } from "./platform/filmLibrary";
-import type { HomeViewModel, LibraryCoverage } from "./platform/types/film";
+import type { AppSession, HomeViewModel, LibraryCoverage } from "./platform/types/film";
 import { log } from "./platform/log";
 import { getSetting, setSetting } from "./platform/settings";
 import { persistWindowBounds, restoreWindowBounds } from "./platform/window";
@@ -48,11 +49,13 @@ export default function App() {
   const [hydrated, setHydrated] = useState(false);
   const [selectedFilmId, setSelectedFilmId] = useState<string | null>(null);
   const [legacyLibrary, setLegacyLibrary] = useState<Library>(emptyLibrary);
+  const [session, setSession] = useState<AppSession | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [c, h] = await Promise.all([getCoverage(), getHome()]);
-      setCoverage(c);
+      const [s, h] = await Promise.all([getSession(), getHome()]);
+      setSession(s);
+      setCoverage(s.coverage);
       setHome(h);
     } catch (err) {
       log("warn", "refresh failed", err);
@@ -79,7 +82,6 @@ export default function App() {
         if (r && NAV.some((n) => n.id === r)) setRoute(r);
         if (t) setTheme(t);
         if (a) setAccent(a);
-        if (u) setUsername(u);
         if (lib) setLegacyLibrary({ ...emptyLibrary(), ...lib });
         setVersion(v);
         await restoreWindowBounds();
@@ -96,7 +98,23 @@ export default function App() {
           }
         }
 
-        await refresh();
+        const loadedSession = await getSession();
+        setSession(loadedSession);
+        setCoverage(loadedSession.coverage);
+        const resolvedUsername = loadedSession.selfUsername ?? u ?? "";
+        if (resolvedUsername) setUsername(resolvedUsername);
+        if (u && !loadedSession.selfUsername) {
+          await setSelfUsername(u);
+        } else if (loadedSession.selfUsername && loadedSession.selfUsername !== u) {
+          await setSetting("username", loadedSession.selfUsername);
+        }
+
+        try {
+          const h = await getHome();
+          setHome(h);
+        } catch (err) {
+          log("warn", "home load failed", err);
+        }
 
         void (async () => {
           try {
@@ -127,6 +145,7 @@ export default function App() {
     void setSetting("theme", theme);
     void setSetting("accent", accent);
     void setSetting("username", username);
+    void setSelfUsername(username).catch((err) => log("warn", "username persist failed", err));
   }, [route, theme, accent, username, hydrated]);
 
   useEffect(() => {
@@ -177,7 +196,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [palette, closePalette, selectedFilmId]);
 
-  const connected = Boolean(coverage && (coverage.totalViewings > 0 || coverage.uniqueMovies > 0));
+  const connected = Boolean(session?.hasSetup);
   const title = selectedFilmId ? "Film" : "";
 
   return (

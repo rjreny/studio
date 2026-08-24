@@ -4,9 +4,9 @@ use crate::letterboxd::rss::{rss_url, sync_rss};
 use crate::letterboxd::zip::discover_zip;
 use crate::migration::migrate_legacy;
 use crate::models::{
-    FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics, ImportResult, ImportSummary,
-    LegacyLibrary, LibraryCoverage, LibraryPage, LibraryQuery, MigrationResult, SetRatingInput,
-    SyncResult,
+    AppSession, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics, ImportResult,
+    ImportSummary, InstallInfo, LegacyLibrary, LibraryCoverage, LibraryPage, LibraryQuery,
+    MigrationResult, SetRatingInput, SyncResult,
 };
 use crate::queries::{get_film, get_friend_feed, get_home, get_library};
 use crate::storage::db::Database;
@@ -37,6 +37,95 @@ pub fn init_state(app: &AppHandle) -> Result<AppState, String> {
 pub fn get_coverage(state: State<'_, AppState>) -> Result<LibraryCoverage, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.compute_coverage()
+}
+
+#[tauri::command]
+pub fn get_session(state: State<'_, AppState>) -> Result<AppSession, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_session()
+}
+
+#[tauri::command]
+pub fn set_self_username(username: String, state: State<'_, AppState>) -> Result<(), String> {
+    let clean = username.trim().trim_start_matches('@').to_string();
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    if clean.is_empty() {
+        db.conn()
+            .execute("DELETE FROM app_meta WHERE key = 'self_username'", [])
+            .map_err(|e| e.to_string())?;
+    } else {
+        db.set_meta("self_username", &clean)?;
+    }
+    Ok(())
+}
+
+fn install_kind(exe: &std::path::Path) -> &'static str {
+    let path = exe.to_string_lossy().to_lowercase();
+    if path.contains("target\\debug")
+        || path.contains("target/debug")
+        || path.contains("target\\release")
+        || path.contains("target/release")
+        || path.contains("cursor-sandbox")
+    {
+        "dev"
+    } else if path.contains("\\programs\\") || path.contains("/programs/") {
+        "installed"
+    } else {
+        "portable"
+    }
+}
+
+fn find_uninstaller(exe: &std::path::Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with("uninstall") && name.ends_with(".exe") {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub fn get_install_info(app: AppHandle) -> Result<InstallInfo, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let db_path = db_path(&app)?;
+    let exe = std::env::current_exe().ok();
+    let kind = exe
+        .as_ref()
+        .map(|p| install_kind(p).to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let uninstaller = exe.as_ref().and_then(|p| find_uninstaller(p));
+    Ok(InstallInfo {
+        version: app
+            .config()
+            .version
+            .clone()
+            .unwrap_or_else(|| "0.0.0".into()),
+        install_kind: kind,
+        app_data_dir: data_dir.to_string_lossy().into_owned(),
+        database_path: db_path.to_string_lossy().into_owned(),
+        executable_path: exe.map(|p| p.to_string_lossy().into_owned()),
+        uninstaller_path: uninstaller.map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
+#[tauri::command]
+pub fn reset_all_data(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.reset_all_data()
+}
+
+#[tauri::command]
+pub fn launch_uninstaller(app: AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let uninstaller =
+        find_uninstaller(&exe).ok_or_else(|| "No uninstaller found for this build".to_string())?;
+    std::process::Command::new(&uninstaller)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let _ = app;
+    Ok(())
 }
 
 #[tauri::command]

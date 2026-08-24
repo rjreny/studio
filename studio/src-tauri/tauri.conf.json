@@ -30,7 +30,11 @@
     "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "windows": {
-      "nsis": { "installMode": "currentUser" }
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
     },
     "icon": [
       "icons/32x32.png",

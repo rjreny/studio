@@ -118,6 +118,41 @@ pub fn migrate_legacy(
     Database::rebuild_projections(&tx)?;
     tx.commit().map_err(|e| e.to_string())?;
 
+    if let Some(friends) = &legacy.friends {
+        for friend in friends {
+            let username = friend
+                .username
+                .trim()
+                .trim_start_matches('@')
+                .to_lowercase();
+            if username.is_empty()
+                || !username
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let exists: bool = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM friends WHERE username = ?1",
+                    params![username],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+                .map_err(|e| e.to_string())?;
+            if exists {
+                continue;
+            }
+            db.conn()
+                .execute(
+                    "INSERT INTO friends(id, username, enabled) VALUES (?1, ?2, 1)",
+                    params![Uuid::new_v4().to_string(), username],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     let coverage = db.compute_coverage()?;
     let validation = format!(
         "viewings={} unique_movies={}",

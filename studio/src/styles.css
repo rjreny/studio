@@ -154,6 +154,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--accent); font-weight: 650;
 }
 .hint, .lede { color: var(--text-muted); max-width: 58ch; }
+.mono-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  word-break: break-all;
+  color: var(--text-muted);
+}
 .form-error { color: var(--danger); }
 .pad { padding: var(--space-4); }
 .connect {

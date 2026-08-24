@@ -1,13 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppSession,
   FilmDetail,
   FriendRow,
   HomeViewModel,
   ImportResult,
+  InstallInfo,
   LibraryCoverage,
   LibraryPage,
   LibraryQuery,
 } from "./types/film";
+
+export async function getSession(): Promise<AppSession> {
+  return invoke("get_session");
+}
+
+export async function setSelfUsername(username: string): Promise<void> {
+  return invoke("set_self_username", { username });
+}
+
+export async function getInstallInfo(): Promise<InstallInfo> {
+  return invoke("get_install_info");
+}
+
+export async function resetAllData(): Promise<void> {
+  return invoke("reset_all_data");
+}
+
+export async function launchUninstaller(): Promise<void> {
+  return invoke("launch_uninstaller");
+}
 
 export async function getCoverage(): Promise<LibraryCoverage> {
   return invoke("get_coverage");
