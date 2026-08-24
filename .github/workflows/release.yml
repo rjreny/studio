@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -21,13 +25,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "studio/src-tauri -> target"
+          workspaces: studio/src-tauri
+          cache-all-crates: true
+          shared-key: studio-windows
+          cache-on-failure: true
       - run: npm ci
         working-directory: studio
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CARGO_INCREMENTAL: 0
         with:
           projectPath: studio
           tagName: ${{ github.ref_name }}

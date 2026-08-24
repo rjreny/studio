@@ -22,6 +22,8 @@ NSIS installs per-user. Push a `v*` tag to cut a signed NSIS installer and `late
 
 Repo: https://github.com/rjreny/studio
 
+**CI speed:** pushes to `master` warm the Rust cache via `.github/workflows/ci.yml`. Tag releases reuse that cache (often ~5–10 min vs ~20+ min cold). Any `Cargo.lock` change forces a full dependency rebuild once.
+
 **Auto-update requires a public repo** (or a public mirror of `latest.json`). Private repos return 404 to the app.
 
 ```powershell

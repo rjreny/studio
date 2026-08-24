@@ -1,0 +1,5 @@
+# Faster release compiles in CI (tauri-action uses --release).
+# GitHub Actions also sets CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 per job.
+[profile.release]
+codegen-units = 16
+lto = false

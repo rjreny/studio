@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "studio/src-tauri/**"
+      - "studio/src/**"
+      - "studio/package-lock.json"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
+  pull_request:
+    paths:
+      - "studio/src-tauri/**"
+      - "studio/src/**"
+      - "studio/package-lock.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm-rust-cache:
+    name: Warm Rust cache (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: studio/src-tauri
+          cache-all-crates: true
+          shared-key: studio-windows
+          cache-on-failure: true
+      - run: npm ci
+        working-directory: studio
+      - name: Build frontend (tauri build needs dist/)
+        run: npm run build
+        working-directory: studio
+      - name: Compile Rust release (populate cache for release workflow)
+        run: cargo build --release
+        working-directory: studio/src-tauri
+        env:
+          CARGO_INCREMENTAL: 0
