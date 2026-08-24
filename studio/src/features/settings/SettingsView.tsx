@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { type Accent, type Theme } from "../../core/types";
 import { pickExportZipPath } from "../../platform/files";
@@ -13,7 +14,7 @@ import {
   tmdbKeyStatus,
   tmdbSetKey,
 } from "../../platform/filmLibrary";
-import type { EnrichReport, ImportResult, InstallInfo, LibraryCoverage, TmdbKeyStatus } from "../../platform/types/film";
+import type { EnrichReport, ImportResult, InstallInfo, JobProgress, LibraryCoverage, TmdbKeyStatus } from "../../platform/types/film";
 import {
   getInstallInfo,
   installKindLabel,
@@ -48,7 +49,7 @@ export function SettingsView({
   onAccent,
   onUsername,
   onStatus,
-  onRefresh,
+  onRefresh: _onRefresh,
 }: {
   theme: Theme;
   accent: Accent;
@@ -97,6 +98,24 @@ export function SettingsView({
     })();
   }, []);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<JobProgress>("studio-job", (event) => {
+      const next = event.payload;
+      if (next.import) setLastImport(next.import);
+      if (next.enrich) {
+        setLastEnrich(next.enrich);
+        onStatus(formatEnrich(next.enrich));
+      }
+      if (next.done && next.import) {
+        onStatus(formatImport(next.import));
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [onStatus]);
+
   async function checkUpdates() {
     const result = await checkAppUpdate();
     setSigningConfigured(result.signingConfigured);
@@ -131,18 +150,9 @@ export function SettingsView({
       const path = await pickExportZipPath();
       if (!path) return;
       setBusy(true);
-      const result = await importExportZip(path);
-      setLastImport(result);
-      onStatus(formatImport(result));
-      await onRefresh();
-      try {
-        const report = await tmdbEnrich();
-        setLastEnrich(report);
-        onStatus(`${formatImport(result)} · ${formatEnrich(report)}`);
-      } catch (err) {
-        log("warn", "poster enrich after import failed", err);
-      }
-      await onRefresh();
+      await importExportZip(path);
+      onStatus("Importing ZIP in the background — you can keep using Studio");
+      setBusy(false);
     } catch (err) {
       log("error", "settings import failed", err);
       onStatus("Import failed — library unchanged");
@@ -166,11 +176,8 @@ export function SettingsView({
         return;
       }
       setReplacing(false);
-      onStatus("TMDB accepted this key — fetching posters…");
-      const report = await tmdbEnrich();
-      setLastEnrich(report);
-      onStatus(formatEnrich(report));
-      await onRefresh();
+      onStatus("TMDB accepted this key — matching posters in the background");
+      await tmdbEnrich();
     } catch (err) {
       log("error", "tmdb key save failed", err);
       onStatus("Could not store TMDB key or fetch posters");
@@ -182,10 +189,8 @@ export function SettingsView({
   async function runEnrich() {
     try {
       setBusy(true);
-      const report = await tmdbEnrich();
-      setLastEnrich(report);
-      onStatus(formatEnrich(report));
-      await onRefresh();
+      await tmdbEnrich();
+      onStatus("Matching TMDB in the background — you can keep browsing");
     } catch (err) {
       log("error", "enrich failed", err);
       onStatus("Poster fetch failed — open studio.log for details");

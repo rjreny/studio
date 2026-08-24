@@ -140,7 +140,7 @@ fn tmdb_get(key: &str, path_and_query: &str) -> Result<String, String> {
     };
     let mut req = ureq::get(&url)
         .set("User-Agent", "Studio/0.1 (local film app)")
-        .timeout(std::time::Duration::from_secs(20));
+        .timeout(std::time::Duration::from_secs(8));
     if is_bearer_token(key) {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
@@ -193,10 +193,30 @@ pub fn enrich_catalog_with(
             }
         }
         if report.key_valid == Some(true) {
-            for _ in 0..40 {
-                let batch = enrich_unmatched_batch(db, &api_key, 50, progress, &mut report)?;
-                if batch == 0 {
-                    break;
+            let queue = list_unmatched(db)?;
+            let total = queue.len() as u32;
+            for (smr_id, raw, normalized, year) in queue {
+                report.attempted += 1;
+                progress(JobProgress {
+                    job: "enrich".into(),
+                    label: match_progress_label(report.attempted, total.max(1)),
+                    current: report.attempted,
+                    total: total.max(1),
+                    posters: report.posters,
+                    errors: report.errors,
+                    done: false,
+                    ..Default::default()
+                });
+                match enrich_one_film(db, &api_key, &smr_id, &raw, &normalized, year) {
+                    Ok(true) => {
+                        report.matched += 1;
+                        report.posters += 1;
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        report.errors += 1;
+                        report.last_error = Some(err);
+                    }
                 }
             }
         }
@@ -221,6 +241,7 @@ pub fn enrich_catalog_with(
                     posters: report.posters,
                     errors: report.errors,
                     done: false,
+                    ..Default::default()
                 });
                 if n == 0 || report.posters == before {
                     break;
@@ -243,7 +264,8 @@ pub fn enrich_catalog_with(
         total: report.attempted.max(1),
         posters: report.posters,
         errors: report.errors,
-        done: true,
+        done: false,
+        ..Default::default()
     });
     Ok(report)
 }
@@ -276,59 +298,28 @@ fn count_without_poster(db: &Database) -> Result<u32, String> {
         .map_err(|e| e.to_string())
 }
 
-fn enrich_unmatched_batch(
+pub(crate) fn match_progress_label(current: u32, total: u32) -> String {
+    format!("Matching TMDB · {current}/{total}")
+}
+
+fn list_unmatched(
     db: &Database,
-    api_key: &str,
-    limit: u32,
-    progress: &mut dyn FnMut(JobProgress),
-    report: &mut EnrichReport,
-) -> Result<u32, String> {
+) -> Result<Vec<(String, String, String, Option<i32>)>, String> {
     let mut stmt = db
         .conn()
         .prepare(
             "SELECT smr.id, smr.raw_identity, smr.normalized_title, smr.release_year
              FROM source_movie_records smr
              JOIN movie_links ml ON ml.source_movie_record_id = smr.id
-             WHERE ml.match_state IN ('unmatched', 'ambiguous')
-             LIMIT ?1",
+             WHERE ml.match_state IN ('unmatched', 'ambiguous')",
         )
         .map_err(|e| e.to_string())?;
-
-    let rows: Vec<(String, String, String, Option<i32>)> = stmt
-        .query_map(params![limit], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
-
-    let total = rows.len() as u32;
-    let mut matched = 0u32;
-    for (index, (smr_id, raw, normalized, year)) in rows.into_iter().enumerate() {
-        report.attempted += 1;
-        match enrich_one_film(db, api_key, &smr_id, &raw, &normalized, year) {
-            Ok(true) => {
-                matched += 1;
-                report.matched += 1;
-                report.posters += 1;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                report.errors += 1;
-                report.last_error = Some(err);
-            }
-        }
-        progress(JobProgress {
-            job: "enrich".into(),
-            label: format!("Matching TMDB · {}/{}", index as u32 + 1, total.max(1)),
-            current: index as u32 + 1,
-            total: total.max(1),
-            posters: report.posters,
-            errors: report.errors,
-            done: false,
-        });
-    }
-    Ok(matched)
+    Ok(rows)
 }
 
 fn enrich_one_film(
@@ -744,6 +735,12 @@ mod tests {
             !matches!(persistence, CredentialPersistence::EntryOnly),
             "keyring is using the in-memory mock store; enable windows-native so the TMDB key survives across Entry::new calls"
         );
+    }
+
+    #[test]
+    fn match_progress_uses_library_total_not_batch_size() {
+        assert_eq!(match_progress_label(2, 1097), "Matching TMDB · 2/1097");
+        assert_ne!(match_progress_label(2, 1097), "Matching TMDB · 2/50");
     }
 }
 

@@ -11,7 +11,7 @@ import { getHome } from "../../platform/filmLibrary";
 
 export function FriendsView({
   onStatus,
-  onRefresh,
+  onRefresh: _onRefresh,
 }: {
   onStatus: (s: string) => void;
   onRefresh: () => Promise<void>;
@@ -56,14 +56,8 @@ export function FriendsView({
   async function refreshAll() {
     setBusy(true);
     try {
-      const result = await syncFriends();
-      await load();
-      await onRefresh();
-      onStatus(
-        result.errors.length
-          ? `Synced with ${result.errors.length} errors`
-          : `Synced ${result.friendsSynced} friend feeds`,
-      );
+      await syncFriends();
+      onStatus("Syncing friend feeds in the background");
     } finally {
       setBusy(false);
     }

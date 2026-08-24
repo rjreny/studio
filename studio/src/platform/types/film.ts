@@ -55,6 +55,8 @@ export type JobProgress = {
   posters: number;
   errors: number;
   done: boolean;
+  enrich?: EnrichReport | null;
+  import?: ImportResult | null;
 };
 
 export type LibraryItem = {

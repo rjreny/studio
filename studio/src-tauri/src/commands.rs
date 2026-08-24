@@ -14,12 +14,14 @@ use chrono::Utc;
 use rusqlite::params;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 pub struct AppState {
     pub db: Mutex<Database>,
+    pub db_path: PathBuf,
+    pub job: crate::jobs::JobSlot,
 }
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -31,7 +33,11 @@ pub fn init_state(app: &AppHandle) -> Result<AppState, String> {
     crate::app_log::write(app, "app started");
     let path = db_path(app)?;
     let db = Database::open(&path)?;
-    Ok(AppState { db: Mutex::new(db) })
+    Ok(AppState {
+        db: Mutex::new(db),
+        db_path: path,
+        job: Arc::new(Mutex::new(None)),
+    })
 }
 
 #[tauri::command]
@@ -155,34 +161,60 @@ pub fn import_export_zip(
     path: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ImportResult, String> {
-    crate::app_log::write(&app, &format!("zip import start {path}"));
-    let discovery = discover_zip(&path)?;
-    crate::app_log::write(
-        &app,
-        &format!(
-            "zip discovered files={} unknown={} warnings={}",
-            discovery.files.len(),
-            discovery.unknown_paths.len(),
-            discovery.warnings.len()
-        ),
-    );
-    for file in &discovery.files {
-        crate::app_log::write(
-            &app,
-            &format!("zip file {} kind={}", file.relative_path, file.kind.as_str()),
-        );
-    }
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    let result = import_zip_discovery(&mut db, &discovery)?;
-    crate::app_log::write(
-        &app,
-        &format!(
-            "zip import done movies={} viewings={} ratings={} skipped={} warnings={:?}",
-            result.movies, result.viewings, result.ratings, result.skipped, result.warnings
-        ),
-    );
-    Ok(result)
+) -> Result<(), String> {
+    crate::jobs::spawn_job(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        "import",
+        move |app, db_path| {
+            crate::app_log::write(app, &format!("zip import start {path}"));
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "import".into(),
+                    label: "Importing Letterboxd ZIP…".into(),
+                    total: 1,
+                    ..Default::default()
+                },
+            );
+            let discovery = discover_zip(&path)?;
+            crate::app_log::write(
+                app,
+                &format!(
+                    "zip discovered files={} unknown={} warnings={}",
+                    discovery.files.len(),
+                    discovery.unknown_paths.len(),
+                    discovery.warnings.len()
+                ),
+            );
+            let mut db = crate::jobs::open_worker_db(&db_path)?;
+            let result = import_zip_discovery(&mut db, &discovery)?;
+            crate::app_log::write(
+                app,
+                &format!(
+                    "zip import done movies={} viewings={} ratings={} skipped={}",
+                    result.movies, result.viewings, result.ratings, result.skipped
+                ),
+            );
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "import".into(),
+                    label: format!(
+                        "Imported {} films · {} viewings",
+                        result.movies, result.viewings
+                    ),
+                    current: 1,
+                    total: 1,
+                    done: true,
+                    import: Some(result),
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        },
+    )
 }
 
 #[tauri::command]
@@ -212,59 +244,118 @@ pub fn import_get_diagnostics(state: State<'_, AppState>) -> Result<ImportDiagno
 }
 
 #[tauri::command]
-pub fn sync_self(username: String, state: State<'_, AppState>) -> Result<SyncResult, String> {
-    let clean = username.trim().trim_start_matches('@').to_string();
-    let url = rss_url(&clean);
-    let xml = crate::fetch_url(&url)?;
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    let result = sync_rss(&mut db, &clean, &xml)?;
-    Ok(result)
+pub fn sync_self(username: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    crate::jobs::spawn_job(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        "sync",
+        move |app, db_path| {
+            let clean = username.trim().trim_start_matches('@').to_string();
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "sync".into(),
+                    label: format!("Syncing @{clean}…"),
+                    total: 1,
+                    ..Default::default()
+                },
+            );
+            let url = rss_url(&clean);
+            let xml = crate::fetch_url(&url)?;
+            let mut db = crate::jobs::open_worker_db(&db_path)?;
+            let result = sync_rss(&mut db, &clean, &xml)?;
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "sync".into(),
+                    label: format!(
+                        "Synced @{clean} · {} new of {} seen",
+                        result.entries_added, result.entries_seen
+                    ),
+                    current: 1,
+                    total: 1,
+                    done: true,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        },
+    )
 }
 
 #[tauri::command]
-pub fn sync_friends(state: State<'_, AppState>) -> Result<FriendSyncResult, String> {
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    let friends: Vec<(String, String)> = {
-        let mut stmt = db
-            .conn()
-            .prepare("SELECT id, username FROM friends WHERE enabled = 1")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-
-    let mut entries_added = 0u32;
-    let mut errors = Vec::new();
-    for (friend_id, username) in friends {
-        let url = rss_url(&username);
-        match crate::fetch_url(&url) {
-            Ok(xml) => {
-                if let Err(err) = sync_friend_rss(&mut db, &friend_id, &username, &xml) {
-                    errors.push(format!("@{username}: {err}"));
-                    let _ = db.conn().execute(
-                        "UPDATE friends SET last_sync_error = ?2 WHERE id = ?1",
-                        params![friend_id, err],
-                    );
-                } else {
-                    entries_added += 1;
-                    let _ = db.conn().execute(
-                        "UPDATE friends SET last_sync_at = ?2, last_sync_error = NULL WHERE id = ?1",
-                        params![friend_id, Utc::now().to_rfc3339()],
-                    );
+pub fn sync_friends(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    crate::jobs::spawn_job(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        "friends",
+        move |app, db_path| {
+            let mut db = crate::jobs::open_worker_db(&db_path)?;
+            let mut stmt = db
+                .conn()
+                .prepare("SELECT id, username FROM friends WHERE enabled = 1")
+                .map_err(|e| e.to_string())?;
+            let friends: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+            let total = friends.len() as u32;
+            let mut entries_added = 0u32;
+            let mut errors = Vec::new();
+            for (index, (friend_id, username)) in friends.into_iter().enumerate() {
+                let _ = app.emit(
+                    "studio-job",
+                    JobProgress {
+                        job: "friends".into(),
+                        label: format!("Syncing @{username} · {}/{}", index as u32 + 1, total.max(1)),
+                        current: index as u32 + 1,
+                        total: total.max(1),
+                        ..Default::default()
+                    },
+                );
+                let url = rss_url(&username);
+                match crate::fetch_url(&url) {
+                    Ok(xml) => {
+                        if let Err(err) = sync_friend_rss(&mut db, &friend_id, &username, &xml) {
+                            errors.push(format!("@{username}: {err}"));
+                            let _ = db.conn().execute(
+                                "UPDATE friends SET last_sync_error = ?2 WHERE id = ?1",
+                                rusqlite::params![friend_id, err],
+                            );
+                        } else {
+                            entries_added += 1;
+                            let _ = db.conn().execute(
+                                "UPDATE friends SET last_sync_at = ?2, last_sync_error = NULL WHERE id = ?1",
+                                rusqlite::params![friend_id, Utc::now().to_rfc3339()],
+                            );
+                        }
+                    }
+                    Err(err) => errors.push(format!("@{username}: {err}")),
                 }
             }
-            Err(err) => errors.push(format!("@{username}: {err}")),
-        }
-    }
-    Ok(FriendSyncResult {
-        friends_synced: entries_added,
-        entries_added,
-        errors,
-    })
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "friends".into(),
+                    label: if errors.is_empty() {
+                        format!("Synced {entries_added} friend feeds")
+                    } else {
+                        format!("Synced {entries_added} friend feeds · {} errors", errors.len())
+                    },
+                    current: total,
+                    total: total.max(1),
+                    errors: errors.len() as u32,
+                    done: true,
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        },
+    )
 }
 
 fn sync_friend_rss(
@@ -499,59 +590,62 @@ pub fn tmdb_key_status() -> Result<TmdbKeyStatus, String> {
 }
 
 #[tauri::command]
-pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<EnrichReport, String> {
-    let log_file = crate::app_log::log_path(&app)?;
-    crate::app_log::write(&app, "enrich started");
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn()
-        .execute(
-            "UPDATE movie_links SET match_state = 'unmatched'
-             WHERE match_state = 'ambiguous'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-    let app_for_progress = app.clone();
-    let mut report = tmdb::enrich_catalog_with(&db, &mut |progress| {
-        let _ = app_for_progress.emit("studio-job", &progress);
-        crate::app_log::write(
-            &app_for_progress,
-            &format!(
-                "{} {}/{} posters={} errors={}",
-                progress.label, progress.current, progress.total, progress.posters, progress.errors
-            ),
-        );
-    })?;
-    report.log_path = Some(log_file.to_string_lossy().into_owned());
-    crate::app_log::write(
-        &app,
-        &format!(
-            "enrich finished has_key={} key_valid={:?} matched={} posters={} remaining_unmatched={} remaining_without_poster={} errors={} last_error={:?}",
-            report.has_key,
-            report.key_valid,
-            report.matched,
-            report.posters,
-            report.remaining_unmatched,
-            report.remaining_without_poster,
-            report.errors,
-            report.last_error
-        ),
-    );
-    let _ = app.emit(
-        "studio-job",
-        JobProgress {
-            job: "enrich".into(),
-            label: format!(
-                "Finished · {} posters · {} still missing",
-                report.posters, report.remaining_without_poster
-            ),
-            current: report.attempted,
-            total: report.attempted,
-            posters: report.posters,
-            errors: report.errors,
-            done: true,
+pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    crate::jobs::spawn_job(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        "enrich",
+        move |app, db_path| {
+            let log_file = crate::app_log::log_path(app)?;
+            crate::app_log::write(app, "enrich started");
+            let db = crate::jobs::open_worker_db(&db_path)?;
+            db.conn()
+                .execute(
+                    "UPDATE movie_links SET match_state = 'unmatched'
+                     WHERE match_state = 'ambiguous'",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+            let app_for_progress = app.clone();
+            let mut report = tmdb::enrich_catalog_with(&db, &mut |progress| {
+                let _ = app_for_progress.emit("studio-job", &progress);
+            })?;
+            report.log_path = Some(log_file.to_string_lossy().into_owned());
+            crate::app_log::write(
+                app,
+                &format!(
+                    "enrich finished has_key={} key_valid={:?} matched={} posters={} remaining_unmatched={} remaining_without_poster={} errors={} last_error={:?}",
+                    report.has_key,
+                    report.key_valid,
+                    report.matched,
+                    report.posters,
+                    report.remaining_unmatched,
+                    report.remaining_without_poster,
+                    report.errors,
+                    report.last_error
+                ),
+            );
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "enrich".into(),
+                    label: format!(
+                        "Finished · {} posters · {} still missing",
+                        report.posters, report.remaining_without_poster
+                    ),
+                    current: report.attempted,
+                    total: report.attempted.max(1),
+                    posters: report.posters,
+                    errors: report.errors,
+                    done: true,
+                    enrich: Some(report),
+                    ..Default::default()
+                },
+            );
+            Ok(())
         },
-    );
-    Ok(report)
+    )
 }
 
 #[tauri::command]

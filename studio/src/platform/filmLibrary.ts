@@ -49,24 +49,15 @@ export async function getHome(): Promise<HomeViewModel> {
   return invoke("home_get");
 }
 
-export async function importExportZip(path: string): Promise<ImportResult> {
+export async function importExportZip(path: string): Promise<void> {
   return invoke("import_export_zip", { path });
 }
 
-export async function syncSelf(username: string): Promise<{
-  username: string;
-  entriesSeen: number;
-  entriesAdded: number;
-  coverage: LibraryCoverage;
-}> {
+export async function syncSelf(username: string): Promise<void> {
   return invoke("sync_self", { username });
 }
 
-export async function syncFriends(): Promise<{
-  friendsSynced: number;
-  entriesAdded: number;
-  errors: string[];
-}> {
+export async function syncFriends(): Promise<void> {
   return invoke("sync_friends");
 }
 
@@ -111,7 +102,7 @@ export async function tmdbKeyStatus(): Promise<TmdbKeyStatus> {
   return invoke("tmdb_key_status");
 }
 
-export async function tmdbEnrich(): Promise<EnrichReport> {
+export async function tmdbEnrich(): Promise<void> {
   return invoke("tmdb_enrich");
 }
 

@@ -3,9 +3,23 @@ use crate::models::{AppSession, LibraryCoverage};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::Path;
+use std::time::Duration;
 
 const FILM_KEY: &str =
     "COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), ''))";
+
+fn apply_connection_pragmas(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(Duration::from_millis(5000))
+        .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 pub struct Database {
     conn: Connection,
@@ -17,8 +31,7 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| e.to_string())?;
+        apply_connection_pragmas(&conn)?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -26,8 +39,7 @@ impl Database {
 
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|e| e.to_string())?;
+        apply_connection_pragmas(&conn)?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -297,5 +309,25 @@ mod tests {
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
         assert_eq!(db.get_meta("schema_version").unwrap(), Some("2".into()));
+    }
+
+    #[test]
+    fn file_db_uses_wal() {
+        let path = std::env::temp_dir().join(format!("studio-wal-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).expect("db");
+        let mode: String = db
+            .conn()
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_file_name(format!(
+            "{}-wal",
+            path.file_name().unwrap().to_string_lossy()
+        )));
+        let _ = std::fs::remove_file(path.with_file_name(format!(
+            "{}-shm",
+            path.file_name().unwrap().to_string_lossy()
+        )));
+        assert_eq!(mode.to_lowercase(), "wal");
     }
 }

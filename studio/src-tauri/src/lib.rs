@@ -1,6 +1,7 @@
 mod app_log;
 mod catalog;
 mod commands;
+mod jobs;
 mod letterboxd;
 mod migration;
 mod models;

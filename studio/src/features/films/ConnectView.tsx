@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { importExportZip, formatEnrich, formatImport, syncSelf, tmdbEnrich } from "../../platform/filmLibrary";
+import { importExportZip, syncSelf } from "../../platform/filmLibrary";
 import { pickExportZipPath } from "../../platform/files";
 import { log } from "../../platform/log";
 
@@ -7,7 +7,7 @@ export function ConnectView({
   username,
   onUsername,
   onStatus,
-  onConnected,
+  onConnected: _onConnected,
 }: {
   username: string;
   onUsername: (name: string) => void;
@@ -26,12 +26,9 @@ export function ConnectView({
     setBusy(true);
     setError(null);
     try {
-      const result = await syncSelf(name);
+      await syncSelf(name);
       onUsername(name);
-      onStatus(
-        `Connected @${name} · ${result.entriesAdded} new diary entries (${result.entriesSeen} in feed)`,
-      );
-      await onConnected();
+      onStatus(`Syncing @${name} in the background`);
     } catch (err) {
       log("error", "rss connect failed", err);
       setError("Could not reach that public diary. Check the username.");
@@ -46,16 +43,8 @@ export function ConnectView({
     try {
       const path = await pickExportZipPath();
       if (!path) return;
-      const result = await importExportZip(path);
-      onStatus(formatImport(result));
-      await onConnected();
-      try {
-        const report = await tmdbEnrich();
-        onStatus(`${formatImport(result)} · ${formatEnrich(report)}`);
-        await onConnected();
-      } catch (err) {
-        log("warn", "poster enrich after import failed", err);
-      }
+      await importExportZip(path);
+      onStatus("Importing ZIP in the background — you can keep using Studio");
     } catch (err) {
       log("error", "export import failed", err);
       setError("Could not read that export. Use an official Letterboxd ZIP.");

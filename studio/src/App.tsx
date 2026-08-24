@@ -14,7 +14,6 @@ import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type
 import { appVersion } from "./platform/app";
 import {
   formatCoverage,
-  formatEnrich,
   getHome,
   getSession,
   migrateFromLegacy,
@@ -120,17 +119,7 @@ export default function App() {
           log("warn", "home load failed", err);
         }
 
-        void (async () => {
-          try {
-            const report = await tmdbEnrich();
-            setStatus(formatEnrich(report));
-            if (report.posters > 0 || report.matched > 0) {
-              await refresh();
-            }
-          } catch (err) {
-            log("warn", "poster enrich skipped", err);
-          }
-        })();
+        void tmdbEnrich().catch((err) => log("warn", "poster enrich skipped", err));
 
         setHydrated(true);
         log("info", "shell hydrated");
@@ -164,11 +153,17 @@ export default function App() {
       const next = event.payload;
       setJob(next.done ? null : next);
       setStatus(next.label);
+      if (next.done || (next.current > 0 && next.current % 20 === 0)) {
+        void refresh();
+      }
+      if (next.done && next.import) {
+        void tmdbEnrich().catch((err) => log("warn", "poster enrich after import skipped", err));
+      }
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     function onFocus() {
