@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { windowApi } from "../../platform/window";
 
-export function TitleBar({ collapsed, title }: { collapsed: boolean; title: string }) {
+export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -17,14 +17,8 @@ export function TitleBar({ collapsed, title }: { collapsed: boolean; title: stri
   const win = windowApi();
 
   return (
-    <header className={`titlebar${collapsed ? " is-collapsed" : ""}`}>
-      <div className="tb-brand" data-tauri-drag-region>
-        <span className="tb-mark" data-tauri-drag-region />
-        <span data-tauri-drag-region>Studio</span>
-      </div>
-      <div className="tb-drag" data-tauri-drag-region onDoubleClick={() => void win.toggleMaximize()}>
-        {title}
-      </div>
+    <header className="titlebar">
+      <div className="tb-drag" data-tauri-drag-region onDoubleClick={() => void win.toggleMaximize()} />
       <div className="tb-controls">
         <button type="button" className="tb-btn" title="Minimize" onClick={() => void win.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>

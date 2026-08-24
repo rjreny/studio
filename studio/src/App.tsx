@@ -207,7 +207,6 @@ export default function App() {
   }, [palette, closePalette, selectedFilmId]);
 
   const connected = Boolean(session?.hasSetup);
-  const title = selectedFilmId ? "Film" : "";
 
   function go(id: Route) {
     setSelectedFilmId(null);
@@ -224,13 +223,17 @@ export default function App() {
 
   return (
     <div className="app canvas-surface">
-      <TitleBar collapsed={false} title={title} />
+      <TitleBar />
       <div className="stage">
         <header className="cinema-nav">
           <div className="cinema-nav-inner">
-            <p className="coverage-chip" title={coverage?.warnings.join("\n") ?? undefined}>
-              {coverage ? `${coverage.uniqueMovies} films` : "Studio"}
-            </p>
+            {selectedFilmId ? (
+              <button type="button" className="nav-back glass" onClick={() => setSelectedFilmId(null)}>
+                Back
+              </button>
+            ) : (
+              <span className="nav-spacer" data-tauri-drag-region />
+            )}
             <input
               className="nav-search glass"
               value={libraryQuery}

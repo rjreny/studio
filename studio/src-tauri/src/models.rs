@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct LibraryCoverage {
     pub unique_movies: u32,
+    pub watchlist_movies: u32,
     pub total_viewings: u32,
     pub rating_events: u32,
     pub unresolved_movies: u32,
@@ -33,6 +34,7 @@ pub struct InstallInfo {
     pub executable_path: Option<String>,
     pub uninstaller_path: Option<String>,
     pub log_path: String,
+    pub data_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

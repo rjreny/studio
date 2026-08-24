@@ -251,8 +251,24 @@ impl Database {
             );
         }
 
+        let watchlist_movies: u32 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT {FILM_KEY})
+                 FROM source_movie_records smr
+                 LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+                 LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
+                 WHERE ums.watchlist = 1 OR smr.on_watchlist = 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
         Ok(LibraryCoverage {
             unique_movies,
+            watchlist_movies,
             total_viewings,
             rating_events,
             unresolved_movies,

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { communityRatingOutOfFive, isHighQualityBanner } from "../../core/images";
 import { log } from "../../platform/log";
 import { getFilm, setRating } from "../../platform/filmLibrary";
-import type { FilmDetail, LibraryItem } from "../../platform/types/film";
+import type { FilmDetail, LibraryItem, ViewingHistoryItem } from "../../platform/types/film";
 import { FilmCard } from "./FilmCard";
 import { RatingControl, RatingDisplay } from "./RatingDisplay";
 import { Shelf } from "./Shelf";
@@ -15,12 +15,122 @@ function runtimeLabel(minutes: number | null) {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
-function CreditList({ items }: { items: string[] }) {
+function formatWatchDate(iso: string | null | undefined) {
+  if (!iso) return "Unknown date";
+  const day = iso.slice(0, 10);
+  const d = new Date(`${day}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return day || iso;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function sourceLabel(source: string) {
+  const raw = source.replace(/^\d+\./, "").replace(/_/g, " ").trim();
+  if (/letterboxd export/i.test(raw)) return "Letterboxd export";
+  if (/letterboxd rss/i.test(raw)) return "Letterboxd RSS";
+  if (/local/i.test(raw)) return "Studio";
+  return raw.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function parseCredit(item: string): { name: string; role: string } {
+  const job = item.match(/^(.*) \((.+)\)$/);
+  if (job) return { name: job[1], role: job[2] };
+  const as = item.match(/^(.*) as (.*)$/i);
+  if (as) return { name: as[1], role: as[2] };
+  return { name: item, role: "" };
+}
+
+const CREW_ORDER = [
+  "Director",
+  "Writer",
+  "Screenplay",
+  "Original Screenplay",
+  "Story",
+  "Novel",
+  "Characters",
+  "Director of Photography",
+  "Cinematography",
+  "Original Music Composer",
+  "Music",
+  "Editor",
+  "Production Design",
+  "Art Direction",
+  "Costume Design",
+  "Casting",
+  "Sound Designer",
+  "Sound Mixer",
+  "Visual Effects Supervisor",
+  "Animation",
+  "Producer",
+];
+
+const CREW_LABEL: Record<string, string> = {
+  "Director of Photography": "Cinematography",
+  "Original Music Composer": "Composer",
+  Music: "Composer",
+};
+
+function groupCrew(items: string[]) {
+  const groups = new Map<string, string[]>();
+  items.forEach((item) => {
+    const credit = parseCredit(item);
+    const key = credit.role || "Crew";
+    const names = groups.get(key) ?? [];
+    if (!names.includes(credit.name)) names.push(credit.name);
+    groups.set(key, names);
+  });
+  const known = CREW_ORDER.filter((job) => groups.has(job)).map((job) => ({
+    job,
+    label: CREW_LABEL[job] ?? job,
+    names: groups.get(job) ?? [],
+  }));
+  const extra = [...groups.keys()]
+    .filter((job) => !CREW_ORDER.includes(job))
+    .map((job) => ({ job, label: CREW_LABEL[job] ?? job, names: groups.get(job) ?? [] }));
+  return [...known, ...extra];
+}
+
+function CastList({ items }: { items: string[] }) {
   if (!items.length) return <p className="muted">Not listed yet.</p>;
   return (
-    <ul className="credit-list">
-      {items.map((item) => (
-        <li key={item}>{item}</li>
+    <ul className="credit-cards">
+      {items.map((item) => {
+        const credit = parseCredit(item);
+        return (
+          <li key={item}>
+            <strong>{credit.name}</strong>
+            {credit.role ? <span>{credit.role}</span> : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function CrewList({ items }: { items: string[] }) {
+  const groups = useMemo(() => groupCrew(items), [items]);
+  if (!groups.length) return <p className="muted">Not listed yet.</p>;
+  return (
+    <dl className="crew-groups">
+      {groups.map((group) => (
+        <div key={group.job} className="crew-group">
+          <dt>{group.label}</dt>
+          <dd>{group.names.join(", ")}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function HistoryList({ items }: { items: ViewingHistoryItem[] }) {
+  return (
+    <ul className="history-list">
+      {items.map((v) => (
+        <li key={v.id} className="history-row">
+          <strong>{formatWatchDate(v.occurredAt ?? v.publishedAt)}</strong>
+          <RatingDisplay value={v.rating} compact />
+          {v.rewatch ? <span className="rewatch-badge">Rewatch</span> : null}
+          <span className="muted">{sourceLabel(v.source)}</span>
+        </li>
       ))}
     </ul>
   );
@@ -52,7 +162,6 @@ function RelatedShelf({
 
 export function FilmDetailView({
   filmId,
-  onBack,
   onUpdated,
   onStatus,
   onSelectFilm,
@@ -80,10 +189,7 @@ export function FilmDetailView({
 
   if (error) {
     return (
-      <div className="pad">
-        <button type="button" className="ghost-pill" onClick={onBack}>
-          Back
-        </button>
+      <div className="pad page-pad">
         <p className="muted">Could not load this film. {error}</p>
       </div>
     );
@@ -114,9 +220,6 @@ export function FilmDetailView({
         <div className="hero-copy">
           {film.poster ? <img className="detail-poster" src={film.poster} alt="" /> : null}
           <div className="hero-copy-text">
-          <button type="button" className="ghost-pill" onClick={onBack}>
-            Back
-          </button>
           {directorLine ? <p className="hero-cast">{directorLine}</p> : null}
           <h1>{film.title}</h1>
           <p className="hero-meta">
@@ -150,24 +253,14 @@ export function FilmDetailView({
         <section className="detail-block">
           <h2>About the film</h2>
           {film.overview ? <p className="detail-overview">{film.overview}</p> : <p className="muted">Not enriched yet.</p>}
-          {film.genres.length ? <p className="muted">{film.genres.join(", ")}</p> : null}
+          {film.genres.length ? <p className="genre-row">{film.genres.join(" · ")}</p> : null}
         </section>
 
         {canRate ? (
           <section className="detail-block">
             <h2>Your history</h2>
-            <p className="section-source">Your Letterboxd / local events</p>
             {film.yourHistory.length ? (
-              <ul className="history-list">
-                {film.yourHistory.map((v) => (
-                  <li key={v.id}>
-                    <strong>{v.occurredAt ?? v.publishedAt ?? "Unknown date"}</strong>
-                    {v.rewatch ? <span className="rewatch-badge">Rewatch</span> : null}
-                    <RatingDisplay value={v.rating} compact />
-                    <span className="muted">{v.source}</span>
-                  </li>
-                ))}
-              </ul>
+              <HistoryList items={film.yourHistory} />
             ) : (
               <p className="muted">No diary entries for this film yet.</p>
             )}
@@ -176,7 +269,6 @@ export function FilmDetailView({
 
         <section className="detail-block">
           <h2>Friends</h2>
-          <p className="section-source">Followed friends, public RSS</p>
           {film.friends.length ? (
             <ul className="feed">
               {film.friends.map((f, idx) => (
@@ -196,12 +288,12 @@ export function FilmDetailView({
 
         <section className="detail-block">
           <h2>Cast</h2>
-          <CreditList items={film.cast} />
+          <CastList items={film.cast} />
         </section>
 
         <section className="detail-block">
           <h2>Crew</h2>
-          <CreditList items={film.crew} />
+          <CrewList items={film.crew} />
         </section>
 
         <RelatedShelf

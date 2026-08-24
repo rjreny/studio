@@ -112,19 +112,37 @@ export function HomeView({
             </div>
           </div>
           {slides.length > 1 ? (
-            <div className="hero-dots" role="tablist" aria-label="Featured films">
-              {slides.map((film, i) => (
-                <button
-                  key={film.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={i === index}
-                  className={i === index ? "is-on" : ""}
-                  onClick={() => setIndex(i)}
-                >
-                  <span className="sr-only">{film.title}</span>
-                </button>
-              ))}
+            <div className="hero-pager">
+              <button
+                type="button"
+                className="hero-pager-btn glass"
+                aria-label="Previous featured film"
+                onClick={() => setIndex((i) => (i - 1 + slides.length) % slides.length)}
+              >
+                ‹
+              </button>
+              <div className="hero-dots" role="tablist" aria-label="Featured films">
+                {slides.map((film, i) => (
+                  <button
+                    key={film.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={i === index}
+                    className={i === index ? "is-on" : ""}
+                    onClick={() => setIndex(i)}
+                  >
+                    <span className="sr-only">{film.title}</span>
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="hero-pager-btn glass"
+                aria-label="Next featured film"
+                onClick={() => setIndex((i) => (i + 1) % slides.length)}
+              >
+                ›
+              </button>
             </div>
           ) : null}
         </section>
@@ -143,7 +161,6 @@ export function HomeView({
       )}
 
       <div className="home-shelves">
-        <p className="coverage-line">{home.coverage.warnings[0] ?? `${home.coverage.uniqueMovies} films in your library`}</p>
         <Shelf
           title="Recent from your log"
           action={

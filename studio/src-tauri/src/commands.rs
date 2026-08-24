@@ -117,7 +117,24 @@ pub fn get_install_info(app: AppHandle) -> Result<InstallInfo, String> {
         log_path: crate::app_log::log_path(&app)?
             .to_string_lossy()
             .into_owned(),
+        data_bytes: dir_size(&data_dir),
     })
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            total += dir_size(&child);
+        } else if let Ok(meta) = entry.metadata() {
+            total += meta.len();
+        }
+    }
+    total
 }
 
 #[tauri::command]

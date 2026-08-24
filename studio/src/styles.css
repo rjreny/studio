@@ -13,8 +13,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .app {
   display: grid;
-  grid-template-rows: var(--titlebar-height) 1fr var(--status-height);
+  grid-template-rows: 1fr var(--status-height);
   height: 100%;
+  position: relative;
 }
 .body {
   display: grid; grid-template-columns: var(--sidebar-width) 1fr; min-height: 0;
@@ -25,25 +26,39 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
 .panel.is-active { display: flex; }
 .titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   height: var(--titlebar-height);
-  display: grid; grid-template-columns: auto 1fr auto;
-  background: color-mix(in oklch, var(--bg) 78%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  background: transparent;
   border-bottom: 0;
   user-select: none;
-  z-index: 30;
+  z-index: 40;
+  pointer-events: none;
 }
-.tb-brand, .tb-drag { display: flex; align-items: center; min-width: 0; }
+.tb-brand, .tb-drag { display: flex; align-items: center; min-width: 0; pointer-events: auto; }
 .tb-brand { gap: var(--space-2); padding: 0 var(--space-3); font-weight: 600; }
 .tb-mark { width: 14px; height: 14px; border-radius: 3px; background: var(--accent); }
-.tb-drag { padding: 0 var(--space-2); color: var(--text-muted); }
-.tb-controls { display: flex; }
+.tb-drag {
+  height: 8px;
+  align-self: start;
+  padding: 0;
+  color: transparent;
+}
+.tb-controls {
+  display: flex;
+  pointer-events: auto;
+  background: rgb(0 0 0 / .28);
+}
 .tb-btn {
   width: var(--caption-width); height: var(--titlebar-height);
   display: inline-flex; align-items: center; justify-content: center; color: var(--text);
+  border-radius: 0;
 }
-.tb-btn:hover { background: var(--surface-hover); }
+.tb-btn:hover { background: rgb(255 255 255 / .12); }
 .tb-btn.close:hover { background: var(--danger); color: white; }
 .sidebar {
   display: flex; flex-direction: column; background: var(--bg-sidebar);
@@ -83,6 +98,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .seg {
   display: inline-flex;
+  align-self: flex-start;
+  width: max-content;
   padding: 3px;
   border-radius: 999px;
   background: var(--bg);
@@ -172,7 +189,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   margin: 0 0 var(--space-2); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--accent); font-weight: 650;
 }
-.hint, .lede { color: var(--text-muted); max-width: 58ch; }
+.hint, .lede { color: var(--text-muted); }
 .mono-path {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;

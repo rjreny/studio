@@ -13,7 +13,7 @@ export function StatsView() {
   useEffect(() => {
     void (async () => {
       const [page, c] = await Promise.all([
-        getLibrary({ limit: 1000, sort: "rating" }),
+        getLibrary({ limit: 10000, sort: "rating" }),
         getCoverage(),
       ]);
       setItems(page.items);

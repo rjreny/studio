@@ -4,7 +4,8 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { type Accent, type Theme } from "../../core/types";
 import { pickExportZipPath } from "../../platform/files";
 import {
-  formatCoverage,
+  formatLibrarySummary,
+  formatBytes,
   formatEnrich,
   formatImport,
   importExportZip,
@@ -230,7 +231,7 @@ export function SettingsView({
       <header className="page-head">
         <div>
           <h1>Settings</h1>
-          <p className="muted">{coverage ? formatCoverage(coverage) : "Your library and this install"}</p>
+          <p className="muted">Look, library, and this install</p>
         </div>
       </header>
       <div className="settings-grid">
@@ -336,8 +337,10 @@ export function SettingsView({
           {installInfo ? (
             <>
               <p className="hint">
-                {installKindLabel(installInfo.installKind)} · v{version}
+                {installKindLabel(installInfo.installKind)} · v{version} · {formatBytes(installInfo.dataBytes)} on disk
               </p>
+              {coverage ? <p className="hint">{formatLibrarySummary(coverage)}</p> : null}
+              {coverage?.warnings[0] ? <p className="hint">{coverage.warnings[0]}</p> : null}
               <p className="mono-path">{installInfo.appDataDir}</p>
             </>
           ) : (
@@ -363,7 +366,7 @@ export function SettingsView({
 
         <section className="settings-group solid-card">
           <h2>Updates</h2>
-          <div className="field-row">
+          <div className="update-line">
             <button type="button" className="ghost-pill" onClick={() => void checkUpdates()}>
               Check
             </button>
@@ -372,8 +375,8 @@ export function SettingsView({
                 Update to {pendingVersion}
               </button>
             ) : null}
+            <p className="update-note">{updateNote}</p>
           </div>
-          <p className="file-result">{updateNote}</p>
           {import.meta.env.DEV ? (
             <p className="hint">
               Dev builds cannot install updates. Use the installer from{" "}
@@ -382,9 +385,7 @@ export function SettingsView({
               </a>
               .
             </p>
-          ) : (
-            <p className="hint">Updates download only when you click Update. Your library stays on this PC.</p>
-          )}
+          ) : null}
           {!signingConfigured && !import.meta.env.DEV ? (
             <p className="hint">Signing is not configured in this build. Reinstall from a signed GitHub release.</p>
           ) : null}

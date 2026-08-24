@@ -1,5 +1,6 @@
 export type LibraryCoverage = {
   uniqueMovies: number;
+  watchlistMovies: number;
   totalViewings: number;
   ratingEvents: number;
   unresolvedMovies: number;
@@ -25,6 +26,7 @@ export type InstallInfo = {
   executablePath: string | null;
   uninstallerPath: string | null;
   logPath: string;
+  dataBytes: number;
 };
 
 export type TmdbKeyStatus = {
@@ -149,7 +151,7 @@ export type ImportResult = {
 export type LibraryQuery = {
   search?: string;
   sort?: "recent" | "rating" | "title" | "year";
-  filter?: string;
+  filter?: "all" | "watched" | "watchlist" | "unresolved";
   limit?: number;
   offset?: number;
 };

@@ -136,18 +136,32 @@ export async function listFriends(): Promise<FriendRow[]> {
   }));
 }
 
-export function formatCoverage(c: LibraryCoverage): string {
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = value >= 10 || unit === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
+export function formatLibrarySummary(c: LibraryCoverage): string {
   const parts = [
-    `${c.uniqueMovies} unique films`,
-    `${c.totalViewings} recorded viewings`,
+    `${c.uniqueMovies} films`,
+    `${c.watchlistMovies} on watchlist`,
+    `${c.totalViewings} viewings`,
   ];
   if (c.fullHistoryAvailable && c.lastFullImport) {
-    parts.push(`Full export: ${new Date(c.lastFullImport).toLocaleDateString()}`);
+    parts.push(`export ${new Date(c.lastFullImport).toLocaleDateString()}`);
   } else {
-    parts.push("Full export: not imported");
+    parts.push("no full export");
   }
   if (c.rssWindowLimit) {
-    parts.push(`RSS: latest ${c.rssWindowLimit} entries, incremental only`);
+    parts.push(`RSS last ${c.rssWindowLimit}`);
   }
   return parts.join(" · ");
 }

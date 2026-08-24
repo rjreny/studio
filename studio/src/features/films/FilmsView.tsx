@@ -45,20 +45,16 @@ export function FilmsView({
         const page = await getLibrary({
           search: query.trim() || undefined,
           sort,
-          limit: 500,
+          filter: filter === "all" ? undefined : filter,
         });
         let rows = page.items;
-        if (filter === "watchlist") rows = rows.filter((f) => f.watchlist);
-        if (filter === "watched") rows = rows.filter((f) => f.watched);
-        if (filter === "unresolved") rows = rows.filter((f) => f.matchState !== "confirmed");
-        setPool(rows);
         if (decade !== "any") {
           const start = Number(decade);
           rows = rows.filter((f) => f.year && f.year >= start && f.year < start + 10);
         }
+        setPool(page.items);
         setItems(rows);
-        setTotal(page.total);
-        onStatus(`${rows.length} shown · ${page.coverage.uniqueMovies} unique films`);
+        setTotal(filter === "all" && decade === "any" ? page.total : rows.length);
       } catch (err) {
         log("error", "library load failed", err);
         onStatus("Could not load library");
@@ -87,11 +83,10 @@ export function FilmsView({
       <header className="page-head">
         <div>
           <h1>Films</h1>
-          <p className="muted">{total} in your library</p>
+          <p className="muted">{busy ? "Updating…" : `${total} in this view`}</p>
         </div>
-        {busy ? <span className="muted">Updating…</span> : null}
       </header>
-      <div className="filter-bar">
+      <div className="filter-bar glass">
         <Menu label="Sort" value={sort} options={[...SORTS]} onChange={(id) => setSort(id)} />
         <Menu label="Show" value={filter} options={[...FILTERS]} onChange={(id) => setFilter(id)} />
         <Menu label="Decade" value={decade} options={decadeOptions} onChange={setDecade} />

@@ -14,7 +14,8 @@ export function FilmCard({
   onSelect?: (id: string) => void;
   caption?: string;
 }) {
-  const seen = film.viewingCount && film.viewingCount > 1 ? `Seen ${film.viewingCount}×` : "";
+  const seen = film.viewingCount && film.viewingCount > 1 ? `${film.viewingCount}×` : "";
+  const meta = [caption || (film.year != null ? String(film.year) : ""), seen].filter(Boolean).join(" · ");
 
   const body = (
     <>
@@ -24,9 +25,8 @@ export function FilmCard({
       <strong className="film-card-title" title={film.title}>
         {film.title}
       </strong>
-      <span className="title-year">{caption || (film.year ?? "")}</span>
+      <span className="title-year">{meta || "\u00a0"}</span>
       <RatingDisplay value={film.currentRating} starsOnly />
-      <span className={`film-card-seen${seen ? "" : " is-empty"}`}>{seen || "\u00a0"}</span>
     </>
   );
 

@@ -713,7 +713,7 @@ fn cast_names(v: &serde_json::Value) -> Vec<String> {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .take(16)
+                .take(32)
                 .filter_map(|g| {
                     let name = g["name"].as_str()?;
                     let character = g["character"].as_str().unwrap_or("").trim();
@@ -728,6 +728,30 @@ fn cast_names(v: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+const CREW_JOBS: &[&str] = &[
+    "Director",
+    "Writer",
+    "Screenplay",
+    "Original Screenplay",
+    "Story",
+    "Novel",
+    "Characters",
+    "Director of Photography",
+    "Cinematography",
+    "Original Music Composer",
+    "Music",
+    "Editor",
+    "Production Design",
+    "Art Direction",
+    "Costume Design",
+    "Casting",
+    "Sound Designer",
+    "Sound Mixer",
+    "Visual Effects Supervisor",
+    "Animation",
+    "Producer",
+];
+
 fn crew_names(v: &serde_json::Value) -> Vec<String> {
     v["credits"]["crew"]
         .as_array()
@@ -735,21 +759,13 @@ fn crew_names(v: &serde_json::Value) -> Vec<String> {
             arr.iter()
                 .filter_map(|g| {
                     let job = g["job"].as_str()?;
-                    if [
-                        "Director",
-                        "Writer",
-                        "Screenplay",
-                        "Director of Photography",
-                        "Production Design",
-                    ]
-                    .contains(&job)
-                    {
+                    if CREW_JOBS.contains(&job) {
                         Some(format!("{} ({})", g["name"].as_str()?, job))
                     } else {
                         None
                     }
                 })
-                .take(8)
+                .take(48)
                 .collect()
         })
         .unwrap_or_default()

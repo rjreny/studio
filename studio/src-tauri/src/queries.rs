@@ -12,17 +12,31 @@ use serde_json;
 const FILM_KEY: &str =
     "COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), ''))";
 
+fn library_filter_clause(filter: Option<&str>) -> &'static str {
+    match filter {
+        Some("watchlist") => " AND (ums.watchlist = 1 OR smr.on_watchlist = 1) ",
+        Some("watched") => " AND ums.watched = 1 ",
+        Some("unresolved") => {
+            " AND COALESCE(ml.match_state, 'unmatched') NOT IN ('confirmed', 'catalog') "
+        }
+        _ => "",
+    }
+}
+
+const LIBRARY_MEMBERSHIP: &str = "(ums.watched = 1 OR ums.watchlist = 1 OR ums.current_rating IS NOT NULL OR smr.on_watchlist = 1)";
+
 pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, String> {
     let search = query.search.as_deref().unwrap_or("").trim().to_lowercase();
-    let limit = query.limit.unwrap_or(200) as i64;
+    let limit = query.limit.unwrap_or(10_000).max(1) as i64;
     let offset = query.offset.unwrap_or(0) as i64;
     let sort = query.sort.as_deref().unwrap_or("recent");
+    let filter_clause = library_filter_clause(query.filter.as_deref());
 
     let order = match sort {
         "title" => "title_raw ASC",
-        "rating" => "current_rating DESC",
-        "year" => "year DESC",
-        _ => "last_watched_at DESC",
+        "rating" => "(current_rating IS NULL), current_rating DESC, title_raw ASC",
+        "year" => "(year IS NULL), year DESC, title_raw ASC",
+        _ => "(last_watched_at IS NULL), last_watched_at DESC, title_raw ASC",
     };
 
     let search_clause = if search.is_empty() {
@@ -51,9 +65,9 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
             m.overview AS overview,
             smr.cached_poster_url,
             json_extract(smr.raw_identity, '$.poster') AS identity_poster,
-            ums.watched,
-            ums.watchlist,
-            ums.liked,
+            COALESCE(ums.watched, 0) AS watched,
+            COALESCE(ums.watchlist, smr.on_watchlist, 0) AS watchlist,
+            COALESCE(ums.liked, 0) AS liked,
             (SELECT COUNT(*) FROM viewings v WHERE v.source_movie_record_id = smr.id) AS source_viewing_count,
             COALESCE(ml.match_state, 'unmatched') AS match_state,
             smr.source_type,
@@ -62,8 +76,9 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
           LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
           LEFT JOIN movies m ON m.id = ml.movie_id
           LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
-          WHERE (ums.watched = 1 OR ums.watchlist = 1 OR ums.current_rating IS NOT NULL)
+          WHERE {membership}
           {search_clause}
+          {filter_clause}
         ),
         aggregated AS (
           SELECT
@@ -114,7 +129,9 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
         WHERE p.rn = 1
         {limit_clause}
         "#,
-        film_key = FILM_KEY
+        film_key = FILM_KEY,
+        membership = LIBRARY_MEMBERSHIP,
+        filter_clause = filter_clause,
     );
 
     let mut stmt = db.conn().prepare(&sql).map_err(|e| e.to_string())?;
@@ -133,20 +150,24 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
         items.push(row.map_err(|e| e.to_string())?);
     }
 
-    let total: u32 = db
-        .conn()
-        .query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT {FILM_KEY})
-             FROM source_movie_records smr
-             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
-             LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
-             WHERE ums.watched = 1 OR ums.watchlist = 1 OR ums.current_rating IS NOT NULL"
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let count_sql = format!(
+        "SELECT COUNT(DISTINCT {FILM_KEY})
+         FROM source_movie_records smr
+         LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+         LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
+         WHERE {LIBRARY_MEMBERSHIP}
+         {search_clause}
+         {filter_clause}"
+    );
+    let total: u32 = if search.is_empty() {
+        db.conn()
+            .query_row(&count_sql, [], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+    } else {
+        db.conn()
+            .query_row(&count_sql, params![format!("%{search}%")], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+    };
 
     Ok(LibraryPage {
         items,
@@ -816,5 +837,91 @@ mod tests {
         let detail = get_film(&db, &page.items[0].id).expect("unmatched film");
         assert_eq!(detail.title, "Mystery Film");
         assert_eq!(detail.your_history.len(), 1);
+    }
+
+    #[test]
+    fn watchlist_filter_returns_unwatched_titles_beyond_recent_limit() {
+        use crate::letterboxd::import::upsert_source_movie;
+        use crate::letterboxd::posters::SourceMovieMeta;
+        use rusqlite::params;
+        use uuid::Uuid;
+
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+
+        for i in 0..20 {
+            let title = format!("Watched {i}");
+            let smr = upsert_source_movie(
+                &tx,
+                "letterboxd_export",
+                &format!("export|watched-{i}"),
+                &title,
+                Some(2000 + i),
+                &format!("https://letterboxd.com/film/watched-{i}/"),
+                &SourceMovieMeta::default(),
+            )
+            .expect("watched smr");
+            tx.execute(
+                "INSERT INTO viewings (
+                  id, source_movie_record_id, source_record_key, observed_at, source_type, rewatch
+                ) VALUES (?1, ?2, ?3, ?4, 'letterboxd_export', 0)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    smr,
+                    format!("viewing-{smr}"),
+                    format!("2024-01-{:02}T00:00:00Z", i + 1)
+                ],
+            )
+            .expect("viewing");
+        }
+
+        let watchlist = upsert_source_movie(
+            &tx,
+            "letterboxd_export",
+            "export|watchlist-only",
+            "Unwatched Watchlist Film",
+            Some(1994),
+            "https://letterboxd.com/film/unwatched-watchlist-film/",
+            &SourceMovieMeta::default(),
+        )
+        .expect("watchlist smr");
+        tx.execute(
+            "UPDATE source_movie_records SET on_watchlist = 1 WHERE id = ?1",
+            params![watchlist],
+        )
+        .expect("flag");
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        let recent = get_library(
+            &db,
+            &LibraryQuery {
+                search: None,
+                sort: Some("year".into()),
+                filter: None,
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .expect("recent page");
+        assert_eq!(recent.items.len(), 10);
+        assert!(!recent.items.iter().any(|f| f.title == "Unwatched Watchlist Film"));
+
+        let page = get_library(
+            &db,
+            &LibraryQuery {
+                search: None,
+                sort: Some("recent".into()),
+                filter: Some("watchlist".into()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .expect("watchlist page");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "Unwatched Watchlist Film");
+        assert!(page.items[0].watchlist);
+        assert!(!page.items[0].watched);
     }
 }
