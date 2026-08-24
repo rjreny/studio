@@ -48,8 +48,8 @@ export function RecsView({ library }: { library: Library }) {
   const recs = [...localRecommendations(library), ...extra];
 
   return (
-    <div className="recs">
-      <header className="toolbar">
+    <div className="recs page-pad">
+      <header className="page-head">
         <div>
           <h1>{taste.title}</h1>
           <p className="muted">{taste.summary}</p>

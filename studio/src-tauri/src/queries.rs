@@ -46,6 +46,8 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
             COALESCE(m.release_year, smr.release_year) AS year,
             ums.current_rating,
             m.poster_path AS poster,
+            m.backdrop_path AS backdrop,
+            m.overview AS overview,
             smr.cached_poster_url,
             json_extract(smr.raw_identity, '$.poster') AS identity_poster,
             ums.watched,
@@ -103,7 +105,9 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
           a.viewing_count,
           p.match_state,
           p.source_type,
-          p.last_watched_at
+          p.last_watched_at,
+          p.backdrop,
+          p.overview
         FROM primary_row p
         JOIN aggregated a ON a.film_key = p.film_key
         WHERE p.rn = 1
@@ -151,11 +155,19 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
 }
 
 fn poster_url(path: Option<String>) -> Option<String> {
+    tmdb_image_url(path, "w500")
+}
+
+fn backdrop_url(path: Option<String>) -> Option<String> {
+    tmdb_image_url(path, "w1280")
+}
+
+fn tmdb_image_url(path: Option<String>, size: &str) -> Option<String> {
     path.filter(|p| !p.is_empty()).map(|p| {
         if p.starts_with("http") {
             p
         } else {
-            format!("https://image.tmdb.org/t/p/w500{p}")
+            format!("https://image.tmdb.org/t/p/{size}{p}")
         }
     })
 }
@@ -176,6 +188,8 @@ fn map_library_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
         match_state: row.get(9)?,
         source_type: row.get(10)?,
         last_watched_at: row.get(11)?,
+        backdrop: backdrop_url(row.get(12)?),
+        overview: row.get(13)?,
     })
 }
 
@@ -295,7 +309,7 @@ pub fn get_film(db: &Database, id: &str) -> Result<FilmDetail, String> {
         year: row.2,
         current_rating: row.3,
         poster: poster_url(row.4.clone()),
-        backdrop: poster_url(row.5.clone()),
+        backdrop: backdrop_url(row.5.clone()),
         overview: row.6,
         runtime: row.7,
         genres,

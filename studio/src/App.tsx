@@ -206,100 +206,107 @@ export default function App() {
   }, [palette, closePalette, selectedFilmId]);
 
   const connected = Boolean(session?.hasSetup);
+  const immersive =
+    Boolean(selectedFilmId) || (connected && route === "home") || (!connected && route === "home");
   const title = selectedFilmId ? "Film" : "";
 
+  function go(id: Route) {
+    setSelectedFilmId(null);
+    setRoute(id);
+  }
+
   return (
-    <div className="app canvas-surface">
+    <div className={`app canvas-surface${immersive ? " is-immersive" : ""}`}>
       <TitleBar collapsed={false} title={title} />
-      <header className="top-nav glass">
-        <div className="shell top-nav-inner">
-          <nav className="top-nav-links" aria-label="Primary">
-            {NAV.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`top-nav-link${route === item.id && !selectedFilmId ? " is-active" : ""}`}
-                onClick={() => {
-                  setSelectedFilmId(null);
-                  setRoute(item.id);
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-          </nav>
-          {coverage ? (
-            <p className="coverage-chip" title={coverage.warnings.join("\n")}>
-              {formatCoverage(coverage)}
+      <div className="stage">
+        <header className="cinema-nav">
+          <div className="cinema-nav-inner">
+            <p className="coverage-chip" title={coverage?.warnings.join("\n") ?? undefined}>
+              {coverage ? formatCoverage(coverage) : ""}
             </p>
-          ) : null}
-        </div>
-      </header>
-      <main className="main-shell">
-        <div className={`shell main-content${!connected && route === "home" ? " is-connect" : ""}`}>
-          {!connected && route === "home" ? (
-            <ConnectView
-              username={username}
-              onUsername={setUsername}
-              onStatus={setStatus}
-              onConnected={refresh}
-            />
-          ) : selectedFilmId ? (
-            <FilmDetailView
-              filmId={selectedFilmId}
-              onBack={() => setSelectedFilmId(null)}
-              onUpdated={refresh}
-              onStatus={setStatus}
-            />
-          ) : (
-            <>
-              {route === "home" ? (
-                <HomeView
-                  home={home}
-                  onOpenFilms={() => setRoute("films")}
-                  onOpenFriends={() => setRoute("friends")}
-                  onSelectFilm={setSelectedFilmId}
-                />
-              ) : null}
-              {route === "films" ? (
-                <FilmsView
-                  onSelectFilm={setSelectedFilmId}
-                  onStatus={setStatus}
-                  reloadToken={libraryEpoch}
-                />
-              ) : null}
-              {route === "friends" ? (
-                <FriendsView onStatus={setStatus} onRefresh={refresh} />
-              ) : null}
-              {route === "stats" ? <StatsView /> : null}
-              {route === "recs" ? <RecsView library={legacyLibrary} /> : null}
-              {route === "settings" ? (
-                <SettingsView
-                  theme={theme}
-                  accent={accent}
-                  version={version}
-                  username={username}
-                  coverage={coverage}
-                  onTheme={setTheme}
-                  onAccent={setAccent}
-                  onUsername={setUsername}
-                  onStatus={setStatus}
-                  onRefresh={refresh}
-                />
-              ) : null}
-            </>
-          )}
-        </div>
-      </main>
-      {job && !job.done ? (
-        <div className="job-banner">
-          <span>{job.label}</span>
-          <span>
-            {job.current}/{job.total} · {job.posters} posters · {job.errors} errors
-          </span>
-        </div>
-      ) : null}
-      <footer className="status solid">
+            <nav className="nav-pill glass" aria-label="Primary">
+              {NAV.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`nav-pill-link${route === item.id && !selectedFilmId ? " is-active" : ""}`}
+                  onClick={() => go(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+              <button type="button" className="nav-pill-link" onClick={() => setPalette(true)}>
+                Search
+              </button>
+            </nav>
+          </div>
+        </header>
+        <main className="main-shell">
+          <div className={`main-content${!connected && route === "home" ? " is-connect" : ""}`}>
+            {!connected && route === "home" ? (
+              <ConnectView
+                username={username}
+                onUsername={setUsername}
+                onStatus={setStatus}
+                onConnected={refresh}
+              />
+            ) : selectedFilmId ? (
+              <FilmDetailView
+                filmId={selectedFilmId}
+                onBack={() => setSelectedFilmId(null)}
+                onUpdated={refresh}
+                onStatus={setStatus}
+              />
+            ) : (
+              <>
+                {route === "home" ? (
+                  <HomeView
+                    home={home}
+                    onOpenFilms={() => setRoute("films")}
+                    onOpenFriends={() => setRoute("friends")}
+                    onSelectFilm={setSelectedFilmId}
+                  />
+                ) : null}
+                {route === "films" ? (
+                  <FilmsView
+                    onSelectFilm={setSelectedFilmId}
+                    onStatus={setStatus}
+                    reloadToken={libraryEpoch}
+                  />
+                ) : null}
+                {route === "friends" ? (
+                  <FriendsView onStatus={setStatus} onRefresh={refresh} />
+                ) : null}
+                {route === "stats" ? <StatsView /> : null}
+                {route === "recs" ? <RecsView library={legacyLibrary} /> : null}
+                {route === "settings" ? (
+                  <SettingsView
+                    theme={theme}
+                    accent={accent}
+                    version={version}
+                    username={username}
+                    coverage={coverage}
+                    onTheme={setTheme}
+                    onAccent={setAccent}
+                    onUsername={setUsername}
+                    onStatus={setStatus}
+                    onRefresh={refresh}
+                  />
+                ) : null}
+              </>
+            )}
+          </div>
+        </main>
+        {job && !job.done ? (
+          <div className="job-banner glass">
+            <span>{job.label}</span>
+            <span>
+              {job.current}/{job.total} · {job.posters} posters · {job.errors} errors
+            </span>
+          </div>
+        ) : null}
+      </div>
+      <footer className="status">
         <span>{status}</span>
         <div className="status-actions">
           <DevUpdateButton />
@@ -309,13 +316,13 @@ export default function App() {
       {palette ? (
         <div className="overlay" onMouseDown={closePalette}>
           <div className="palette glass" onMouseDown={(e) => e.stopPropagation()}>
-            <input autoFocus placeholder="Command" readOnly />
+            <input autoFocus placeholder="Search Studio" readOnly />
             {NAV.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => {
-                  setRoute(item.id);
+                  go(item.id);
                   closePalette();
                 }}
               >

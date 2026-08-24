@@ -2,26 +2,19 @@
 
 ## Visual direction
 
-Letterboxd structure, Apple TV polish, centered canvas, poster-led hierarchy.
+Letterboxd structure inside an Apple TV cinematic shell: full-bleed hero, glass pill navigation, poster-led shelves.
 
 ## Material system (three surfaces only)
 
 | Surface | Use |
 |---------|-----|
-| Canvas | Neutral page background |
-| Solid | Cards, settings, stats, readable content |
-| Glass | Sticky nav, filters, command palette, detail action rail |
+| Canvas | Near-black page and hero scrims |
+| Solid | Settings, friend manager, stats, readable forms |
+| Glass | Floating pill nav, filters, command palette, job banner |
 
 ## Shell
 
-```css
-.shell {
-  width: min(1200px, calc(100vw - 48px));
-  margin-inline: auto;
-}
-```
-
-960px minimum: no horizontal scroll; content centered with responsive gutters.
+Immersive Home and film detail are full-bleed. Other pages use `--gutter` (48px, 24px under 1100px). 960px minimum: no horizontal page scroll.
 
 ## Ratings
 

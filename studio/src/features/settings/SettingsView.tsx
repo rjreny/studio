@@ -226,7 +226,7 @@ export function SettingsView({
   }
 
   return (
-    <div className="settings-page">
+    <div className="settings-page page-pad">
       <h1>Settings</h1>
       <section className="settings-group solid-card">
         <h2>Library</h2>

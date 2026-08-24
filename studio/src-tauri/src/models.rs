@@ -138,6 +138,10 @@ pub struct LibraryItem {
     pub year: Option<i32>,
     pub current_rating: Option<f64>,
     pub poster: Option<String>,
+    #[serde(default)]
+    pub backdrop: Option<String>,
+    #[serde(default)]
+    pub overview: Option<String>,
     pub watched: bool,
     pub watchlist: bool,
     pub liked: bool,

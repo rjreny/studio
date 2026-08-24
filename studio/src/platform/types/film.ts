@@ -65,6 +65,8 @@ export type LibraryItem = {
   year: number | null;
   currentRating: number | null;
   poster: string | null;
+  backdrop?: string | null;
+  overview?: string | null;
   watched: boolean;
   watchlist: boolean;
   liked: boolean;

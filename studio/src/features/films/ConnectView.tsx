@@ -54,12 +54,12 @@ export function ConnectView({
   }
 
   return (
-    <div className="connect solid-card">
-      <p className="eyebrow">Your log</p>
+    <div className="connect">
+      <p className="hero-cast">Your log</p>
       <h1>Bring your Letterboxd life in.</h1>
       <p className="lede">
-        Studio preserves every diary event — rewatches, rating changes, and overlapping exports — not
-        just a collapsed film count.
+        Studio keeps every diary event: rewatches, rating changes, and overlapping exports. Not just a
+        collapsed film count.
       </p>
       <label>
         Username
@@ -72,16 +72,16 @@ export function ConnectView({
         />
       </label>
       <div className="connect-actions">
-        <button type="button" className="primary" disabled={busy} onClick={() => void connectRss()}>
+        <button type="button" className="play-btn" disabled={busy} onClick={() => void connectRss()}>
           {busy ? "Connecting…" : "Connect public diary"}
         </button>
-        <button type="button" className="ghost" disabled={busy} onClick={() => void importExport()}>
+        <button type="button" className="ghost-pill" disabled={busy} onClick={() => void importExport()}>
           Import export ZIP
         </button>
       </div>
       {error ? <p className="form-error">{error}</p> : null}
       <p className="hint">
-        Full history: Letterboxd Settings → Import & Export → download ZIP. RSS only covers the latest
+        Full history: Letterboxd Settings, Import & Export, download ZIP. RSS only covers the latest
         ~50 diary entries and never counts as full history.
       </p>
     </div>

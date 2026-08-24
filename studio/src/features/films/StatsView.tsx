@@ -40,8 +40,8 @@ export function StatsView() {
   const maxBucket = Math.max(1, ...distribution);
 
   return (
-    <div className="stats-page">
-      <header className="toolbar">
+    <div className="stats-page page-pad">
+      <header className="page-head">
         <div>
           <h1>Stats</h1>
           {coverage ? (

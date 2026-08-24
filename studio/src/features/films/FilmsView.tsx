@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getLibrary } from "../../platform/filmLibrary";
 import { log } from "../../platform/log";
 import type { LibraryItem } from "../../platform/types/film";
-import { Poster } from "./Poster";
-import { RatingDisplay } from "./RatingDisplay";
+import { FilmCard } from "./FilmCard";
 
 const SORTS = [
   { id: "recent", label: "Recently watched" },
@@ -62,8 +61,8 @@ export function FilmsView({
   }, [items]);
 
   return (
-    <div className="films">
-      <header className="toolbar glass">
+    <div className="films page-pad">
+      <header className="page-head">
         <div>
           <h1>Films</h1>
           <p className="muted">{total} in your library</p>
@@ -106,25 +105,7 @@ export function FilmsView({
       </div>
       <div className="film-grid">
         {items.map((film) => (
-          <button
-            key={film.id}
-            type="button"
-            className="film-grid-card solid-card"
-            onClick={() => onSelectFilm(film.id)}
-          >
-            <Poster name={film.title} poster={film.poster} large />
-            <div className="film-grid-meta">
-              <strong>{film.title}</strong>
-              <span className="title-year">{film.year ?? "—"}</span>
-              <RatingDisplay value={film.currentRating} compact />
-              {film.viewingCount > 1 ? (
-                <span className="rewatch-badge">{film.viewingCount} viewings</span>
-              ) : null}
-              {film.matchState === "ambiguous" ? (
-                <span className="source-badge">{film.matchState}</span>
-              ) : null}
-            </div>
-          </button>
+          <FilmCard key={film.id} film={film} onSelect={onSelectFilm} />
         ))}
       </div>
       {!items.length ? <p className="muted pad">Nothing here yet. Connect or import.</p> : null}

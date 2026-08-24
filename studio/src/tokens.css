@@ -9,40 +9,65 @@
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 40px;
   --control-sm: 28px;
   --control-md: 32px;
   --font: "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --dur: 180ms;
+  --z-nav: 20;
   --z-palette: 50;
   --accent-app: oklch(0.78 0.19 145);
   --accent: var(--accent-app);
   --danger: oklch(0.58 0.2 25);
-  --radius: 6px;
+  --radius: 10px;
+  --radius-poster: 12px;
+  --radius-pill: 999px;
+  --gutter: 48px;
+  --poster-w: 148px;
+  --poster-h: 222px;
 }
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: oklch(0.16 0.006 260);
-  --bg-sidebar: oklch(0.14 0.006 260);
-  --bg-title: oklch(0.15 0.006 260);
-  --surface: oklch(0.2 0.008 260);
-  --surface-hover: oklch(0.25 0.01 260);
-  --border: oklch(0.3 0.01 260);
-  --text: oklch(0.94 0.01 260);
-  --text-muted: oklch(0.72 0.02 260);
+  --bg: oklch(0.12 0.008 260);
+  --bg-sidebar: oklch(0.1 0.008 260);
+  --bg-title: oklch(0.11 0.008 260);
+  --surface: oklch(0.18 0.01 260);
+  --surface-hover: oklch(0.24 0.012 260);
+  --border: oklch(0.28 0.012 260);
+  --text: oklch(0.97 0.006 260);
+  --text-muted: oklch(0.78 0.016 260);
   --focus: oklch(0.82 0.16 145);
+  --hero-ink: rgb(10 10 12);
+  --play-bg: oklch(0.98 0.004 260);
+  --play-fg: oklch(0.16 0.02 260);
+  --nav-active-bg: oklch(0.98 0.004 260);
+  --nav-active-fg: oklch(0.16 0.02 260);
 }
 html[data-theme="light"] {
   color-scheme: light;
-  --bg: oklch(0.97 0.004 260);
-  --bg-sidebar: oklch(0.94 0.006 260);
-  --bg-title: oklch(0.95 0.004 260);
+  --bg: oklch(0.96 0.006 260);
+  --bg-sidebar: oklch(0.93 0.008 260);
+  --bg-title: oklch(0.94 0.006 260);
   --surface: oklch(0.99 0.003 260);
-  --surface-hover: oklch(0.93 0.02 145);
+  --surface-hover: oklch(0.92 0.02 145);
   --border: oklch(0.84 0.02 145);
-  --text: oklch(0.22 0.03 145);
-  --text-muted: oklch(0.4 0.03 145);
+  --text: oklch(0.2 0.03 145);
+  --text-muted: oklch(0.38 0.03 145);
   --focus: oklch(0.48 0.14 145);
+  --hero-ink: oklch(0.16 0.02 260);
+  --play-bg: oklch(0.16 0.02 260);
+  --play-fg: oklch(0.98 0.004 260);
+  --nav-active-bg: oklch(0.16 0.02 260);
+  --nav-active-fg: oklch(0.98 0.004 260);
 }
 html[data-accent="system"] { --accent: AccentColor; }
 @media (prefers-reduced-motion: reduce) { :root { --dur: 0.01ms; } }
+@media (max-width: 1100px) {
+  :root {
+    --gutter: 24px;
+    --poster-w: 128px;
+    --poster-h: 192px;
+  }
+}

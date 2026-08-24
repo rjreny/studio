@@ -8,6 +8,7 @@ import type { FriendRow } from "../../platform/types/film";
 import { Poster } from "./Poster";
 import { RatingDisplay } from "./RatingDisplay";
 import { getHome } from "../../platform/filmLibrary";
+import { Shelf } from "./Shelf";
 
 export function FriendsView({
   onStatus,
@@ -64,13 +65,13 @@ export function FriendsView({
   }
 
   return (
-    <div className="friends-page">
-      <header className="toolbar">
+    <div className="friends-page page-pad">
+      <header className="page-head">
         <div>
           <h1>Friends</h1>
-          <p className="muted">Public RSS only · newest first globally</p>
+          <p className="muted">Public RSS only, newest first globally</p>
         </div>
-        <button type="button" className="primary" disabled={busy} onClick={() => void refreshAll()}>
+        <button type="button" className="play-btn" disabled={busy} onClick={() => void refreshAll()}>
           Sync all
         </button>
       </header>
@@ -82,7 +83,7 @@ export function FriendsView({
           placeholder="Paste Letterboxd usernames, one per line"
           rows={4}
         />
-        <button type="button" className="ghost" disabled={busy} onClick={() => void addBulk()}>
+        <button type="button" className="ghost-pill" disabled={busy} onClick={() => void addBulk()}>
           Import usernames
         </button>
         <ul className="friend-list">
@@ -97,24 +98,19 @@ export function FriendsView({
           ))}
         </ul>
       </section>
-      <section className="solid-card">
-        <h2>Global feed</h2>
-        <ul className="feed">
-          {feed.map((e, idx) => (
-            <li key={`${e.username}-${idx}`}>
-              <Poster name={e.title} poster={e.poster} />
-              <div>
-                <strong>{e.title}</strong>
-                <span className="muted">
-                  @{e.username}
-                  {e.year ? ` · ${e.year}` : ""}
-                </span>
-                <RatingDisplay value={e.rating} compact />
-              </div>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <Shelf title="Global feed">
+        {feed.map((e, idx) => (
+          <div key={`${e.username}-${idx}`} className="film-card">
+            <Poster name={e.title} poster={e.poster} large />
+            <strong>{e.title}</strong>
+            <span className="muted">
+              @{e.username}
+              {e.year ? `  ${e.year}` : ""}
+            </span>
+            <RatingDisplay value={e.rating} compact />
+          </div>
+        ))}
+      </Shelf>
     </div>
   );
 }
