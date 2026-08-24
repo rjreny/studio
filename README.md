@@ -18,7 +18,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-NSIS installs per-user. Push a `v*` tag to cut a signed NSIS installer and `latest.json` for auto-update.
+NSIS installs per-user. After any change that should reach the installed app, bump the version, push `master`, and push a `v*` tag so release CI can cut a signed NSIS installer and `latest.json` for auto-update. A push without a `v*` tag does not update the installed app.
 
 Repo: https://github.com/rjreny/studio
 
