@@ -7,6 +7,8 @@ mod migration;
 mod models;
 mod queries;
 mod storage;
+#[cfg(windows)]
+mod windows_icon;
 
 use commands::init_state;
 use serde::Serialize;
@@ -103,6 +105,8 @@ pub fn run() {
         builder = builder
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
                 if let Some(window) = app.get_webview_window("main") {
+                    #[cfg(windows)]
+                    windows_icon::apply(&window);
                     let _ = window.unminimize();
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -135,9 +139,13 @@ pub fn run() {
                     let _ = window.restore_state(
                         StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED,
                     );
+                    #[cfg(windows)]
+                    windows_icon::apply(&window);
                     let _ = window.unminimize();
                     let _ = window.show();
                     let _ = window.set_focus();
+                    #[cfg(windows)]
+                    windows_icon::apply(&window);
                 }
             }
 
