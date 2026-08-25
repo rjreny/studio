@@ -121,9 +121,48 @@ struct FilmRow {
     poster: Option<String>,
 }
 
+struct Budget {
+    really_liked: usize,
+    liked: usize,
+    hated: usize,
+    candidates: usize,
+    watchlist: usize,
+    overview_chars: usize,
+    max_chars: usize,
+}
+
+fn budget_for(model: &str) -> Budget {
+    if model == MODEL_KIMI {
+        Budget {
+            really_liked: 220,
+            liked: 80,
+            hated: 80,
+            candidates: 64,
+            watchlist: 20,
+            overview_chars: 140,
+            max_chars: 320_000,
+        }
+    } else {
+        Budget {
+            really_liked: 70,
+            liked: 36,
+            hated: 36,
+            candidates: 36,
+            watchlist: 10,
+            overview_chars: 80,
+            max_chars: 68_000,
+        }
+    }
+}
+
+fn estimate_tokens(payload: &Value) -> usize {
+    (SYSTEM_PROMPT.len() + payload.to_string().len()) / 4 + 48
+}
+
 struct Corpus {
     snapshot: TasteSnapshot,
     payload: Value,
+    seen: HashSet<String>,
 }
 
 pub fn default_model() -> String {
@@ -279,13 +318,13 @@ pub fn store_api_key(db: &Database, key: &str) -> Result<TasteKeyStatus, String>
 }
 
 pub fn load_state(db: &Database) -> Result<TasteState, String> {
-    let corpus = build_corpus(db)?;
+    let films = collect_films(db)?;
     let report = db
         .get_meta(META_REPORT)?
         .and_then(|raw| serde_json::from_str(&raw).ok());
     Ok(TasteState {
         key: stored_status(db)?,
-        snapshot: corpus.snapshot,
+        snapshot: snapshot_of(&films),
         report,
     })
 }
@@ -306,7 +345,7 @@ pub fn analyze(
         total: 3,
         ..Default::default()
     });
-    let corpus = build_corpus(db)?;
+    let corpus = build_corpus(db, &model)?;
     if corpus.snapshot.rated_count < 8 {
         return Err("Rate at least 8 films first so the agent has edges to work with.".into());
     }
@@ -326,7 +365,7 @@ pub fn analyze(
         total: 3,
         ..Default::default()
     });
-    let picks = hydrate_picks(db, parsed.picks)?;
+    let picks = hydrate_picks(db, parsed.picks, &corpus.seen)?;
     let report = TasteReport {
         title: parsed.title,
         summary: parsed.summary,
@@ -389,7 +428,7 @@ fn chat_complete(key: &str, model: &str, payload: &Value) -> Result<String, Stri
 }
 
 const SYSTEM_PROMPT: &str = r#"You are a film taste analyst inside Studio, a local Letterboxd library app.
-You receive the viewer's ratings, catalog metadata (genres, directors, cast, cinematographers, writers, composers, runtime, overviews), statistical affinities, films they have already seen, and a candidate pool of real titles.
+You receive compact ratings, catalog metadata, statistical affinities, and a candidate pool. Studio already excluded logged films from candidates and will drop any wildcard that is already in the library.
 
 Return JSON only:
 {
@@ -412,10 +451,10 @@ Return JSON only:
 }
 
 Rules:
-- Use ALL signal: ratings, hearts, genres, decades, directors, actors, cinematographers, writers, composers, runtime, overviews, friend love, watchlist.
+- Use ratings, hearts, genres, decades, directors, actors, cinematographers, writers, composers, runtime, overviews, friend love, watchlist.
 - Contrast loved vs hated. Do not flatten them into "you like good movies".
-- Prefer ranking `candidates`. You may add up to 4 real wildcard films not in the pool if they clearly fit.
-- Never recommend anything in `seen`.
+- Prefer ranking `candidates`. You may add up to 4 real wildcard films not in the lists if they clearly fit.
+- Never recommend a title that appears in reallyLiked, liked, or disliked.
 - 12 picks. Each why must name at least one film they rated.
 - Be concrete. No marketing language. No em dashes.
 "#;
@@ -469,11 +508,18 @@ pub fn extract_json(raw: &str) -> Result<Value, String> {
     serde_json::from_str(&unfenced[start..=end]).map_err(|e| e.to_string())
 }
 
-fn hydrate_picks(db: &Database, picks: Vec<ModelPick>) -> Result<Vec<TastePick>, String> {
+fn hydrate_picks(
+    db: &Database,
+    picks: Vec<ModelPick>,
+    seen: &HashSet<String>,
+) -> Result<Vec<TastePick>, String> {
     let mut out = Vec::new();
     for pick in picks.into_iter().take(16) {
         let title = pick.title.trim();
         if title.is_empty() {
+            continue;
+        }
+        if seen.contains(&seen_key(title, pick.year)) {
             continue;
         }
         let mut year = pick.year;
@@ -507,6 +553,9 @@ fn hydrate_picks(db: &Database, picks: Vec<ModelPick>) -> Result<Vec<TastePick>,
             if let Some(id) = tmdb_id {
                 film_id = Some(format!("tmdb:{id}"));
             }
+        }
+        if seen.contains(&seen_key(title, year)) {
+            continue;
         }
         out.push(TastePick {
             title: title.to_string(),
@@ -597,7 +646,7 @@ impl<T> OptionalRow<T> for rusqlite::Result<T> {
     }
 }
 
-fn build_corpus(db: &Database) -> Result<Corpus, String> {
+fn collect_films(db: &Database) -> Result<Vec<FilmRow>, String> {
     let films = load_films(db)?;
     let mut by_key: HashMap<String, FilmRow> = HashMap::new();
     for film in films {
@@ -623,23 +672,19 @@ fn build_corpus(db: &Database) -> Result<Corpus, String> {
             })
             .or_insert(film);
     }
-    let films: Vec<FilmRow> = by_key.into_values().collect();
+    Ok(by_key.into_values().collect())
+}
+
+fn snapshot_of(films: &[FilmRow]) -> TasteSnapshot {
     let rated: Vec<&FilmRow> = films.iter().filter(|f| f.rating.is_some()).collect();
-    let loved: Vec<&FilmRow> = rated
+    let loved = rated
         .iter()
-        .copied()
         .filter(|f| f.rating.unwrap_or(0.0) >= 4.5)
-        .collect();
-    let liked: Vec<&FilmRow> = rated
+        .count() as u32;
+    let hated = rated
         .iter()
-        .copied()
-        .filter(|f| f.rating.unwrap_or(0.0) >= 4.0)
-        .collect();
-    let hated: Vec<&FilmRow> = rated
-        .iter()
-        .copied()
         .filter(|f| f.rating.unwrap_or(0.0) <= 2.5)
-        .collect();
+        .count() as u32;
     let avg = if rated.is_empty() {
         None
     } else {
@@ -650,94 +695,125 @@ fn build_corpus(db: &Database) -> Result<Corpus, String> {
                 / 100.0,
         )
     };
-
-    let genres = person_stats(&films, |f| f.genres.clone(), 16);
-    let decades = decade_stats(&films);
-    let directors = person_stats(&films, |f| f.directors.clone(), 20);
-    let actors = person_stats(&films, |f| actor_names(&f.cast), 18);
-    let dps = person_stats(&films, |f| f.cinematographers.clone(), 12);
-    let writers = person_stats(&films, |f| f.writers.clone(), 12);
-    let composers = person_stats(&films, |f| f.composers.clone(), 8);
-    let runtimes = runtime_stats(&rated);
-
-    let snapshot = TasteSnapshot {
+    TasteSnapshot {
         rated_count: rated.len() as u32,
-        loved_count: loved.len() as u32,
-        hated_count: hated.len() as u32,
+        loved_count: loved,
+        hated_count: hated,
         avg_rating: avg,
-        genres: genres.clone(),
-        decades: decades.clone(),
-        directors: directors.clone(),
-        actors: actors.clone(),
-    };
+        genres: person_stats(films, |f| f.genres.clone(), 16),
+        decades: decade_stats(films),
+        directors: person_stats(films, |f| f.directors.clone(), 20),
+        actors: person_stats(films, |f| actor_names(&f.cast), 18),
+    }
+}
 
-    let seen: Vec<String> = films
-        .iter()
-        .filter(|f| f.watched || f.rating.is_some())
-        .map(film_label)
-        .collect();
-    let seen_set: HashSet<String> = films
+fn build_corpus(db: &Database, model: &str) -> Result<Corpus, String> {
+    let films = collect_films(db)?;
+    let snapshot = snapshot_of(&films);
+    let seen: HashSet<String> = films
         .iter()
         .filter(|f| f.watched || f.rating.is_some())
         .map(|f| seen_key(&f.title, f.year))
         .collect();
+    let payload = encode_payload(db, &films, &snapshot, &seen, model)?;
+    Ok(Corpus {
+        snapshot,
+        payload,
+        seen,
+    })
+}
 
-    let mut liked_sorted = liked.clone();
+fn encode_payload(
+    db: &Database,
+    films: &[FilmRow],
+    snapshot: &TasteSnapshot,
+    seen: &HashSet<String>,
+    model: &str,
+) -> Result<Value, String> {
+    let mut budget = budget_for(model);
+    let rated: Vec<&FilmRow> = films.iter().filter(|f| f.rating.is_some()).collect();
+    let mut liked_sorted: Vec<&FilmRow> = rated
+        .iter()
+        .copied()
+        .filter(|f| f.rating.unwrap_or(0.0) >= 4.0)
+        .collect();
     liked_sorted.sort_by(|a, b| {
         b.rating
             .partial_cmp(&a.rating)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut hated_sorted = hated.clone();
+    let mut hated_sorted: Vec<&FilmRow> = rated
+        .iter()
+        .copied()
+        .filter(|f| f.rating.unwrap_or(0.0) <= 2.5)
+        .collect();
     hated_sorted.sort_by(|a, b| {
         a.rating
             .partial_cmp(&b.rating)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let candidates = candidate_pool(films, &liked_sorted, seen, db, budget.candidates)?;
+    let dps = person_stats(films, |f| f.cinematographers.clone(), 12);
+    let writers = person_stats(films, |f| f.writers.clone(), 12);
+    let composers = person_stats(films, |f| f.composers.clone(), 8);
+    let runtimes = runtime_stats(&rated);
 
-    let really_liked_json: Vec<Value> = liked_sorted
-        .iter()
-        .filter(|f| f.rating.unwrap_or(0.0) >= 4.5)
-        .map(|f| compact_film(f, true))
-        .collect();
-    let liked_json: Vec<Value> = liked_sorted
-        .iter()
-        .filter(|f| f.rating.unwrap_or(0.0) < 4.5)
-        .take(80)
-        .map(|f| compact_film(f, false))
-        .collect();
-    let hated_json: Vec<Value> = hated_sorted
-        .iter()
-        .take(80)
-        .map(|f| compact_film(f, true))
-        .collect();
-
-    let candidates = candidate_pool(&films, &liked_sorted, &seen_set, db)?;
-
-    let payload = json!({
-        "stats": {
-            "rated": snapshot.rated_count,
-            "loved45plus": snapshot.loved_count,
-            "hated": snapshot.hated_count,
-            "avg": avg,
-            "genres": stats_json(&genres),
-            "decades": stats_json(&decades),
-            "directors": stats_json(&directors),
-            "actors": stats_json(&actors),
-            "cinematographers": stats_json(&dps),
-            "writers": stats_json(&writers),
-            "composers": stats_json(&composers),
-            "runtime": runtimes,
-        },
-        "reallyLiked": really_liked_json,
-        "liked": liked_json,
-        "disliked": hated_json,
-        "watchlist": films.iter().filter(|f| f.watchlist && !f.watched).take(24).map(|f| compact_film(f, false)).collect::<Vec<_>>(),
-        "candidates": candidates,
-        "seen": seen,
-    });
-
-    Ok(Corpus { snapshot, payload })
+    for _ in 0..6 {
+        let really_liked: Vec<Value> = liked_sorted
+            .iter()
+            .filter(|f| f.rating.unwrap_or(0.0) >= 4.5)
+            .take(budget.really_liked)
+            .map(|f| compact_film(f, budget.overview_chars))
+            .collect();
+        let liked: Vec<Value> = liked_sorted
+            .iter()
+            .filter(|f| f.rating.unwrap_or(0.0) < 4.5)
+            .take(budget.liked)
+            .map(|f| compact_film(f, 0))
+            .collect();
+        let disliked: Vec<Value> = hated_sorted
+            .iter()
+            .take(budget.hated)
+            .map(|f| compact_film(f, budget.overview_chars))
+            .collect();
+        let watchlist: Vec<Value> = films
+            .iter()
+            .filter(|f| f.watchlist && !f.watched)
+            .take(budget.watchlist)
+            .map(|f| compact_film(f, 0))
+            .collect();
+        let payload = json!({
+            "stats": {
+                "rated": snapshot.rated_count,
+                "loved45plus": snapshot.loved_count,
+                "hated": snapshot.hated_count,
+                "avg": snapshot.avg_rating,
+                "genres": stats_json(&snapshot.genres),
+                "decades": stats_json(&snapshot.decades),
+                "directors": stats_json(&snapshot.directors),
+                "actors": stats_json(&snapshot.actors),
+                "cinematographers": stats_json(&dps),
+                "writers": stats_json(&writers),
+                "composers": stats_json(&composers),
+                "runtime": runtimes,
+            },
+            "reallyLiked": really_liked,
+            "liked": liked,
+            "disliked": disliked,
+            "watchlist": watchlist,
+            "candidates": candidates.iter().take(budget.candidates).cloned().collect::<Vec<_>>(),
+        });
+        if payload.to_string().len() <= budget.max_chars {
+            return Ok(payload);
+        }
+        budget.overview_chars /= 2;
+        budget.really_liked = (budget.really_liked / 2).max(24);
+        budget.liked = (budget.liked / 2).max(12);
+        budget.hated = (budget.hated / 2).max(12);
+        budget.candidates = (budget.candidates / 2).max(16);
+        budget.watchlist = (budget.watchlist / 2).max(4);
+    }
+    Err("Taste log is still too large after shrinking. Try Kimi K3, or wait until posters finish matching.".into())
 }
 
 fn stats_json(stats: &[TasteStat]) -> Vec<Value> {
@@ -747,30 +823,48 @@ fn stats_json(stats: &[TasteStat]) -> Vec<Value> {
         .collect()
 }
 
-fn compact_film(film: &FilmRow, with_overview: bool) -> Value {
-    let mut v = json!({
-        "t": film.title,
-        "y": film.year,
-        "r": film.rating,
-        "g": film.genres,
-        "d": film.directors.iter().take(2).cloned().collect::<Vec<_>>(),
-        "c": actor_names(&film.cast).into_iter().take(4).collect::<Vec<_>>(),
-        "dp": film.cinematographers.iter().take(1).cloned().collect::<Vec<_>>(),
-        "w": film.writers.iter().take(2).cloned().collect::<Vec<_>>(),
-        "rt": film.runtime,
-    });
-    if film.liked {
-        v["heart"] = json!(true);
+fn compact_film(film: &FilmRow, overview_chars: usize) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("t".into(), json!(film.title));
+    if let Some(year) = film.year {
+        map.insert("y".into(), json!(year));
     }
-    if with_overview {
+    if let Some(rating) = film.rating {
+        map.insert("r".into(), json!(rating));
+    }
+    if !film.genres.is_empty() {
+        map.insert("g".into(), json!(film.genres));
+    }
+    let directors: Vec<String> = film.directors.iter().take(2).cloned().collect();
+    if !directors.is_empty() {
+        map.insert("d".into(), json!(directors));
+    }
+    let cast: Vec<String> = actor_names(&film.cast).into_iter().take(3).collect();
+    if !cast.is_empty() {
+        map.insert("c".into(), json!(cast));
+    }
+    if let Some(dp) = film.cinematographers.first() {
+        map.insert("dp".into(), json!(dp));
+    }
+    let writers: Vec<String> = film.writers.iter().take(2).cloned().collect();
+    if !writers.is_empty() {
+        map.insert("w".into(), json!(writers));
+    }
+    if let Some(runtime) = film.runtime {
+        map.insert("rt".into(), json!(runtime));
+    }
+    if film.liked {
+        map.insert("heart".into(), json!(true));
+    }
+    if overview_chars > 0 {
         if let Some(tag) = film.tagline.as_deref().filter(|s| !s.is_empty()) {
-            v["tag"] = json!(clip(tag, 90));
+            map.insert("tag".into(), json!(clip(tag, 72)));
         }
         if let Some(ov) = film.overview.as_deref().filter(|s| !s.is_empty()) {
-            v["ov"] = json!(clip(ov, 180));
+            map.insert("ov".into(), json!(clip(ov, overview_chars)));
         }
     }
-    v
+    Value::Object(map)
 }
 
 fn candidate_pool(
@@ -778,11 +872,13 @@ fn candidate_pool(
     liked: &[&FilmRow],
     seen: &HashSet<String>,
     db: &Database,
+    max: usize,
 ) -> Result<Vec<Value>, String> {
     let mut out: Vec<Value> = Vec::new();
     let mut used: HashSet<String> = HashSet::new();
-    for seed in liked.iter().take(18) {
-        for item in seed.similar.iter().take(6) {
+    let similar_cap = max.min(40);
+    for seed in liked.iter().take(12) {
+        for item in seed.similar.iter().take(4) {
             let key = seen_key(&item.title, item.year);
             if seen.contains(&key) || !used.insert(key) {
                 continue;
@@ -791,13 +887,12 @@ fn candidate_pool(
                 "t": item.title,
                 "y": item.year,
                 "src": format!("similar to {}", seed.title),
-                "id": item.id,
             }));
-            if out.len() >= 48 {
+            if out.len() >= similar_cap {
                 break;
             }
         }
-        if out.len() >= 48 {
+        if out.len() >= similar_cap {
             break;
         }
     }
@@ -806,7 +901,7 @@ fn candidate_pool(
         .conn()
         .prepare(
             r#"
-            SELECT f.username, fa.raw_payload, fa.rating, fa.review, fa.poster_url
+            SELECT f.username, fa.raw_payload, fa.rating
             FROM friend_activity fa
             JOIN friends f ON f.id = fa.friend_id
             WHERE fa.rating >= 4
@@ -821,34 +916,27 @@ fn candidate_pool(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     for row in rows.flatten() {
-        let (who, raw, rating, review, poster) = row;
+        let (who, raw, rating) = row;
         let (title, year) = parse_activity_payload(&raw);
         let key = seen_key(&title, year);
         if seen.contains(&key) || !used.insert(key) {
             continue;
         }
-        let mut item = json!({
+        out.push(json!({
             "t": title,
             "y": year,
-            "src": format!("@{who} rated {rating:?}"),
-            "poster": poster,
-        });
-        if let Some(review) = review.filter(|s| !s.trim().is_empty()) {
-            item["note"] = json!(clip(&review, 140));
-        }
-        out.push(item);
-        if out.len() >= 72 {
+            "src": format!("@{who} {}", rating.unwrap_or(0.0)),
+        }));
+        if out.len() >= max {
             break;
         }
     }
 
-    for film in films.iter().filter(|f| f.watchlist && !f.watched).take(16) {
+    for film in films.iter().filter(|f| f.watchlist && !f.watched).take(12) {
         let key = seen_key(&film.title, film.year);
         if seen.contains(&key) || !used.insert(key) {
             continue;
@@ -858,6 +946,9 @@ fn candidate_pool(
             "y": film.year,
             "src": "watchlist",
         }));
+        if out.len() >= max {
+            break;
+        }
     }
     Ok(out)
 }
@@ -1076,13 +1167,6 @@ fn runtime_stats(rated: &[&FilmRow]) -> Value {
         .collect::<Vec<_>>())
 }
 
-fn film_label(film: &FilmRow) -> String {
-    match film.year {
-        Some(y) => format!("{} ({y})", film.title),
-        None => film.title.clone(),
-    }
-}
-
 fn seen_key(title: &str, year: Option<i32>) -> String {
     format!("{}|{}", title.trim().to_lowercase(), year.unwrap_or(0))
 }
@@ -1162,7 +1246,7 @@ mod tests {
     fn corpus_splits_loved_and_hated_and_keeps_crew() {
         let db = Database::in_memory().unwrap();
         seed(&db);
-        let corpus = build_corpus(&db).unwrap();
+        let corpus = build_corpus(&db, MODEL_DEEPSEEK).unwrap();
         assert_eq!(corpus.snapshot.rated_count, 2);
         assert_eq!(corpus.snapshot.loved_count, 1);
         assert_eq!(corpus.snapshot.hated_count, 1);
@@ -1172,6 +1256,52 @@ mod tests {
         assert!(payload.contains("Michael Mann"));
         assert!(payload.contains("Dante Spinotti"));
         assert!(payload.contains("Crime"));
+        assert!(corpus.payload.get("seen").is_none());
+        assert!(estimate_tokens(&corpus.payload) < 28_000);
+    }
+
+    #[test]
+    fn deepseek_budget_caps_a_huge_log() {
+        let db = Database::in_memory().unwrap();
+        for i in 0..180 {
+            let id = format!("m{i}");
+            let sid = format!("s{i}");
+            let title = format!("Film Number {i} The Very Long Title Of A Movie");
+            let overview = "A ".repeat(80);
+            db.conn()
+                .execute(
+                    "INSERT INTO movies(id, canonical_title, release_year, genres_json, overview)
+                     VALUES (?1,?2,1999,'[\"Drama\"]',?3)",
+                    params![id, title, overview],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, release_year, raw_identity, created_at)
+                     VALUES (?1,'export',?2,?3,1999,'{}','2020-01-01')",
+                    params![sid, format!("film:{i}"), title.to_lowercase()],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state) VALUES (?1,?2,'confirmed')",
+                    params![sid, format!("m{i}")],
+                )
+                .unwrap();
+            let rating = if i < 90 { 5.0 } else { 1.0 };
+            db.conn()
+                .execute(
+                    "INSERT INTO user_movie_state(source_movie_record_id, movie_id, watched, watchlist, liked, current_rating, projection_updated_at)
+                     VALUES (?1,?2,1,0,0,?3,'2020-01-01')",
+                    params![sid, format!("m{i}"), rating],
+                )
+                .unwrap();
+        }
+        let corpus = build_corpus(&db, MODEL_DEEPSEEK).unwrap();
+        assert_eq!(corpus.snapshot.rated_count, 180);
+        assert!(corpus.payload.get("seen").is_none());
+        assert!(corpus.payload["reallyLiked"].as_array().unwrap().len() <= 70);
+        assert!(estimate_tokens(&corpus.payload) < 28_000);
     }
 
     #[test]
