@@ -3597,7 +3597,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studio"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "hex",
@@ -3614,6 +3614,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
  "tauri-plugin-updater",
+ "tauri-plugin-window-state",
  "ureq",
  "uuid",
  "zip 2.4.2",
@@ -4035,6 +4036,21 @@ dependencies = [
  "url",
  "windows-sys 0.60.2",
  "zip 4.6.1",
+]
+
+[[package]]
+name = "tauri-plugin-window-state"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73736611e14142408d15353e21e3cca2f12a3cfb523ad0ce85999b6d2ef1a704"
+dependencies = [
+ "bitflags 2.13.1",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

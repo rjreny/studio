@@ -1,6 +1,6 @@
 [package]
 name = "studio"
-version = "0.4.0"
+version = "0.4.1"
 description = "Studio"
 authors = ["you"]
 edition = "2021"
@@ -32,3 +32,4 @@ tauri-plugin-process = "2"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"

@@ -21,6 +21,7 @@
     "core:app:allow-version",
     "opener:default",
     "dialog:default",
-    "store:default"
+    "store:default",
+    "window-state:default"
   ]
 }

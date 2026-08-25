@@ -23,7 +23,6 @@ import {
 import type { AppSession, HomeViewModel, JobProgress, LibraryCoverage } from "./platform/types/film";
 import { log } from "./platform/log";
 import { getSetting, setSetting } from "./platform/settings";
-import { persistWindowBounds, restoreWindowBounds } from "./platform/window";
 import "./styles.css";
 import "./materials.css";
 
@@ -88,7 +87,6 @@ export default function App() {
         if (a) setAccent(a);
         if (lib) setLegacyLibrary({ ...emptyLibrary(), ...lib });
         setVersion(v);
-        await restoreWindowBounds();
 
         if (lib && !migrated && (lib.films?.length || lib.username)) {
           try {
@@ -139,14 +137,6 @@ export default function App() {
     void setSetting("username", username);
     void setSelfUsername(username).catch((err) => log("warn", "username persist failed", err));
   }, [route, theme, accent, username, hydrated]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void persistWindowBounds().then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
