@@ -598,7 +598,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
 
     let api_key = get_api_key()?.ok_or("missing api key")?;
     let path = format!(
-        "/movie/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar"
+        "/movie/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords"
     );
     let body = tmdb_get(&api_key, &path)?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
@@ -639,6 +639,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     let reviews = serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into());
     let collection_json =
         serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
+    let keywords_json = serde_json::to_string(&keyword_entries(&v)).unwrap_or_else(|_| "[]".into());
+    let credits_blob = serde_json::to_string(&credit_entries(&v)).unwrap_or_else(|_| "{}".into());
 
     if existing_id.is_some() {
         db.conn()
@@ -647,6 +649,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                  backdrop_path = ?6, overview = ?7, runtime = ?8, vote_average = ?9, vote_count = ?10,
                  genres_json = ?11, cast_json = ?12, crew_json = ?13, similar_json = ?14,
                  reviews_json = ?15, tagline = ?16, collection_name = ?17, collection_json = ?18,
+                 keywords_json = ?19, credits_json = ?20,
                  enriched_at = datetime('now')
                  WHERE id = ?1",
                 params![
@@ -668,6 +671,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                     tagline,
                     collection_name,
                     collection_json,
+                    keywords_json,
+                    credits_blob,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -678,8 +683,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
         .execute(
             "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, poster_path, backdrop_path,
              overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json,
-             reviews_json, tagline, collection_name, collection_json, enriched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, datetime('now'))",
+             reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, enriched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, datetime('now'))",
             params![
                 id,
                 title,
@@ -699,6 +704,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                 tagline,
                 collection_name,
                 collection_json,
+                keywords_json,
+                credits_blob,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -806,6 +813,122 @@ fn crew_names(v: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn keyword_entries(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v["keywords"]["keywords"]
+        .as_array()
+        .or_else(|| v["keywords"].as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|k| {
+                    let name = k["name"].as_str()?.to_string();
+                    Some(serde_json::json!({ "id": k["id"].as_i64(), "name": name }))
+                })
+                .take(24)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn credit_entries(v: &serde_json::Value) -> serde_json::Value {
+    let cast: Vec<serde_json::Value> = v["credits"]["cast"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .take(16)
+                .filter_map(|g| {
+                    Some(serde_json::json!({
+                        "id": g["id"].as_i64(),
+                        "name": g["name"].as_str()?,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let crew: Vec<serde_json::Value> = v["credits"]["crew"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|g| {
+                    let job = g["job"].as_str()?;
+                    if !CREW_JOBS.contains(&job) {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "id": g["id"].as_i64(),
+                        "name": g["name"].as_str()?,
+                        "job": job,
+                    }))
+                })
+                .take(48)
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({ "cast": cast, "crew": crew })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersonCredit {
+    pub tmdb_id: i64,
+    pub title: String,
+    pub year: Option<i32>,
+}
+
+pub fn person_movie_credits(db: &Database, person_id: i64) -> Result<Vec<PersonCredit>, String> {
+    if let Some(raw) = db
+        .conn()
+        .query_row(
+            "SELECT credits_json FROM person_credits WHERE person_id = ?1",
+            params![person_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    {
+        if let Ok(items) = serde_json::from_str::<Vec<PersonCredit>>(&raw) {
+            return Ok(items);
+        }
+    }
+    let api_key = get_api_key()?.ok_or("missing api key")?;
+    let body = tmdb_get(&api_key, &format!("/person/{person_id}/movie_credits"))?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for key in ["crew", "cast"] {
+        if let Some(arr) = v[key].as_array() {
+            for row in arr.iter().take(40) {
+                let Some(lib) = library_item_from_tmdb_value(row) else {
+                    continue;
+                };
+                let Some(id) = parse_tmdb_ref(&lib.id) else {
+                    continue;
+                };
+                if !seen.insert(id) {
+                    continue;
+                }
+                items.push(PersonCredit {
+                    tmdb_id: id,
+                    title: lib.title,
+                    year: lib.year,
+                });
+            }
+        }
+    }
+    items.truncate(40);
+    let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
+    let _ = db.conn().execute(
+        "INSERT OR REPLACE INTO person_credits(person_id, credits_json, fetched_at)
+         VALUES (?1, ?2, datetime('now'))",
+        params![person_id, json],
+    );
+    Ok(items)
+}
+
+fn parse_tmdb_ref(id: &str) -> Option<i64> {
+    id.strip_prefix("tmdb:")
+        .and_then(|s| s.parse().ok())
+        .or_else(|| id.parse().ok())
 }
 
 pub fn library_item_from_tmdb_value(v: &serde_json::Value) -> Option<LibraryItem> {

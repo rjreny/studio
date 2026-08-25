@@ -81,6 +81,22 @@ impl Database {
                 .conn
                 .execute("ALTER TABLE movies ADD COLUMN collection_json TEXT", []);
         }
+        if version < 4 {
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN keywords_json TEXT", []);
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN credits_json TEXT", []);
+            let _ = self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS person_credits (
+                  person_id INTEGER PRIMARY KEY,
+                  credits_json TEXT NOT NULL,
+                  fetched_at TEXT NOT NULL
+                )",
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -307,6 +323,7 @@ impl Database {
         self.conn()
             .execute_batch(
                 r#"
+                DELETE FROM person_credits;
                 DELETE FROM friend_activity;
                 DELETE FROM friends;
                 DELETE FROM import_entries;
@@ -333,7 +350,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("3".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("4".into()));
     }
 
     #[test]

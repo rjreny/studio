@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -39,7 +39,15 @@ CREATE TABLE IF NOT EXISTS movies (
   tagline TEXT,
   collection_name TEXT,
   collection_json TEXT,
+  keywords_json TEXT,
+  credits_json TEXT,
   enriched_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS person_credits (
+  person_id INTEGER PRIMARY KEY,
+  credits_json TEXT NOT NULL,
+  fetched_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS movie_links (

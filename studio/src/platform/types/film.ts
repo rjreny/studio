@@ -200,12 +200,16 @@ export type TastePick = {
   filmId: string | null;
   tmdbId: number | null;
   source: string;
+  reasons?: string[];
+  evidence?: string[];
+  mode?: string | null;
 };
 
 export type TasteStat = {
   label: string;
   count: number;
   avg: number;
+  affinity?: number | null;
 };
 
 export type TasteSnapshot = {

@@ -15,7 +15,14 @@ const DIM_LABEL: Record<string, string> = {
   motif: "Motif",
 };
 
-const RUN_STEPS = ["Reading your log", "Asking the model", "Matching posters"];
+const RUN_STEPS = [
+  "Reading your log",
+  "Scoring candidates",
+  "Critiquing the shortlist",
+  "Targeted discovery",
+  "Final 12",
+  "Matching posters",
+];
 
 function formatWhen(iso: string | undefined) {
   if (!iso) return "";
@@ -171,7 +178,7 @@ export function RecsView({
               ? report.summary
               : snapshot
                 ? `${snapshot.ratedCount} ratings · ${snapshot.lovedCount} loved · ${snapshot.hatedCount} disliked`
-                : "The agent reads your whole log, then explains the pattern."}
+                : "The agent scores a candidate universe from your full log, then reasons over a shortlist."}
           </p>
         </div>
         {keyReady && enoughRatings ? (
@@ -253,7 +260,8 @@ export function RecsView({
         <div className="taste-stats">
           {snapshot.genres.slice(0, 6).map((g) => (
             <span key={`g-${g.label}`} className="taste-chip">
-              {g.label} · {g.avg.toFixed(1)}
+              {g.label}
+              {g.affinity != null ? ` · ${g.affinity >= 0 ? "+" : ""}${g.affinity.toFixed(2)}` : ` · ${g.avg.toFixed(1)}`}
             </span>
           ))}
           {snapshot.decades.slice(0, 3).map((d) => (
@@ -326,7 +334,13 @@ export function RecsView({
                     <strong>{pick.title}</strong>
                     <span className="muted">{pick.year ?? ""}</span>
                     {pick.why ? <p>{pick.why}</p> : null}
-                    {pick.rhymesWith.length ? (
+                    {pick.mode ? <p className="muted">{pick.mode}</p> : null}
+                    {pick.reasons?.length ? (
+                      <p className="taste-rhyme">{pick.reasons.join(" · ")}</p>
+                    ) : null}
+                    {pick.evidence?.length ? (
+                      <p className="taste-rhyme">Close to {pick.evidence.join(", ")}</p>
+                    ) : pick.rhymesWith?.length ? (
                       <p className="taste-rhyme">Close to {pick.rhymesWith.join(", ")}</p>
                     ) : null}
                   </div>
@@ -350,9 +364,9 @@ export function RecsView({
 
       {keyReady && enoughRatings && !report && !running ? (
         <p className="muted pad">
-          The agent will take your 4.5+ loves, your 2.5-and-under dislikes, genres, decades, directors,
-          actors, cinematographers, writers, runtime, overviews, watchlist, and friend loves, then rank
-          films you have not logged. Web search, when on, checks a few critic lists.
+          The scorer reads every rating, heart, and rewatch, then ranks a shortlist. The model critiques
+          that list, may run a few targeted searches, and picks 12 films. Web search only feeds discovery
+          titles back through TMDB identity and the same scorer.
         </p>
       ) : null}
     </div>
