@@ -221,9 +221,8 @@ export default function App() {
               <button type="button" className="nav-back glass" onClick={() => setSelectedFilmId(null)}>
                 Back
               </button>
-            ) : (
-              <span className="nav-spacer" data-tauri-drag-region />
-            )}
+            ) : null}
+            <NavTabs items={NAV} active={route} onGo={go} />
             <input
               className="nav-search glass"
               value={libraryQuery}
@@ -231,7 +230,6 @@ export default function App() {
               placeholder="Search your log"
               spellCheck={false}
             />
-            <NavTabs items={NAV} active={route} onGo={go} />
           </div>
         </header>
         <main className="main-shell">
