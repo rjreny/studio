@@ -139,6 +139,7 @@ pub fn diversity_warnings(picks: &[ScoredCandidate]) -> Vec<DiversityWarning> {
     let mut dirs: HashMap<String, u32> = HashMap::new();
     let mut genres: HashMap<String, u32> = HashMap::new();
     let mut modes: HashMap<String, u32> = HashMap::new();
+    let mut people: HashMap<String, u32> = HashMap::new();
     for p in picks {
         for d in &p.candidate.directors {
             *dirs.entry(d.clone()).or_insert(0) += 1;
@@ -148,6 +149,9 @@ pub fn diversity_warnings(picks: &[ScoredCandidate]) -> Vec<DiversityWarning> {
         }
         if let Some(m) = p.candidate.modes.first() {
             *modes.entry(m.clone()).or_insert(0) += 1;
+        }
+        for f in &p.person_keys {
+            *people.entry(f.clone()).or_insert(0) += 1;
         }
     }
     let mut out = Vec::new();
@@ -169,6 +173,13 @@ pub fn diversity_warnings(picks: &[ScoredCandidate]) -> Vec<DiversityWarning> {
         if n > 5 {
             out.push(DiversityWarning {
                 message: format!("{n} films share taste mode {m}"),
+            });
+        }
+    }
+    for (person, n) in people {
+        if n > 3 {
+            out.push(DiversityWarning {
+                message: format!("{n} films share person {person}"),
             });
         }
     }
@@ -252,6 +263,7 @@ mod tests {
             positive_features: vec![],
             negative_features: vec![],
             contextual_only: false,
+            person_keys: vec![],
         }
     }
 
@@ -304,5 +316,22 @@ mod tests {
         assert!(result.dropped.iter().any(|d| d.contains("contextual-only")));
         assert!(result.picks.iter().all(|p| p.candidate.tmdb_id != Some(3)));
         assert!(result.picks.iter().any(|p| p.candidate.tmdb_id == Some(1)));
+    }
+
+    #[test]
+    fn warns_when_one_person_dominates_the_final_12() {
+        let mut picks = Vec::new();
+        for i in 1..13 {
+            let mut c = scored(i, &format!("Film {i}"), "Other");
+            c.positive_features = vec!["John Powell".into()];
+            c.person_keys = vec!["John Powell".into()];
+            picks.push(c);
+        }
+        let warnings = diversity_warnings(&picks);
+        assert!(
+            warnings.iter().any(|w| w.message.contains("person John Powell")),
+            "{:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
     }
 }

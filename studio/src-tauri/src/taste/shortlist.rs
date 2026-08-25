@@ -44,7 +44,28 @@ fn similarity(a: &ScoredCandidate, b: &ScoredCandidate) -> f32 {
             s += 0.35;
         }
     }
+    let shared_person = a
+        .person_keys
+        .iter()
+        .filter(|f| b.person_keys.contains(f))
+        .count();
+    if shared_person > 0 {
+        s += 0.55;
+    }
     s.min(1.0)
+}
+
+fn repeat_person_count(cand: &ScoredCandidate, selected: &[ScoredCandidate]) -> usize {
+    cand.person_keys
+        .iter()
+        .map(|f| {
+            selected
+                .iter()
+                .filter(|s| s.person_keys.iter().any(|p| p == f))
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Light MMR: keep cluster-mates. This is not the final 12.
@@ -66,7 +87,8 @@ pub fn shortlist(ranked: &[ScoredCandidate]) -> Vec<ScoredCandidate> {
                 .iter()
                 .map(|s| similarity(pool[pi], s))
                 .fold(0.0_f32, f32::max);
-            let mmr = MMR_LAMBDA * rel - (1.0 - MMR_LAMBDA) * sim;
+            let repeats = repeat_person_count(pool[pi], &selected) as f32;
+            let mmr = MMR_LAMBDA * rel - (1.0 - MMR_LAMBDA) * sim - 0.14 * repeats;
             if mmr > best_score {
                 best_score = mmr;
                 best_i = idx;
@@ -116,6 +138,7 @@ mod tests {
             positive_features: vec![director.into()],
             negative_features: vec![],
             contextual_only: false,
+            person_keys: vec![],
         }
     }
 
@@ -129,5 +152,23 @@ mod tests {
         assert!(s.len() <= 50);
         let mann = s.iter().filter(|c| c.candidate.directors.iter().any(|d| d == "Mann")).count();
         assert!(mann >= 2, "light MMR must not wipe a dense cluster");
+        let ranked_powell: Vec<_> = (0..20)
+            .map(|i| {
+                let mut c = cand(&format!("Powell {i}"), &format!("Dir{i}"), 0.85);
+                c.positive_features = vec!["John Powell".into()];
+                c.person_keys = vec!["John Powell".into()];
+                c
+            })
+            .chain((20..80).map(|i| cand(&format!("Alt {i}"), &format!("AltDir{i}"), 0.82)))
+            .collect();
+        let mixed = shortlist(&ranked_powell);
+        let powell = mixed
+            .iter()
+            .filter(|c| c.positive_features.iter().any(|f| f == "John Powell"))
+            .count();
+        assert!(
+            powell < 8,
+            "shared person FeatureKey must keep filmography from filling the shortlist, got {powell}"
+        );
     }
 }

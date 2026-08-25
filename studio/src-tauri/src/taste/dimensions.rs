@@ -154,6 +154,14 @@ pub fn derive(films: &[ModeFilm<'_>]) -> (Vec<TasteDimensionView>, Vec<TasteMode
                     title: f.title.to_string(),
                     rating: f.rating?,
                     tmdb_id: f.tmdb_id,
+                    people: f.credits.iter().map(|c| c.name.clone()).collect(),
+                    keywords: f
+                        .keywords
+                        .iter()
+                        .filter(|k| crate::taste::features::keyword_is_taste_signal(&k.name))
+                        .map(|k| k.name.clone())
+                        .collect(),
+                    genres: f.genres.to_vec(),
                 })
             })
             .take(6)

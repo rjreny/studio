@@ -1,6 +1,6 @@
 [package]
 name = "studio"
-version = "0.8.1"
+version = "0.8.2"
 description = "Studio"
 authors = ["you"]
 edition = "2021"

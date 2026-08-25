@@ -417,6 +417,7 @@ mod tests {
             positive_features: vec!["Michael Mann".into()],
             negative_features: vec!["Blackhat".into()],
             contextual_only: false,
+            person_keys: vec![],
         }
     }
 

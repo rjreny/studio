@@ -138,6 +138,110 @@ pub struct EvidenceFilm {
     pub title: String,
     pub rating: f32,
     pub tmdb_id: Option<i64>,
+    #[serde(default)]
+    pub people: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+}
+
+pub(crate) fn evidence_film_id(e: &EvidenceFilm) -> String {
+    match e.tmdb_id {
+        Some(id) => format!("tmdb:{id}"),
+        None => e.title.trim().to_lowercase(),
+    }
+}
+
+/// How a TMDB keyword may be used. Signal keywords are specific enough that
+/// matching them should retrieve another film. Contextual keywords are kept
+/// on the profile (location, cartoon, format) but are not hunt targets.
+/// Ignore keywords are catalog junk and are not observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordRole {
+    Signal,
+    Contextual,
+    Ignore,
+}
+
+pub fn keyword_role(name: &str) -> KeywordRole {
+    let lower = name.trim().to_ascii_lowercase();
+    let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if compact.contains("stinger")
+        || compact.contains("duringcredits")
+        || compact.contains("aftercredits")
+        || compact.starts_with("basedon")
+    {
+        return KeywordRole::Ignore;
+    }
+    if is_geographic_keyword(&lower) || is_generic_keyword(&compact) {
+        return KeywordRole::Contextual;
+    }
+    KeywordRole::Signal
+}
+
+fn is_geographic_keyword(lower: &str) -> bool {
+    if lower.contains(',') {
+        return true;
+    }
+    lower.ends_with(" city") || lower.ends_with(" town") || lower.ends_with(" county")
+}
+
+fn is_generic_keyword(compact: &str) -> bool {
+    matches!(
+        compact,
+        "cartoon"
+            | "antihero"
+            | "liveaction"
+            | "liveactionandanimation"
+            | "cgi"
+            | "3d"
+            | "imax"
+            | "stopmotion"
+    )
+}
+
+/// Observed keywords. Contextual locations/generics are still observed.
+pub fn keyword_is_taste_signal(name: &str) -> bool {
+    keyword_role(name) != KeywordRole::Ignore
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceCluster {
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub modes: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+impl EvidenceCluster {
+    pub fn is_empty(&self) -> bool {
+        self.genres.is_empty() && self.modes.is_empty() && self.keywords.is_empty()
+    }
+
+    pub fn overlaps(
+        &self,
+        genres: &[String],
+        keywords: &[Keyword],
+        modes: &[String],
+    ) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let genre_hit = self.genres.iter().any(|g| {
+            genres.iter().any(|c| c.eq_ignore_ascii_case(g))
+        });
+        let mode_hit = self.modes.iter().any(|m| {
+            modes.iter().any(|c| c.eq_ignore_ascii_case(m))
+        });
+        let keyword_hit = self.keywords.iter().any(|k| {
+            keywords.iter().any(|c| c.name.eq_ignore_ascii_case(k))
+        });
+        genre_hit || mode_hit || keyword_hit
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +262,8 @@ pub struct FeatureAffinity {
     pub portability: f32,
     pub positive_evidence: Vec<EvidenceFilm>,
     pub negative_evidence: Vec<EvidenceFilm>,
+    #[serde(default)]
+    pub evidence_cluster: EvidenceCluster,
 }
 
 impl FeatureAffinity {
@@ -178,6 +284,12 @@ impl FeatureAffinity {
     pub fn citeable(&self) -> bool {
         if self.key.family.is_contextual() {
             return false;
+        }
+        if self.key.family == FeatureFamily::Keyword {
+            match keyword_role(&self.key.name) {
+                KeywordRole::Ignore | KeywordRole::Contextual => return false,
+                KeywordRole::Signal => {}
+            }
         }
         if self.key.is_person_or_keyword() {
             return self.appearances >= 2;
@@ -225,14 +337,14 @@ pub struct FeatureProfile {
     pub mode_shifts: Vec<crate::taste::dimensions::ModeShift>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credit {
     pub id: Option<i64>,
     pub name: String,
     pub job: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keyword {
     pub id: Option<i64>,
     pub name: String,
@@ -289,7 +401,7 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         };
         let recommendation_mean = weighted_mean(&pairs_rec).unwrap_or(preference_mean);
         let var = weighted_variance(&pairs_pref, preference_mean);
-        let appearances = group.len() as u32;
+        let appearances = distinct_film_count(group);
         let confidence = 1.0 - (-(appearances as f32) / key.family.k()).exp();
         let portability = feature_portability(&key, group);
         let mut positive_weight = 0.0;
@@ -298,6 +410,8 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         let mut long_pairs = Vec::new();
         let mut positive_evidence = Vec::new();
         let mut negative_evidence = Vec::new();
+        let mut seen_pos = std::collections::HashSet::new();
+        let mut seen_neg = std::collections::HashSet::new();
         for o in group {
             positive_weight += o.positive * o.preference_weight;
             negative_weight += o.negative * o.preference_weight;
@@ -307,13 +421,15 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
             } else {
                 long_pairs.push((o.affinity_preference, o.recommendation_weight));
             }
-            if o.positive > 0.0 && positive_evidence.len() < 6 {
+            let id = evidence_film_id(&o.evidence);
+            if o.positive > 0.0 && seen_pos.insert(id.clone()) && positive_evidence.len() < 6 {
                 positive_evidence.push(o.evidence.clone());
             }
-            if o.negative > 0.0 && negative_evidence.len() < 6 {
+            if o.negative > 0.0 && seen_neg.insert(id) && negative_evidence.len() < 6 {
                 negative_evidence.push(o.evidence.clone());
             }
         }
+        let evidence_cluster = cluster_from_group(&key, group);
         affinities.push(FeatureAffinity {
             key,
             appearances,
@@ -330,6 +446,7 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
             portability,
             positive_evidence,
             negative_evidence,
+            evidence_cluster,
         });
     }
     affinities.sort_by(|a, b| {
@@ -410,7 +527,18 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
     }
 }
 
+fn distinct_film_count(group: &[&FeatureObservation]) -> u32 {
+    group
+        .iter()
+        .map(|o| evidence_film_id(&o.evidence))
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32
+}
+
 fn feature_portability(key: &FeatureKey, group: &[&FeatureObservation]) -> f32 {
+    if key.family == FeatureFamily::Keyword && keyword_role(&key.name) == KeywordRole::Contextual {
+        return 0.0;
+    }
     if !key.family.is_contextual() {
         return 1.0;
     }
@@ -435,6 +563,77 @@ fn feature_portability(key: &FeatureKey, group: &[&FeatureObservation]) -> f32 {
     genre_port * mean_disc
 }
 
+/// Portable facets shared by a majority of a person's liked films.
+/// For two films, majority means both — so a composer on Panda + Minions
+/// yields comedy/animation, not "any John Powell movie."
+fn cluster_from_group(key: &FeatureKey, group: &[&FeatureObservation]) -> EvidenceCluster {
+    use std::collections::{HashMap, HashSet};
+    if !key.is_person_or_keyword() {
+        return EvidenceCluster::default();
+    }
+    let mut films: HashMap<String, Vec<String>> = HashMap::new();
+    for o in group.iter().filter(|o| o.positive > 0.0) {
+        let id = evidence_film_id(&o.evidence);
+        films.entry(id).or_insert_with(|| o.genres.clone());
+    }
+    let n = films.len();
+    if n < 2 {
+        return EvidenceCluster::default();
+    }
+    let mut genre_counts: HashMap<String, usize> = HashMap::new();
+    let mut mode_counts: HashMap<String, usize> = HashMap::new();
+    for genres in films.values() {
+        let mut seen_g = HashSet::new();
+        for g in genres {
+            let g = g.to_lowercase();
+            if seen_g.insert(g.clone()) {
+                *genre_counts.entry(g).or_insert(0) += 1;
+            }
+        }
+        let mut seen_m = HashSet::new();
+        for m in modes_from_genres(genres) {
+            if seen_m.insert(m.clone()) {
+                *mode_counts.entry(m).or_insert(0) += 1;
+            }
+        }
+    }
+    let majority = |count: usize| count * 2 > n;
+    EvidenceCluster {
+        genres: genre_counts
+            .into_iter()
+            .filter(|(_, c)| majority(*c))
+            .map(|(g, _)| g)
+            .collect(),
+        modes: mode_counts
+            .into_iter()
+            .filter(|(_, c)| majority(*c))
+            .map(|(m, _)| m)
+            .collect(),
+        keywords: Vec::new(),
+    }
+}
+
+fn modes_from_genres(genres: &[String]) -> Vec<String> {
+    let has = |name: &str| genres.iter().any(|g| g.eq_ignore_ascii_case(name));
+    let mut modes = Vec::new();
+    if has("Drama") {
+        modes.push("story".into());
+    }
+    if has("Thriller") || has("Horror") {
+        modes.push("intensity".into());
+    }
+    if has("Comedy") {
+        modes.push("comedy".into());
+    }
+    if has("Action") || has("Science Fiction") || has("Sci-Fi") || has("Fantasy") {
+        modes.push("spectacle".into());
+    }
+    if has("Mystery") {
+        modes.push("atmosphere".into());
+    }
+    modes
+}
+
 pub fn observations_from_film(
     title: &str,
     rating: f32,
@@ -451,6 +650,13 @@ pub fn observations_from_film(
         title: title.to_string(),
         rating,
         tmdb_id,
+        people: credits.iter().map(|c| c.name.clone()).collect(),
+        keywords: keywords
+            .iter()
+            .filter(|k| keyword_is_taste_signal(&k.name))
+            .map(|k| k.name.clone())
+            .collect(),
+        genres: genres.to_vec(),
     };
     let abs = signal.preference.absolute;
     let positive = abs.max(0.0) * crate::taste::preference::relative_strength(signal.preference.relative);
@@ -480,6 +686,9 @@ pub fn observations_from_film(
         push(&mut out, FeatureKey::new(family, c.id, &c.name));
     }
     for k in keywords {
+        if !keyword_is_taste_signal(&k.name) {
+            continue;
+        }
         push(&mut out, FeatureKey::new(FeatureFamily::Keyword, k.id, &k.name));
     }
     if let Some(y) = year {
@@ -502,6 +711,78 @@ mod tests {
     fn sig(rating: f32) -> InteractionSignal {
         let p = rating_profile(&[5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 4.0, 4.5]).unwrap();
         interaction_signal(rating, &p, Some(1.0), 1, false)
+    }
+
+    fn two_film_keyword(name: &str) -> FeatureAffinity {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let kw = Keyword {
+            id: Some(42),
+            name: name.into(),
+        };
+        let mut obs = Vec::new();
+        for i in 0..2i64 {
+            let s = interaction_signal(4.5, &p, Some(0.4), 1, false);
+            obs.extend(observations_from_film(
+                &format!("liked{i}"),
+                4.5,
+                Some(i + 1),
+                &s,
+                Some(0.4),
+                &["Drama".into()],
+                &[],
+                &[kw.clone()],
+                Some(2018),
+                None,
+            ));
+        }
+        build_profile(&obs)
+            .affinities
+            .into_iter()
+            .find(|a| a.key.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("missing keyword {name}"))
+    }
+
+    #[test]
+    fn location_keyword_is_contextual_not_citeable() {
+        for name in ["new york city", "los angeles, california"] {
+            let a = two_film_keyword(name);
+            assert_eq!(a.appearances, 2, "{name} should still be observed");
+            assert!(!a.citeable(), "{name} must not be a hunt target");
+            assert!(
+                a.portability < PORTABILITY_SKIP,
+                "{name} should be non-portable, got {}",
+                a.portability
+            );
+        }
+    }
+
+    #[test]
+    fn cartoon_and_anti_hero_are_not_citeable_engines() {
+        for name in ["cartoon", "anti hero"] {
+            let a = two_film_keyword(name);
+            assert_eq!(a.appearances, 2, "{name} should still be observed");
+            assert!(!a.citeable(), "{name}");
+        }
+    }
+
+    #[test]
+    fn visual_quality_keywords_remain_citeable() {
+        for name in ["neo-noir", "long take"] {
+            let a = two_film_keyword(name);
+            assert!(a.citeable(), "{name}");
+            assert!(
+                (a.portability - 1.0).abs() < 1e-5,
+                "{name} portability {}",
+                a.portability
+            );
+        }
+    }
+
+    #[test]
+    fn specific_repeated_keyword_remains_citeable() {
+        let a = two_film_keyword("heist");
+        assert!(a.citeable());
+        assert_eq!(a.appearances, 2);
     }
 
     #[test]
@@ -791,6 +1072,51 @@ mod tests {
         assert!(drama.positive_evidence.iter().any(|e| e.title.contains("Twilight")));
     }
 
+    /// Real 627-film run: Hillenburg n=4, every evidence title is SpongeBob.
+    /// Rewatches / duplicate credit rows must not turn one film into a hunt target.
+    #[test]
+    fn four_viewings_of_one_film_do_not_make_a_person_citeable() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let mut obs = Vec::new();
+        for _ in 0..4 {
+            obs.extend(observations_from_film(
+                "The SpongeBob SquarePants Movie",
+                5.0,
+                Some(1),
+                &interaction_signal(5.0, &p, Some(1.0), 1, false),
+                Some(1.0),
+                &["Comedy".into(), "Family".into()],
+                &[Credit {
+                    id: Some(10),
+                    name: "Stephen Hillenburg".into(),
+                    job: "Director".into(),
+                }],
+                &[],
+                Some(2004),
+                Some(87),
+            ));
+        }
+        let profile = build_profile(&obs);
+        let hill = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Stephen Hillenburg")
+            .unwrap();
+        assert_eq!(
+            hill.positive_evidence
+                .iter()
+                .map(|e| e.tmdb_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+        assert!(
+            !hill.citeable(),
+            "one film rated four times is still a singleton, appearances={}",
+            hill.appearances
+        );
+    }
+
     #[test]
     fn same_tmdb_id_does_not_merge_different_names() {
         let p = rating_profile(&[4.0; 8]).unwrap();
@@ -871,5 +1197,122 @@ mod tests {
             !decade.citeable(),
             "contextual features must never become hunt targets"
         );
+    }
+
+    #[test]
+    fn powell_evidence_cluster_is_shared_comedy_not_any_powell_film() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let composer = Credit {
+            id: Some(50),
+            name: "John Powell".into(),
+            job: "Original Music Composer".into(),
+        };
+        let mut obs = observations_from_film(
+            "Kung Fu Panda",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Comedy".into(), "Animation".into(), "Family".into()],
+            &[composer.clone()],
+            &[],
+            Some(2008),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Minions & Monsters",
+            5.0,
+            Some(2),
+            &interaction_signal(5.0, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Comedy".into(), "Animation".into(), "Family".into()],
+            &[composer],
+            &[],
+            Some(2010),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let powell = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "John Powell")
+            .unwrap();
+        assert!(powell.citeable());
+        assert!(powell.appearances >= 2);
+        assert!(
+            powell.recommendation_mean > 0.5,
+            "two strong likes should produce a high mean, got {}",
+            powell.recommendation_mean
+        );
+        assert!(
+            powell.evidence_cluster.genres.iter().any(|g| g == "comedy"),
+            "cluster {:?}",
+            powell.evidence_cluster
+        );
+        assert!(powell.evidence_cluster.modes.iter().any(|m| m == "comedy"));
+        assert!(powell.evidence_cluster.overlaps(
+            &["Comedy".into(), "Animation".into()],
+            &[],
+            &["comedy".into()]
+        ));
+        assert!(
+            !powell.evidence_cluster.overlaps(
+                &["Drama".into(), "Thriller".into()],
+                &[],
+                &["intensity".into(), "story".into()]
+            ),
+            "United 93 / Bourne must not inherit Panda+Minions"
+        );
+    }
+
+    #[test]
+    fn cinematographer_across_unrelated_genres_has_empty_cluster() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let dp = Credit {
+            id: Some(77),
+            name: "Greig Fraser".into(),
+            job: "Director of Photography".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            4.5,
+            Some(1),
+            &interaction_signal(4.5, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[dp.clone()],
+            &[],
+            Some(2022),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Project Hail Mary",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.2), 1, false),
+            Some(0.2),
+            &["Science Fiction".into()],
+            &[dp],
+            &[],
+            Some(2026),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let fraser = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Greig Fraser")
+            .unwrap();
+        assert!(fraser.citeable());
+        assert!(
+            fraser.evidence_cluster.is_empty(),
+            "person is the transferable facet when evidence genres do not overlap: {:?}",
+            fraser.evidence_cluster
+        );
+        assert!(fraser.evidence_cluster.overlaps(
+            &["Comedy".into()],
+            &[],
+            &["comedy".into()]
+        ));
     }
 }
