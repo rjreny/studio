@@ -13,11 +13,24 @@ const KEYRING_SERVICE: &str = "studio";
 const KEYRING_USER: &str = "openrouter_api_key";
 const META_REPORT: &str = "taste_report";
 const META_MODEL: &str = "taste_model";
+const META_WEB: &str = "taste_web";
 const OPENROUTER_CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY: &str = "https://openrouter.ai/api/v1/key";
 
+const MODEL_QWEN: &str = "qwen";
+const MODEL_GEMINI: &str = "gemini";
 const MODEL_DEEPSEEK: &str = "deepseek";
 const MODEL_KIMI: &str = "kimi-k3";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasteModelInfo {
+    pub id: String,
+    pub label: String,
+    pub blurb: String,
+    pub context: String,
+    pub cost: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +39,10 @@ pub struct TasteKeyStatus {
     pub valid: Option<bool>,
     pub last_error: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub web: bool,
+    #[serde(default)]
+    pub models: Vec<TasteModelInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +105,10 @@ pub struct TasteReport {
     pub model: String,
     pub generated_at: String,
     pub rated_count: u32,
+    #[serde(default)]
+    pub web_used: bool,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,17 +161,17 @@ fn budget_for(model: &str) -> Budget {
             candidates: 64,
             watchlist: 20,
             overview_chars: 140,
-            max_chars: 320_000,
+            max_chars: 240_000,
         }
     } else {
         Budget {
-            really_liked: 70,
-            liked: 36,
-            hated: 36,
-            candidates: 36,
-            watchlist: 10,
-            overview_chars: 80,
-            max_chars: 68_000,
+            really_liked: 180,
+            liked: 70,
+            hated: 70,
+            candidates: 56,
+            watchlist: 18,
+            overview_chars: 120,
+            max_chars: 200_000,
         }
     }
 }
@@ -166,7 +187,7 @@ struct Corpus {
 }
 
 pub fn default_model() -> String {
-    MODEL_DEEPSEEK.to_string()
+    MODEL_QWEN.to_string()
 }
 
 pub fn normalize_model(raw: &str) -> String {
@@ -176,23 +197,94 @@ pub fn normalize_model(raw: &str) -> String {
         .replace([' ', '_'], "-");
     if compact.contains("kimi") || compact == "k3" {
         MODEL_KIMI.into()
-    } else {
+    } else if compact.contains("gemini") {
+        MODEL_GEMINI.into()
+    } else if compact.contains("deepseek") {
         MODEL_DEEPSEEK.into()
+    } else if compact.contains("qwen") || compact.is_empty() {
+        MODEL_QWEN.into()
+    } else if compact == MODEL_GEMINI || compact == MODEL_DEEPSEEK || compact == MODEL_KIMI {
+        compact
+    } else {
+        MODEL_QWEN.into()
     }
 }
 
 fn openrouter_model_id(model: &str) -> &'static str {
     match model {
         MODEL_KIMI => "moonshotai/kimi-k3",
-        _ => "deepseek/deepseek-chat",
+        MODEL_GEMINI => "google/gemini-3.7-flash",
+        MODEL_DEEPSEEK => "deepseek/deepseek-v4-flash",
+        _ => "qwen/qwen3.7-flash",
     }
 }
 
 fn model_label(model: &str) -> &'static str {
     match model {
         MODEL_KIMI => "Kimi K3",
-        _ => "DeepSeek",
+        MODEL_GEMINI => "Gemini Flash",
+        MODEL_DEEPSEEK => "DeepSeek V4 Flash",
+        _ => "Qwen Flash",
     }
+}
+
+pub fn model_catalog() -> Vec<TasteModelInfo> {
+    vec![
+        TasteModelInfo {
+            id: MODEL_QWEN.into(),
+            label: "Qwen Flash".into(),
+            blurb: "Cheapest 1M-context reader. Best stretch of $10.".into(),
+            context: "1M".into(),
+            cost: "cheapest".into(),
+        },
+        TasteModelInfo {
+            id: MODEL_GEMINI.into(),
+            label: "Gemini Flash".into(),
+            blurb: "Stronger reasoning, still cheap, same huge window.".into(),
+            context: "1M".into(),
+            cost: "cheap".into(),
+        },
+        TasteModelInfo {
+            id: MODEL_DEEPSEEK.into(),
+            label: "DeepSeek V4 Flash".into(),
+            blurb: "Fast 1M reader if you already like DeepSeek.".into(),
+            context: "1M".into(),
+            cost: "cheap".into(),
+        },
+        TasteModelInfo {
+            id: MODEL_KIMI.into(),
+            label: "Kimi K3".into(),
+            blurb: "Sharpest take. Slow and expensive. Several minutes is normal.".into(),
+            context: "1M".into(),
+            cost: "expensive".into(),
+        },
+    ]
+}
+
+fn request_timeout(model: &str) -> Duration {
+    match model {
+        MODEL_KIMI => Duration::from_secs(360),
+        MODEL_GEMINI => Duration::from_secs(180),
+        _ => Duration::from_secs(120),
+    }
+}
+
+fn empty_status() -> TasteKeyStatus {
+    TasteKeyStatus {
+        stored: false,
+        valid: None,
+        last_error: None,
+        model: default_model(),
+        web: true,
+        models: Vec::new(),
+    }
+}
+
+fn with_prefs(db: &Database, mut status: TasteKeyStatus) -> Result<TasteKeyStatus, String> {
+    status.model = stored_model(db)?;
+    status.web = stored_web(db)?;
+    status.models = model_catalog();
+    Ok(status)
 }
 
 pub fn stored_model(db: &Database) -> Result<String, String> {
@@ -206,6 +298,18 @@ pub fn set_model(db: &Database, model: &str) -> Result<String, String> {
     let id = normalize_model(model);
     db.set_meta(META_MODEL, &id)?;
     Ok(id)
+}
+
+pub fn stored_web(db: &Database) -> Result<bool, String> {
+    Ok(match db.get_meta(META_WEB)?.as_deref() {
+        Some("0") | Some("false") => false,
+        _ => true,
+    })
+}
+
+pub fn set_web(db: &Database, enabled: bool) -> Result<bool, String> {
+    db.set_meta(META_WEB, if enabled { "1" } else { "0" })?;
+    Ok(enabled)
 }
 
 pub fn get_api_key() -> Result<Option<String>, String> {
@@ -246,7 +350,7 @@ pub fn clear_api_key() -> Result<(), String> {
 fn probe_key(key: &str) -> Result<TasteKeyStatus, String> {
     let req = ureq::get(OPENROUTER_KEY)
         .set("Authorization", &format!("Bearer {key}"))
-        .set("User-Agent", "Studio/0.5 (local film app)")
+        .set("User-Agent", "Studio/0.6 (local film app)")
         .timeout(Duration::from_secs(12));
     match req.call() {
         Ok(_) => Ok(TasteKeyStatus {
@@ -254,6 +358,8 @@ fn probe_key(key: &str) -> Result<TasteKeyStatus, String> {
             valid: Some(true),
             last_error: None,
             model: default_model(),
+            web: true,
+            models: Vec::new(),
         }),
         Err(err) => {
             let text = err.to_string();
@@ -268,35 +374,35 @@ fn probe_key(key: &str) -> Result<TasteKeyStatus, String> {
                     format!("Could not reach OpenRouter: {text}")
                 }),
                 model: default_model(),
+                web: true,
+                models: Vec::new(),
             })
         }
     }
 }
 
 pub fn stored_status(db: &Database) -> Result<TasteKeyStatus, String> {
-    Ok(TasteKeyStatus {
-        stored: get_api_key()?.is_some(),
-        valid: None,
-        last_error: None,
-        model: stored_model(db)?,
-    })
+    with_prefs(
+        db,
+        TasteKeyStatus {
+            stored: get_api_key()?.is_some(),
+            valid: None,
+            last_error: None,
+            model: default_model(),
+            web: true,
+            models: Vec::new(),
+        },
+    )
 }
 
 pub fn key_status(db: &Database) -> Result<TasteKeyStatus, String> {
-    let model = stored_model(db)?;
     match get_api_key()? {
         Some(key) => {
             let mut status = probe_key(&key)?;
             status.stored = true;
-            status.model = model;
-            Ok(status)
+            with_prefs(db, status)
         }
-        None => Ok(TasteKeyStatus {
-            stored: false,
-            valid: None,
-            last_error: None,
-            model,
-        }),
+        None => with_prefs(db, empty_status()),
     }
 }
 
@@ -306,7 +412,7 @@ pub fn store_api_key(db: &Database, key: &str) -> Result<TasteKeyStatus, String>
         return Err("Paste an OpenRouter API key first".into());
     }
     let mut status = probe_key(trimmed)?;
-    status.model = stored_model(db)?;
+    status = with_prefs(db, status)?;
     if status.valid != Some(true) {
         let previous = get_api_key()?.is_some();
         status.stored = previous;
@@ -334,10 +440,11 @@ pub fn analyze(
     progress: &mut dyn FnMut(JobProgress),
 ) -> Result<TasteReport, String> {
     let key = get_api_key()?.ok_or_else(|| {
-        "Add an OpenRouter key in Settings. It is pay-as-you-go, and DeepSeek is the cheap default."
+        "Add an OpenRouter key in Settings. Qwen Flash is the cheap default."
             .to_string()
     })?;
     let model = stored_model(db)?;
+    let web = stored_web(db)?;
     progress(JobProgress {
         job: "taste".into(),
         label: "Reading your log…".into(),
@@ -349,14 +456,48 @@ pub fn analyze(
     if corpus.snapshot.rated_count < 8 {
         return Err("Rate at least 8 films first so the agent has edges to work with.".into());
     }
+    let ask_label = if web {
+        format!(
+            "Asking {} to read your taste, with a few web searches…",
+            model_label(&model)
+        )
+    } else {
+        format!("Asking {} to read your taste…", model_label(&model))
+    };
     progress(JobProgress {
         job: "taste".into(),
-        label: format!("Asking {} to read your taste…", model_label(&model)),
+        label: ask_label,
         current: 2,
         total: 3,
         ..Default::default()
     });
-    let raw = chat_complete(&key, &model, &corpus.payload)?;
+    let mut used_model = model.clone();
+    let mut used_web = web;
+    let mut note = None;
+    let raw = match chat_complete(&key, &model, &corpus.payload, web) {
+        Ok(raw) => raw,
+        Err(err) if should_fallback(&model, &err) => {
+            progress(JobProgress {
+                job: "taste".into(),
+                label: format!(
+                    "{} stalled. Retrying with Qwen Flash, no web search…",
+                    model_label(&model)
+                ),
+                current: 2,
+                total: 3,
+                ..Default::default()
+            });
+            used_model = MODEL_QWEN.to_string();
+            used_web = false;
+            note = Some(format!(
+                "Fell back to Qwen Flash after {} timed out or failed.",
+                model_label(&model)
+            ));
+            chat_complete(&key, MODEL_QWEN, &corpus.payload, false)
+                .map_err(|e| friendly_err(&e, MODEL_QWEN))?
+        }
+        Err(err) => return Err(friendly_err(&err, &model)),
+    };
     let parsed = parse_model_report(&raw)?;
     progress(JobProgress {
         job: "taste".into(),
@@ -373,41 +514,84 @@ pub fn analyze(
         aversions: parsed.aversions,
         dimensions: parsed.dimensions,
         picks,
-        model: model_label(&model).into(),
+        model: model_label(&used_model).into(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         rated_count: corpus.snapshot.rated_count,
+        web_used: used_web,
+        note,
     };
     db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
     Ok(report)
 }
 
-fn chat_complete(key: &str, model: &str, payload: &Value) -> Result<String, String> {
-    let timeout = if model == MODEL_KIMI {
-        Duration::from_secs(180)
+fn chat_complete(key: &str, model: &str, payload: &Value, web: bool) -> Result<String, String> {
+    match send_chat(key, model, payload, web) {
+        Ok(raw) => Ok(raw),
+        Err(err) if web && tools_unsupported(&err) => send_chat(key, model, payload, false),
+        Err(err) => Err(err),
+    }
+}
+
+fn send_chat(key: &str, model: &str, payload: &Value, web: bool) -> Result<String, String> {
+    let timeout = request_timeout(model);
+    let system = if web {
+        format!("{SYSTEM_PROMPT}\n{SYSTEM_WEB}")
     } else {
-        Duration::from_secs(90)
+        SYSTEM_PROMPT.to_string()
     };
-    let body = json!({
+    let mut body = json!({
         "model": openrouter_model_id(model),
         "temperature": 0.35,
-        "response_format": { "type": "json_object" },
+        "max_tokens": 2200,
         "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
+            { "role": "system", "content": system },
             { "role": "user", "content": payload.to_string() }
         ]
-    })
-    .to_string();
-    let response = ureq::post(OPENROUTER_CHAT)
+    });
+    if web {
+        body["tools"] = json!([{
+            "type": "openrouter:web_search",
+            "parameters": {
+                "max_results": 4,
+                "max_total_results": 8,
+                "max_uses": 3,
+                "search_context_size": "low"
+            }
+        }]);
+    } else {
+        body["response_format"] = json!({ "type": "json_object" });
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(timeout)
+        .timeout_write(Duration::from_secs(30))
+        .timeout(timeout + Duration::from_secs(20))
+        .build();
+    let response = match agent
+        .post(OPENROUTER_CHAT)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .set("HTTP-Referer", "https://github.com/rjreny/studio")
         .set("X-Title", "Studio Taste")
-        .set("User-Agent", "Studio/0.5 (local film app)")
-        .timeout(timeout)
-        .send_string(&body)
-        .map_err(|e| format!("OpenRouter request failed: {e}"))?
-        .into_string()
-        .map_err(|e| e.to_string())?;
+        .set("User-Agent", "Studio/0.6 (local film app)")
+        .send_string(&body.to_string())
+    {
+        Ok(resp) => resp.into_string().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(_, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(msg) = v["error"]["message"].as_str() {
+                    return Err(msg.to_string());
+                }
+            }
+            return Err(if text.is_empty() {
+                "OpenRouter returned an error status".into()
+            } else {
+                text
+            });
+        }
+        Err(err) => return Err(err.to_string()),
+    };
     let v: Value = serde_json::from_str(&response).map_err(|e| {
         format!("OpenRouter returned non-JSON: {e}")
     })?;
@@ -417,15 +601,75 @@ fn chat_complete(key: &str, model: &str, payload: &Value) -> Result<String, Stri
     let content = v["choices"]
         .as_array()
         .and_then(|c| c.first())
-        .and_then(|c| {
-            c["message"]["content"]
-                .as_str()
-                .or_else(|| c["message"]["reasoning"].as_str())
-                .or_else(|| c["text"].as_str())
-        })
+        .and_then(choice_text)
         .ok_or_else(|| "OpenRouter response had no text".to_string())?;
-    Ok(content.to_string())
+    Ok(content)
 }
+
+fn choice_text(choice: &Value) -> Option<String> {
+    let msg = &choice["message"];
+    if let Some(s) = msg["content"].as_str().filter(|s| !s.trim().is_empty()) {
+        return Some(s.to_string());
+    }
+    if let Some(parts) = msg["content"].as_array() {
+        let joined: String = parts
+            .iter()
+            .filter_map(|part| part["text"].as_str().or_else(|| part.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        if !joined.trim().is_empty() {
+            return Some(joined);
+        }
+    }
+    msg["reasoning"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| choice["text"].as_str().map(|s| s.to_string()))
+}
+
+fn is_timeout_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("10060")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("time out")
+}
+
+fn tools_unsupported(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("does not support")
+        || lower.contains("tool use")
+        || lower.contains("tools are not")
+        || lower.contains("unknown tool")
+}
+
+fn should_fallback(model: &str, err: &str) -> bool {
+    if model == MODEL_QWEN {
+        return false;
+    }
+    let lower = err.to_ascii_lowercase();
+    is_timeout_error(err)
+        || lower.contains("10060")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("524")
+        || lower.contains("no endpoints")
+        || lower.contains("connection reset")
+        || lower.contains("failed to connect")
+}
+
+fn friendly_err(err: &str, model: &str) -> String {
+    if is_timeout_error(err) {
+        return format!(
+            "{} did not finish in time. Flash models usually return in under a minute. Kimi K3 can take several minutes. Taste will retry with Qwen Flash when it can; otherwise pick a Flash model and try again.",
+            model_label(model)
+        );
+    }
+    err.to_string()
+}
+
+const SYSTEM_WEB: &str = r#"Web search is available. Use at most three cheap searches for critic lists or "films like" a title they loved. Prefer Letterboxd, Criterion, Sight and Sound, and BFI. Use the web to confirm a fit, not to dump random new releases. Never recommend a film from reallyLiked, liked, or disliked."#;
 
 const SYSTEM_PROMPT: &str = r#"You are a film taste analyst inside Studio, a local Letterboxd library app.
 You receive compact ratings, catalog metadata, statistical affinities, and a candidate pool. Studio already excluded logged films from candidates and will drop any wildcard that is already in the library.
@@ -813,7 +1057,7 @@ fn encode_payload(
         budget.candidates = (budget.candidates / 2).max(16);
         budget.watchlist = (budget.watchlist / 2).max(4);
     }
-    Err("Taste log is still too large after shrinking. Try Kimi K3, or wait until posters finish matching.".into())
+    Err("Taste log is still too large after shrinking. Wait until posters finish matching, then try again.".into())
 }
 
 fn stats_json(stats: &[TasteStat]) -> Vec<Value> {
@@ -1300,8 +1544,8 @@ mod tests {
         let corpus = build_corpus(&db, MODEL_DEEPSEEK).unwrap();
         assert_eq!(corpus.snapshot.rated_count, 180);
         assert!(corpus.payload.get("seen").is_none());
-        assert!(corpus.payload["reallyLiked"].as_array().unwrap().len() <= 70);
-        assert!(estimate_tokens(&corpus.payload) < 28_000);
+        assert!(corpus.payload["reallyLiked"].as_array().unwrap().len() <= 180);
+        assert!(estimate_tokens(&corpus.payload) < 80_000);
     }
 
     #[test]
@@ -1313,8 +1557,25 @@ mod tests {
 
     #[test]
     fn model_ids_map() {
+        assert_eq!(default_model(), MODEL_QWEN);
         assert_eq!(normalize_model("Kimi K3"), MODEL_KIMI);
+        assert_eq!(normalize_model("Gemini Flash"), MODEL_GEMINI);
+        assert_eq!(normalize_model("deepseek"), MODEL_DEEPSEEK);
         assert_eq!(openrouter_model_id(MODEL_KIMI), "moonshotai/kimi-k3");
-        assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-chat");
+        assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-v4-flash");
+        assert_eq!(openrouter_model_id(MODEL_QWEN), "qwen/qwen3.7-flash");
+        assert_eq!(openrouter_model_id(MODEL_GEMINI), "google/gemini-3.7-flash");
+        assert_eq!(model_catalog().len(), 4);
+    }
+
+    #[test]
+    fn timeout_errors_are_rewritten_and_fall_back() {
+        let raw = "A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)";
+        assert!(is_timeout_error(raw));
+        assert!(should_fallback(MODEL_KIMI, raw));
+        assert!(!should_fallback(MODEL_QWEN, raw));
+        let msg = friendly_err(raw, MODEL_KIMI);
+        assert!(msg.contains("Kimi K3"));
+        assert!(!msg.contains("10060"));
     }
 }

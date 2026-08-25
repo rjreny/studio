@@ -931,7 +931,14 @@ pub fn taste_clear_key(
 pub fn taste_set_model(model: String, state: State<'_, AppState>) -> Result<crate::taste::TasteKeyStatus, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     crate::taste::set_model(&db, &model)?;
-    crate::taste::key_status(&db)
+    crate::taste::stored_status(&db)
+}
+
+#[tauri::command]
+pub fn taste_set_web(enabled: bool, state: State<'_, AppState>) -> Result<crate::taste::TasteKeyStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::set_web(&db, enabled)?;
+    crate::taste::stored_status(&db)
 }
 
 #[tauri::command]

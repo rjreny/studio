@@ -124,6 +124,10 @@ export async function tasteSetModel(model: string): Promise<TasteKeyStatus> {
   return invoke("taste_set_model", { model });
 }
 
+export async function tasteSetWeb(enabled: boolean): Promise<TasteKeyStatus> {
+  return invoke("taste_set_web", { enabled });
+}
+
 export async function tasteGet(): Promise<TasteState> {
   return invoke("taste_get");
 }

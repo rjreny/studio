@@ -169,6 +169,16 @@ export type TasteKeyStatus = {
   valid: boolean | null;
   lastError: string | null;
   model: string;
+  web: boolean;
+  models: TasteModelInfo[];
+};
+
+export type TasteModelInfo = {
+  id: string;
+  label: string;
+  blurb: string;
+  context: string;
+  cost: string;
 };
 
 export type TasteAffinity = {
@@ -219,6 +229,8 @@ export type TasteReport = {
   model: string;
   generatedAt: string;
   ratedCount: number;
+  webUsed?: boolean;
+  note?: string | null;
 };
 
 export type TasteState = {

@@ -18,6 +18,7 @@ import {
   tasteKeyStatus,
   tasteSetKey,
   tasteSetModel,
+  tasteSetWeb,
 } from "../../platform/filmLibrary";
 import type { EnrichReport, ImportResult, InstallInfo, JobProgress, LibraryCoverage, TasteKeyStatus, TmdbKeyStatus } from "../../platform/types/film";
 import {
@@ -29,6 +30,7 @@ import {
   resetStudioData,
 } from "../../platform/install";
 import { log } from "../../platform/log";
+import { TasteModelList } from "../films/RecsView";
 import {
   checkAppUpdate,
   downloadAndInstallUpdate,
@@ -241,6 +243,14 @@ export function SettingsView({
     }
   }
 
+  async function pickTasteWeb(enabled: boolean) {
+    try {
+      setTasteStatus(await tasteSetWeb(enabled));
+    } catch (err) {
+      log("warn", "taste web save failed", err);
+    }
+  }
+
   const keyConnected = Boolean(keyStatus?.stored && keyStatus.valid === true && !replacing);
   const tasteConnected = Boolean(tasteStatus?.stored && tasteStatus.valid !== false && !tasteReplacing);
 
@@ -357,25 +367,36 @@ export function SettingsView({
             <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">
               OpenRouter
             </a>
-            . DeepSeek is cheap and strong at this. Kimi K3 is sharper and costs more per run.
+            . Qwen Flash is the cheap default. You can also pick the model on the Taste tab.
           </p>
           <div className="field">
             <span className="field-label">Model</span>
+            <TasteModelList
+              models={tasteStatus?.models ?? []}
+              selected={tasteStatus?.model ?? "qwen"}
+              disabled={busy}
+              onPick={(id) => void pickTasteModel(id)}
+            />
+          </div>
+          <div className="field">
+            <span className="field-label">Web search</span>
             <div className="seg">
-              {([
-                ["deepseek", "DeepSeek"],
-                ["kimi-k3", "Kimi K3"],
-              ] as const).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={tasteStatus?.model === id ? "is-on" : ""}
-                  onClick={() => void pickTasteModel(id)}
-                >
-                  {label}
-                </button>
-              ))}
+              <button
+                type="button"
+                className={tasteStatus?.web ? "is-on" : ""}
+                onClick={() => void pickTasteWeb(true)}
+              >
+                On
+              </button>
+              <button
+                type="button"
+                className={!tasteStatus?.web ? "is-on" : ""}
+                onClick={() => void pickTasteWeb(false)}
+              >
+                Off
+              </button>
             </div>
+            <p className="hint">A few critic-list lookups per run. Caps cost. No multi-model swarm.</p>
           </div>
           <div className="field">
             <label htmlFor="settings-openrouter">OpenRouter API key</label>

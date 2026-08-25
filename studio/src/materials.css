@@ -1035,6 +1035,133 @@ html[data-theme="light"] .ghost {
   max-width: 56ch;
 }
 
+.taste-controls,
+.taste-run {
+  margin: 0 0 var(--space-5);
+  padding: 18px 20px;
+  max-width: 62ch;
+}
+
+.taste-controls h2,
+.taste-run h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.taste-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.taste-model-list button {
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+}
+
+.taste-model-list button.is-on {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  background: color-mix(in oklch, var(--surface) 82%, var(--accent));
+}
+
+.taste-model-list button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.taste-model-list strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.taste-model-list strong span,
+.taste-model-list > button > span {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.taste-web {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.taste-web button {
+  align-self: flex-start;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+}
+
+.taste-web button.is-on {
+  background: var(--nav-active-bg);
+  color: var(--nav-active-fg);
+}
+
+.taste-run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.taste-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.taste-run ol {
+  list-style: none;
+  margin: 12px 0 8px;
+  padding: 0;
+}
+
+.taste-run li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  color: var(--text-muted);
+}
+
+.taste-run li.is-now {
+  color: inherit;
+  font-weight: 600;
+}
+
+.taste-run li span {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+}
+
+.taste-run li.is-now span {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: oklch(0.18 0.04 145);
+}
+
+.taste-run li.is-done span {
+  background: var(--surface);
+}
+
 .taste-setup h2,
 .taste-split h2,
 .recs .shelf-head h2 {

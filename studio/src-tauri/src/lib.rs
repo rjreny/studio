@@ -182,6 +182,7 @@ pub fn run() {
             commands::taste_set_key,
             commands::taste_clear_key,
             commands::taste_set_model,
+            commands::taste_set_web,
             commands::taste_get,
             commands::taste_analyze,
             commands::list_friends,
