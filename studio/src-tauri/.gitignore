@@ -1,2 +1,7 @@
 /target/
 /gen/schemas
+
+# Local Taste inspect: personal library snapshots and live-DB harness.
+/src/taste/fixtures/
+/src/taste/real_run.rs
+/src/taste/library_fixture.rs

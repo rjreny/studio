@@ -9,10 +9,6 @@ pub mod retrieve;
 pub mod score;
 pub mod shortlist;
 pub mod validate;
-pub mod library_fixture;
-
-#[cfg(test)]
-mod real_run;
 
 use crate::catalog::tmdb;
 use crate::models::JobProgress;
