@@ -1,6 +1,5 @@
 use crate::taste::features::{
     decade_label, family_for_job, runtime_bucket, FeatureFamily, FeatureKey, FeatureProfile,
-    PORTABILITY_SKIP,
 };
 use crate::taste::dimensions::predicted_modes;
 use crate::taste::retrieve::{Candidate, RetrievalKind};
@@ -88,15 +87,16 @@ pub fn score_candidate(profile: &FeatureProfile, candidate: &Candidate) -> Score
 
     let keys = candidate_keys(candidate);
     let matched_primary = profile.affinities.iter().any(|aff| {
-        aff.portability >= PORTABILITY_SKIP
+        aff.citeable()
             && aff.key.family.is_primary()
             && keys.iter().any(|k| k.storage_key() == aff.key.storage_key())
     });
     let mut family_used: std::collections::HashMap<FeatureFamily, usize> =
         std::collections::HashMap::new();
+    let mut cited: Vec<&crate::taste::features::FeatureAffinity> = Vec::new();
 
     for aff in &profile.affinities {
-        if aff.portability < PORTABILITY_SKIP {
+        if aff.key.family.is_contextual() || !aff.citeable() {
             continue;
         }
         if !keys.iter().any(|k| k.storage_key() == aff.key.storage_key()) {
@@ -117,23 +117,28 @@ pub fn score_candidate(profile: &FeatureProfile, candidate: &Candidate) -> Score
                 * aff.confidence
                 * w;
             negative_features.push(aff.key.name.clone());
-            for e in aff.negative_evidence.iter().take(2) {
-                evidence.push(e.title.clone());
-            }
         }
         if aff.recommendation_mean > 0.1 {
-            positive_features.push(aff.key.name.clone());
-            let cite_contextual = aff.key.family.is_contextual() && matched_primary;
-            if reasons.len() < 4 && !cite_contextual {
-                reasons.push(format!(
-                    "{} affinity ({:.2})",
-                    aff.key.name, aff.recommendation_mean
-                ));
-            }
-            for e in aff.positive_evidence.iter().take(2) {
-                if evidence.len() < 6 {
-                    evidence.push(e.title.clone());
-                }
+            cited.push(aff);
+        }
+    }
+
+    let specific = cited.iter().any(|a| a.key.is_person_or_keyword());
+    let cited: Vec<_> = cited
+        .into_iter()
+        .filter(|a| !specific || a.key.is_person_or_keyword())
+        .collect();
+    for aff in &cited {
+        positive_features.push(aff.key.name.clone());
+        if reasons.len() < 4 {
+            reasons.push(format!(
+                "{} affinity ({:.2})",
+                aff.key.name, aff.recommendation_mean
+            ));
+        }
+        for e in aff.positive_evidence.iter().take(2) {
+            if evidence.len() < 6 {
+                evidence.push(e.title.clone());
             }
         }
     }
@@ -238,6 +243,7 @@ pub fn score_all(profile: &FeatureProfile, candidates: &[Candidate]) -> Vec<Scor
     let mut scored: Vec<_> = candidates
         .iter()
         .map(|c| score_candidate(profile, c))
+        .filter(|c| !c.contextual_only || c.candidate.watchlist)
         .collect();
     scored.sort_by(|a, b| {
         b.score
@@ -375,5 +381,143 @@ mod tests {
             decade_score.score.content
         );
         assert!(!dp_score.contextual_only);
+    }
+
+    #[test]
+    fn person_evidence_does_not_bleed_genre_evidence() {
+        use crate::taste::features::{build_profile, observations_from_film, Credit};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::taste::retrieve::{Candidate, RetrievalKind, RetrievalSource};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let director = Credit {
+            id: Some(10),
+            name: "Stephen Hillenburg".into(),
+            job: "Director".into(),
+        };
+        let mut obs = observations_from_film(
+            "The SpongeBob SquarePants Movie",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Comedy".into(), "Family".into()],
+            &[director.clone()],
+            &[],
+            Some(2004),
+            Some(87),
+        );
+        obs.extend(observations_from_film(
+            "SpongeBob extra",
+            4.5,
+            Some(3),
+            &interaction_signal(4.5, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Comedy".into()],
+            &[director.clone()],
+            &[],
+            Some(2015),
+            Some(90),
+        ));
+        obs.extend(observations_from_film(
+            "The Twilight Saga: Breaking Dawn - Part 1",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Drama".into(), "Fantasy".into()],
+            &[Credit {
+                id: Some(99),
+                name: "Bill Condon".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2011),
+            Some(117),
+        ));
+        let profile = build_profile(&obs);
+        let cand = Candidate {
+            tmdb_id: Some(50),
+            title: "The SpongeBob Movie: Sponge Out of Water".into(),
+            year: Some(2015),
+            poster: None,
+            genres: vec!["Comedy".into(), "Drama".into()],
+            credits: vec![director],
+            keywords: vec![],
+            runtime: Some(92),
+            vote_count: Some(1000),
+            watchlist: false,
+            sources: vec![RetrievalSource {
+                kind: RetrievalKind::Filmography,
+                label: "Stephen Hillenburg".into(),
+                seed_tmdb_id: None,
+            }],
+            friend_affinity: 0.0,
+            tmdb_related: 0.0,
+        };
+        let scored = score_candidate(&profile, &cand);
+        assert!(scored.evidence.iter().any(|e| e.contains("SpongeBob")));
+        assert!(
+            scored.evidence.iter().all(|e| !e.contains("Twilight")),
+            "got {:?}",
+            scored.evidence
+        );
+        assert!(scored.reasons.iter().any(|r| r.contains("Hillenburg")));
+        assert!(scored.reasons.iter().all(|r| !r.contains("2000s")));
+        assert!(scored.positive_features.iter().any(|f| f.contains("Hillenburg")));
+        assert!(
+            scored.positive_features.iter().all(|f| f != "Drama"),
+            "genre must not ride along with person evidence: {:?}",
+            scored.positive_features
+        );
+    }
+
+    #[test]
+    fn decade_only_candidates_are_dropped_from_pool() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::taste::retrieve::{Candidate, RetrievalKind, RetrievalSource};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let genres = ["Drama", "Thriller", "Comedy", "Action", "Horror"];
+        let mut obs = Vec::new();
+        for i in 0..12i64 {
+            let s = interaction_signal(4.5, &p, Some(0.4), 1, false);
+            obs.extend(observations_from_film(
+                &format!("new{i}"),
+                4.5,
+                Some(i),
+                &s,
+                Some(0.4),
+                &[genres[i as usize % 5].into()],
+                &[],
+                &[],
+                Some(2005),
+                None,
+            ));
+        }
+        let profile = build_profile(&obs);
+        let dirty = Candidate {
+            tmdb_id: Some(200),
+            title: "Dirty".into(),
+            year: Some(2005),
+            poster: None,
+            genres: vec!["Crime".into()],
+            credits: vec![],
+            keywords: vec![],
+            runtime: None,
+            vote_count: Some(10),
+            watchlist: false,
+            sources: vec![RetrievalSource {
+                kind: RetrievalKind::Related,
+                label: "similar to Twilight".into(),
+                seed_tmdb_id: Some(2),
+            }],
+            friend_affinity: 0.0,
+            tmdb_related: 1.0,
+        };
+        let scored = score_candidate(&profile, &dirty);
+        assert!(scored.contextual_only);
+        assert!(scored.reasons.iter().all(|r| !r.contains("2000s")));
+        let pool = score_all(&profile, &[dirty]);
+        assert!(pool.is_empty());
     }
 }

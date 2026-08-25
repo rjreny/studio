@@ -112,10 +112,23 @@ impl FeatureKey {
     }
 
     pub fn storage_key(&self) -> String {
+        let name = self.name.to_lowercase();
         match self.id {
-            Some(id) => format!("{:?}:{id}", self.family),
-            None => format!("{:?}:{}", self.family, self.name.to_lowercase()),
+            Some(id) => format!("{:?}:{id}:{name}", self.family),
+            None => format!("{:?}:{name}", self.family),
         }
+    }
+
+    pub fn is_person_or_keyword(&self) -> bool {
+        matches!(
+            self.family,
+            FeatureFamily::Director
+                | FeatureFamily::Writer
+                | FeatureFamily::Cinematographer
+                | FeatureFamily::Composer
+                | FeatureFamily::Actor
+                | FeatureFamily::Keyword
+        )
     }
 }
 
@@ -159,6 +172,17 @@ impl FeatureAffinity {
         self.weighted_variance >= POLARIZING_VAR
             && !self.positive_evidence.is_empty()
             && !self.negative_evidence.is_empty()
+    }
+
+    /// Singleton high ratings must not become hunt targets (the 0.91 Hillenburg case).
+    pub fn citeable(&self) -> bool {
+        if self.key.family.is_contextual() {
+            return false;
+        }
+        if self.key.is_person_or_keyword() {
+            return self.appearances >= 2;
+        }
+        true
     }
 }
 
@@ -712,5 +736,140 @@ mod tests {
         assert!(fraser.confidence > 0.4, "got {}", fraser.confidence);
         assert!(fraser.scoring_affinity() > 0.0);
         assert!((fraser.portability - 1.0).abs() < 1e-5);
+        assert!(fraser.citeable());
+    }
+
+    #[test]
+    fn hillenburg_evidence_does_not_include_twilight() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let mut obs = observations_from_film(
+            "The SpongeBob SquarePants Movie",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Comedy".into(), "Family".into()],
+            &[Credit {
+                id: Some(10),
+                name: "Stephen Hillenburg".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2004),
+            Some(87),
+        );
+        obs.extend(observations_from_film(
+            "The Twilight Saga: Breaking Dawn - Part 1",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.8), 1, false),
+            Some(0.8),
+            &["Drama".into(), "Fantasy".into()],
+            &[Credit {
+                id: Some(99),
+                name: "Bill Condon".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2011),
+            Some(117),
+        ));
+        let profile = build_profile(&obs);
+        let hill = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Stephen Hillenburg")
+            .unwrap();
+        assert!(hill.positive_evidence.iter().any(|e| e.title.contains("SpongeBob")));
+        assert!(hill.positive_evidence.iter().all(|e| !e.title.contains("Twilight")));
+        assert!(!hill.citeable(), "one film must not be a hunt target");
+        let drama = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Drama")
+            .unwrap();
+        assert!(drama.positive_evidence.iter().any(|e| e.title.contains("Twilight")));
+    }
+
+    #[test]
+    fn same_tmdb_id_does_not_merge_different_names() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let mut obs = observations_from_film(
+            "A",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Drama".into()],
+            &[Credit {
+                id: Some(7),
+                name: "Stephen Hillenburg".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2004),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Twilight",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(1.0), 1, false),
+            Some(1.0),
+            &["Drama".into()],
+            &[Credit {
+                id: Some(7),
+                name: "Bill Condon".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2011),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let hill = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Stephen Hillenburg")
+            .unwrap();
+        assert_eq!(hill.positive_evidence.len(), 1);
+        assert_eq!(hill.positive_evidence[0].title, "A");
+    }
+
+    #[test]
+    fn portable_decade_is_still_not_citeable() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let genres = ["Drama", "Thriller", "Comedy", "Action", "Horror"];
+        let mut obs = Vec::new();
+        for i in 0..12i64 {
+            let s = interaction_signal(4.5, &p, Some(0.4), 1, false);
+            obs.extend(observations_from_film(
+                &format!("new{i}"),
+                4.5,
+                Some(i),
+                &s,
+                Some(0.4),
+                &[genres[i as usize % 5].into()],
+                &[],
+                &[],
+                Some(2005),
+                None,
+            ));
+        }
+        let profile = build_profile(&obs);
+        let decade = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "2000s")
+            .unwrap();
+        assert!(
+            decade.portability >= PORTABILITY_SKIP,
+            "this dataset makes decade look portable: {}",
+            decade.portability
+        );
+        assert!(
+            !decade.citeable(),
+            "contextual features must never become hunt targets"
+        );
     }
 }

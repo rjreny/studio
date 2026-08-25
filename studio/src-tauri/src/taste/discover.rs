@@ -86,6 +86,9 @@ fn score_lookup(
     };
     let _ = crate::taste::retrieve::enrich_missing(db, std::slice::from_mut(&mut candidate), 1);
     let scored = score_candidate(profile, &candidate);
+    if scored.contextual_only {
+        return None;
+    }
     let sparse_facet = matches_sparse_facet(profile, &scored);
     if scored.score.total >= DISCOVERY_FLOOR || sparse_facet {
         Some(scored)

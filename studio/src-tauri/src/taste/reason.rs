@@ -1,4 +1,4 @@
-use crate::taste::features::{FeatureProfile, PORTABLE_CONTEXTUAL};
+use crate::taste::features::FeatureProfile;
 use crate::taste::retrieve::FilmRecord;
 use crate::taste::score::ScoredCandidate;
 use serde::Deserialize;
@@ -60,6 +60,9 @@ Selection contract:
 - At least 8 from the original shortlist (use their id).
 - At most 3 discoveries. Discovery is optional.
 - Favor distinct high-confidence taste modes (visual, comedy, intensity, spectacle, atmosphere, comfort). Mix follows mode strengths, not one personality and not fixed quotas.
+- Never pick a contextualOnly candidate. Never label one core.
+- Never pick a film whose only reason is a decade or runtime. Catalog exposure is not a hunt target.
+- Affinity evidence must be films that actually carry that person or feature. Do not attach unrelated titles from other affinities.
 - Do not hunt for a decade or treat catalog exposure as taste. Older films are allowed when they have portable evidence (people, visual language, keywords).
 - If the visual dimension is strong, cinematography is a real factor. Do not claim it is irrelevant.
 - Do not invent titles. Every pick id must appear in the shortlist or validatedDiscoveries.
@@ -216,8 +219,7 @@ fn affinity_json(profile: &FeatureProfile, positive: bool) -> Vec<Value> {
         .affinities
         .iter()
         .filter(|a| {
-            let allowed_family = a.key.family.is_primary()
-                || (a.key.family.is_contextual() && a.portability >= PORTABLE_CONTEXTUAL);
+            let allowed_family = a.citeable();
             if !allowed_family {
                 return false;
             }
@@ -472,5 +474,41 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(ctx.iter().any(|v| v["feature"] == "2000s"));
+    }
+
+    #[test]
+    fn singleton_person_is_not_a_primary_affinity() {
+        use crate::taste::features::{build_profile, observations_from_film, Credit};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let s = interaction_signal(5.0, &p, Some(0.1), 1, false);
+        let obs = observations_from_film(
+            "The SpongeBob SquarePants Movie",
+            5.0,
+            Some(0),
+            &s,
+            Some(0.1),
+            &["Animation".into()],
+            &[Credit {
+                id: Some(1),
+                name: "Stephen Hillenburg".into(),
+                job: "Director".into(),
+            }],
+            &[],
+            Some(2004),
+            None,
+        );
+        let profile = build_profile(&obs);
+        let payload = call1_payload(&[], &profile, &[scored()]);
+        let names: Vec<String> = payload["tasteProfile"]["primaryAffinities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["feature"].as_str().map(|s| s.to_string()))
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains("Hillenburg")),
+            "n=1 0.91 people must not enter LLM hunt context: {names:?}"
+        );
     }
 }

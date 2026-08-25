@@ -3,7 +3,9 @@ use crate::letterboxd::posters::poster_url;
 use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::LibraryItem;
 use crate::storage::db::Database;
-use crate::taste::features::{Credit, FeatureFamily, FeatureProfile, Keyword};
+use crate::taste::features::{
+    family_for_job, Credit, FeatureFamily, FeatureKey, FeatureProfile, Keyword,
+};
 use crate::taste::preference::{
     interaction_signal, rating_profile, years_since, InteractionSignal, RatingProfile,
 };
@@ -293,6 +295,9 @@ pub fn retrieve(
     });
 
     for seed in seeds.iter().take(40) {
+        if !seed_expands_related(seed, profile) {
+            continue;
+        }
         for item in seed.similar.iter().take(8) {
             let tmdb_id = tmdb_id_from_item(item);
             let key = identity_key(tmdb_id, &item.title, item.year);
@@ -431,6 +436,37 @@ pub fn retrieve(
         out.truncate(1000);
     }
     Ok(out)
+}
+
+/// Related expansion is for films that carry a repeatable person signal.
+/// Singleton 5-stars (Twilight, Curious George) must not flood the pool.
+fn seed_expands_related(seed: &FilmRecord, profile: &FeatureProfile) -> bool {
+    let familiar = seed
+        .signal
+        .as_ref()
+        .map(|s| s.familiarity_strength >= 0.6)
+        .unwrap_or(false);
+    if familiar {
+        return false;
+    }
+    seed.credits.iter().any(|c| {
+        let Some(family) = family_for_job(&c.job) else {
+            return false;
+        };
+        let key = FeatureKey::new(family, c.id, &c.name);
+        profile.affinities.iter().any(|a| {
+            a.citeable()
+                && matches!(
+                    a.key.family,
+                    FeatureFamily::Director
+                        | FeatureFamily::Writer
+                        | FeatureFamily::Cinematographer
+                        | FeatureFamily::Composer
+                        | FeatureFamily::Actor
+                )
+                && a.key.storage_key() == key.storage_key()
+        })
+    })
 }
 
 fn job_for_family(family: FeatureFamily) -> String {
@@ -865,5 +901,116 @@ mod tests {
         let many_seed = many.preference.absolute * many.recommendation_weight;
         assert!(many_seed < once_seed);
         assert!(many.preference_weight > once.preference_weight);
+    }
+
+    fn test_seed(
+        title: &str,
+        viewings: u32,
+        credits: Vec<Credit>,
+    ) -> FilmRecord {
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        FilmRecord {
+            key: title.into(),
+            title: title.into(),
+            year: Some(2011),
+            tmdb_id: Some(1),
+            rating: Some(5.0),
+            liked: true,
+            watched: true,
+            watchlist: false,
+            viewings,
+            last_date: None,
+            genres: vec!["Drama".into()],
+            credits,
+            keywords: vec![],
+            similar: vec![LibraryItem::catalog(
+                "tmdb:99".into(),
+                "Dirty".into(),
+                Some(2005),
+                None,
+                None,
+                None,
+            )],
+            runtime: None,
+            poster: None,
+            vote_count: None,
+            signal: Some(interaction_signal(5.0, &p, Some(0.4), viewings, false)),
+            age_years: Some(0.4),
+        }
+    }
+
+    #[test]
+    fn twilight_singleton_does_not_expand_related() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let condon = Credit {
+            id: Some(99),
+            name: "Bill Condon".into(),
+            job: "Director".into(),
+        };
+        let obs = observations_from_film(
+            "The Twilight Saga: Breaking Dawn - Part 1",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(0.4), 1, false),
+            Some(0.4),
+            &["Drama".into()],
+            &[condon.clone()],
+            &[],
+            Some(2011),
+            None,
+        );
+        let profile = build_profile(&obs);
+        let seed = test_seed("Twilight", 1, vec![condon]);
+        assert!(
+            !seed_expands_related(&seed, &profile),
+            "n=1 director must not generate related candidates"
+        );
+    }
+
+    #[test]
+    fn citeable_person_seed_does_expand_related() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let dp = Credit {
+            id: Some(77),
+            name: "Greig Fraser".into(),
+            job: "Director of Photography".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            4.5,
+            Some(1),
+            &interaction_signal(4.5, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[dp.clone()],
+            &[],
+            Some(2022),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Dune",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.2), 1, false),
+            Some(0.2),
+            &["Science Fiction".into()],
+            &[dp.clone()],
+            &[],
+            Some(2021),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let seed = test_seed("The Batman", 1, vec![dp.clone()]);
+        assert!(seed_expands_related(&seed, &profile));
+        let rewatch = test_seed("The Batman", 7, vec![dp]);
+        assert!(
+            !seed_expands_related(&rewatch, &profile),
+            "familiar films must not flood related"
+        );
     }
 }

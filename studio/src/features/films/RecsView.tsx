@@ -180,11 +180,10 @@ export function RecsView({
         <div>
           <h1>{report?.title ?? "Taste"}</h1>
           <p className="muted">
-            {report
-              ? report.summary
-              : snapshot
-                ? `${snapshot.ratedCount} ratings · ${snapshot.lovedCount} loved · ${snapshot.hatedCount} disliked`
-                : "The agent scores a candidate universe from your full log, then reasons over a shortlist."}
+            {snapshot
+              ? `${report?.ratedCount ?? snapshot.ratedCount} ratings · ${snapshot.lovedCount} loved · ${snapshot.hatedCount} disliked`
+              : "The agent scores a candidate universe from your full log, then reasons over a shortlist."}
+            {report?.summary ? ` · ${report.summary}` : ""}
           </p>
         </div>
         {keyReady && enoughRatings ? (

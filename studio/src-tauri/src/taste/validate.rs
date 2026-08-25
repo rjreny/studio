@@ -52,6 +52,10 @@ pub fn hard_validate(
             &scored.candidate.title,
             scored.candidate.year,
         );
+        if scored.contextual_only {
+            dropped.push(format!("contextual-only: {}", scored.candidate.title));
+            continue;
+        }
         if seen.contains(&key) {
             dropped.push(format!("seen: {}", scored.candidate.title));
             continue;
@@ -95,7 +99,7 @@ pub fn hard_validate(
             if seen.contains(&key) || !used.insert(key) {
                 continue;
             }
-            if c.candidate.tmdb_id.is_none() {
+            if c.candidate.tmdb_id.is_none() || c.contextual_only {
                 continue;
             }
             kept.push(c.clone());
@@ -105,7 +109,10 @@ pub fn hard_validate(
     while kept.len() < TARGET_PICKS {
         let Some(next) = shortlist.iter().find(|c| {
             let key = identity_key(c.candidate.tmdb_id, &c.candidate.title, c.candidate.year);
-            c.candidate.tmdb_id.is_some() && !seen.contains(&key) && !used.contains(&key)
+            c.candidate.tmdb_id.is_some()
+                && !c.contextual_only
+                && !seen.contains(&key)
+                && !used.contains(&key)
         }) else {
             break;
         };
@@ -284,5 +291,18 @@ mod tests {
         assert_eq!(result.picks.len(), 12);
         assert!(!result.warnings.is_empty());
         assert_eq!(result.picks[0].candidate.tmdb_id, Some(1));
+    }
+
+    #[test]
+    fn drops_contextual_only_core_picks() {
+        let mut dirty = scored(3, "Dirty", "Other");
+        dirty.contextual_only = true;
+        dirty.reasons = vec!["2000s affinity (0.25)".into()];
+        let short = vec![scored(1, "Heat", "Mann"), scored(2, "Thief", "Mann"), dirty];
+        let picks = vec![pick(3, "Dirty"), pick(1, "Heat")];
+        let result = hard_validate(&picks, &short, &[], &HashSet::new(), 4);
+        assert!(result.dropped.iter().any(|d| d.contains("contextual-only")));
+        assert!(result.picks.iter().all(|p| p.candidate.tmdb_id != Some(3)));
+        assert!(result.picks.iter().any(|p| p.candidate.tmdb_id == Some(1)));
     }
 }
