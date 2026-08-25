@@ -292,15 +292,23 @@ export default function App() {
             )}
           </div>
         </main>
-        {job && !job.done ? (
-          <div className="job-banner glass">
-            <span>{job.label}</span>
+      </div>
+      {job && !job.done ? (
+        <div className="job-toast glass" role="status">
+          <div className="job-toast-copy">
+            <strong>{job.label}</strong>
             <span>
-              {job.current}/{job.total} · {job.posters} posters · {job.errors} errors
+              {job.total > 0 ? `${job.current}/${job.total}` : null}
+              {job.posters ? ` · ${job.posters} posters` : ""}
             </span>
           </div>
-        ) : null}
-      </div>
+          {job.total > 0 ? (
+            <div className="job-toast-bar" aria-hidden>
+              <span style={{ width: `${Math.min(100, Math.round((job.current / job.total) * 100))}%` }} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <footer className="status">
         <span>{status}</span>
         <div className="status-actions">

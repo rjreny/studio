@@ -59,7 +59,6 @@ const CREW_ORDER = [
   "Sound Designer",
   "Sound Mixer",
   "Visual Effects Supervisor",
-  "Animation",
   "Producer",
 ];
 
@@ -83,17 +82,16 @@ function groupCrew(items: string[]) {
     label: CREW_LABEL[job] ?? job,
     names: groups.get(job) ?? [],
   }));
-  const extra = [...groups.keys()]
-    .filter((job) => !CREW_ORDER.includes(job))
-    .map((job) => ({ job, label: CREW_LABEL[job] ?? job, names: groups.get(job) ?? [] }));
-  return [...known, ...extra];
+  return known;
 }
 
 function CastList({ items }: { items: string[] }) {
   if (!items.length) return <p className="muted">Not listed yet.</p>;
+  const shown = items.slice(0, 10);
+  const extra = items.length - shown.length;
   return (
-    <ul className="credit-cards">
-      {items.map((item) => {
+    <ul className="credit-inline">
+      {shown.map((item) => {
         const credit = parseCredit(item);
         return (
           <li key={item}>
@@ -102,6 +100,7 @@ function CastList({ items }: { items: string[] }) {
           </li>
         );
       })}
+      {extra > 0 ? <li className="credit-more">+{extra} more</li> : null}
     </ul>
   );
 }
@@ -111,12 +110,19 @@ function CrewList({ items }: { items: string[] }) {
   if (!groups.length) return <p className="muted">Not listed yet.</p>;
   return (
     <dl className="crew-groups">
-      {groups.map((group) => (
-        <div key={group.job} className="crew-group">
-          <dt>{group.label}</dt>
-          <dd>{group.names.join(", ")}</dd>
-        </div>
-      ))}
+      {groups.map((group) => {
+        const shown = group.names.slice(0, 4);
+        const extra = group.names.length - shown.length;
+        return (
+          <div key={group.job} className="crew-group">
+            <dt>{group.label}</dt>
+            <dd>
+              {shown.join(", ")}
+              {extra > 0 ? <span className="muted"> +{extra}</span> : null}
+            </dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }
@@ -220,42 +226,25 @@ export function FilmDetailView({
         <div className="hero-copy">
           {film.poster ? <img className="detail-poster" src={film.poster} alt="" /> : null}
           <div className="hero-copy-text">
-          {directorLine ? <p className="hero-cast">{directorLine}</p> : null}
-          <h1>{film.title}</h1>
-          <p className="hero-meta">
-            <span>{film.year ?? "Year unknown"}</span>
-            {runtime ? <span>{runtime}</span> : null}
-            {film.genres[0] ? <span>{film.genres[0]}</span> : null}
-          </p>
-          {film.tagline ? <p className="hero-lede">{film.tagline}</p> : null}
-          <div className="detail-ratings">
-            <div>
-              <span className="rating-label">Average</span>
+            {directorLine ? <p className="hero-cast">{directorLine}</p> : null}
+            <h1>{film.title}</h1>
+            <p className="hero-meta">
+              <span>{film.year ?? "Year unknown"}</span>
+              {runtime ? <span>{runtime}</span> : null}
+              {film.genres[0] ? <span>{film.genres[0]}</span> : null}
               <RatingDisplay value={community} compact />
-              <span className="muted">
-                {film.tmdbVoteCount ? `${film.tmdbVoteCount.toLocaleString()} votes` : "No votes yet"}
-              </span>
-            </div>
-            <div>
-              <span className="rating-label">Yours</span>
               {canRate ? (
                 <RatingControl value={film.currentRating} onChange={(v) => void rate(v)} />
               ) : (
-                <p className="muted">Not in your log</p>
+                <span className="muted">Not in your log</span>
               )}
-            </div>
-          </div>
+            </p>
+            {film.tagline ? <p className="hero-lede">{film.tagline}</p> : null}
           </div>
         </div>
       </header>
 
       <div className="detail-body">
-        <section className="detail-block">
-          <h2>About the film</h2>
-          {film.overview ? <p className="detail-overview">{film.overview}</p> : <p className="muted">Not enriched yet.</p>}
-          {film.genres.length ? <p className="genre-row">{film.genres.join(" · ")}</p> : null}
-        </section>
-
         {canRate ? (
           <section className="detail-block">
             <h2>Your history</h2>
@@ -270,20 +259,24 @@ export function FilmDetailView({
         <section className="detail-block">
           <h2>Friends</h2>
           {film.friends.length ? (
-            <ul className="feed">
+            <ul className="friend-chips">
               {film.friends.map((f, idx) => (
                 <li key={`${f.username}-${idx}`}>
-                  <div>
-                    <strong>@{f.username}</strong>
-                    <RatingDisplay value={f.rating} compact />
-                    {f.review ? <p>{f.review}</p> : null}
-                  </div>
+                  <strong>@{f.username}</strong>
+                  <RatingDisplay value={f.rating} compact />
+                  {f.review ? <span className="muted">{f.review}</span> : null}
                 </li>
               ))}
             </ul>
           ) : (
             <p className="muted">No friend activity for this film yet.</p>
           )}
+        </section>
+
+        <section className="detail-block">
+          <h2>About</h2>
+          {film.overview ? <p className="detail-overview">{film.overview}</p> : <p className="muted">Not enriched yet.</p>}
+          {film.genres.length ? <p className="genre-row">{film.genres.join(" · ")}</p> : null}
         </section>
 
         <section className="detail-block">

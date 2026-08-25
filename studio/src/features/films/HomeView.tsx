@@ -14,8 +14,8 @@ function heroSrc(film: LibraryItem, detail: FilmDetail | null) {
 function trimOverview(text: string | null | undefined) {
   if (!text) return null;
   const words = text.trim().split(/\s+/);
-  if (words.length <= 22) return text.trim();
-  return `${words.slice(0, 22).join(" ")}…`;
+  if (words.length <= 16) return text.trim();
+  return `${words.slice(0, 16).join(" ")}…`;
 }
 
 function runtimeLabel(minutes: number | null | undefined) {
@@ -96,55 +96,41 @@ export function HomeView({
           {image ? <img className="hero-image" src={image} alt="" /> : <div className="hero-image is-empty" />}
           <div className="hero-scrim" />
           <div className="hero-copy">
-            {castLine ? <p className="hero-cast">{castLine}</p> : null}
-            <h1>{featured.title}</h1>
-            <p className="hero-meta">
-              {featured.year ? <span>{featured.year}</span> : null}
-              {runtime ? <span>{runtime}</span> : null}
-              {genre ? <span>{genre}</span> : null}
-              <RatingDisplay value={featured.currentRating} compact />
-            </p>
-            {overview ? <p className="hero-lede">{overview}</p> : null}
-            <div className="hero-actions">
-              <button type="button" className="play-btn" onClick={() => onSelectFilm(featured.id)}>
-                Open
-              </button>
+            <div className="hero-copy-text">
+              {castLine ? <p className="hero-cast">{castLine}</p> : null}
+              <h1>{featured.title}</h1>
+              <p className="hero-meta">
+                {featured.year ? <span>{featured.year}</span> : null}
+                {runtime ? <span>{runtime}</span> : null}
+                {genre ? <span>{genre}</span> : null}
+                <RatingDisplay value={featured.currentRating} compact />
+              </p>
+            </div>
+            <div className="hero-copy-side">
+              {overview ? <p className="hero-lede">{overview}</p> : null}
+              <div className="hero-actions">
+                <button type="button" className="play-btn" onClick={() => onSelectFilm(featured.id)}>
+                  Open
+                </button>
+                {slides.length > 1 ? (
+                  <div className="hero-dots" role="tablist" aria-label="Featured films">
+                    {slides.map((film, i) => (
+                      <button
+                        key={film.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={i === index}
+                        className={i === index ? "is-on" : ""}
+                        onClick={() => setIndex(i)}
+                      >
+                        <span className="sr-only">{film.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
-          {slides.length > 1 ? (
-            <div className="hero-pager">
-              <button
-                type="button"
-                className="hero-pager-btn glass"
-                aria-label="Previous featured film"
-                onClick={() => setIndex((i) => (i - 1 + slides.length) % slides.length)}
-              >
-                ‹
-              </button>
-              <div className="hero-dots" role="tablist" aria-label="Featured films">
-                {slides.map((film, i) => (
-                  <button
-                    key={film.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={i === index}
-                    className={i === index ? "is-on" : ""}
-                    onClick={() => setIndex(i)}
-                  >
-                    <span className="sr-only">{film.title}</span>
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="hero-pager-btn glass"
-                aria-label="Next featured film"
-                onClick={() => setIndex((i) => (i + 1) % slides.length)}
-              >
-                ›
-              </button>
-            </div>
-          ) : null}
         </section>
       ) : (
         <section className="hero is-empty-hero">

@@ -18,6 +18,7 @@
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --dur: 180ms;
   --z-nav: 20;
+  --z-toast: 28;
   --z-palette: 50;
   --accent-app: oklch(0.78 0.19 145);
   --accent: var(--accent-app);

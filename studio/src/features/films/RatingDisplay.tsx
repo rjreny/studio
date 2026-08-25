@@ -49,14 +49,15 @@ export function RatingControl({
 }) {
   return (
     <div className="rating-control">
-      <RatingDisplay value={value} compact />
-      <div className="rating-control-buttons">
-        {[0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].map((n) => (
-          <button key={n} type="button" onClick={() => onChange(n)} title={`Rate ${n}`}>
-            {n}
-          </button>
-        ))}
+      <div className="rating-control-stars">
+        <RatingDisplay value={value} starsOnly />
+        <div className="rating-control-hits">
+          {[0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].map((n) => (
+            <button key={n} type="button" aria-label={`Rate ${n}`} onClick={() => onChange(n)} />
+          ))}
+        </div>
       </div>
+      <span className="rating-number">{value == null ? "—" : value.toFixed(1)}</span>
     </div>
   );
 }
