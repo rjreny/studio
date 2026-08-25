@@ -938,6 +938,28 @@ html[data-theme="light"] .ghost {
   gap: 10px;
 }
 
+.friend-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: start;
+}
+
+.friend-list li.muted {
+  display: block;
+}
+
+.friend-list li > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.friend-list .text-btn {
+  margin-top: 2px;
+}
+
 .stat-tiles {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

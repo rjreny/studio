@@ -316,7 +316,32 @@ impl Database {
             friend_count,
             has_setup,
             coverage,
+            last_rss_sync_at: self.get_meta("last_rss_sync_at")?,
+            rss_paused_until: self.get_meta("rss_paused_until")?,
         })
+    }
+
+    pub fn remove_friend(&self, id: &str) -> Result<String, String> {
+        let username: String = self
+            .conn()
+            .query_row(
+                "SELECT username FROM friends WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Friend not found".to_string())?;
+        self.conn()
+            .execute(
+                "DELETE FROM friend_activity WHERE friend_id = ?1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn()
+            .execute("DELETE FROM friends WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(username)
     }
 
     pub fn reset_all_data(&self) -> Result<(), String> {
@@ -371,5 +396,49 @@ mod tests {
             path.file_name().unwrap().to_string_lossy()
         )));
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn remove_friend_drops_only_that_friend_activity() {
+        let db = Database::in_memory().expect("db");
+        db.conn()
+            .execute(
+                "INSERT INTO friends(id, username, enabled) VALUES ('f1', 'ada', 1), ('f2', 'bee', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO friend_activity(id, friend_id, source_record_key, activity_type)
+                 VALUES ('a1', 'f1', 'k1', 'diary'), ('a2', 'f2', 'k2', 'diary')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(db.remove_friend("f1").unwrap(), "ada");
+        let remaining: Vec<(String, String)> = {
+            let mut stmt = db
+                .conn()
+                .prepare("SELECT id, username FROM friends ORDER BY username")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert_eq!(remaining, vec![("f2".into(), "bee".into())]);
+        let activity: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM friend_activity", [], |row| row.get(0))
+            .unwrap();
+        let leftover_friend: String = db
+            .conn()
+            .query_row("SELECT friend_id FROM friend_activity", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(activity, 1);
+        assert_eq!(leftover_friend, "f2");
+        assert_eq!(
+            db.remove_friend("missing").unwrap_err(),
+            "Friend not found"
+        );
     }
 }

@@ -186,6 +186,7 @@ pub fn run() {
             commands::taste_get,
             commands::taste_analyze,
             commands::list_friends,
+            commands::remove_friend,
             commands::update_preflight,
         ])
         .run(tauri::generate_context!())

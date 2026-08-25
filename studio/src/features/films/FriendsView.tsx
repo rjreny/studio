@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   getHome,
   importFriendUsernames,
   listFriends,
+  removeFriend,
   syncFriends,
 } from "../../platform/filmLibrary";
 import type { FriendActivityItem, FriendRow } from "../../platform/types/film";
@@ -11,6 +13,7 @@ import { RatingDisplay } from "./RatingDisplay";
 
 export function FriendsView({
   onStatus,
+  onRefresh,
 }: {
   onStatus: (s: string) => void;
   onRefresh: () => Promise<void>;
@@ -37,7 +40,27 @@ export function FriendsView({
       const added = await importFriendUsernames(draft);
       setDraft("");
       await load();
+      await onRefresh();
       onStatus(`Added ${added} friend${added === 1 ? "" : "s"}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeOne(friend: FriendRow) {
+    const ok = await ask(
+      `Stop following @${friend.username}? Their ratings will leave your feed.`,
+      { title: "Remove friend?", kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await removeFriend(friend.id);
+      await load();
+      await onRefresh();
+      onStatus(`Removed @${friend.username}`);
+    } catch {
+      onStatus(`Could not remove @${friend.username}`);
     } finally {
       setBusy(false);
     }
@@ -88,11 +111,22 @@ export function FriendsView({
           <ul className="friend-list">
             {friends.map((f) => (
               <li key={f.id}>
-                <strong>@{f.username}</strong>
-                <span className="muted">
-                  {f.lastSyncAt ? new Date(f.lastSyncAt).toLocaleDateString() : "Not synced"}
-                </span>
-                {f.lastSyncError ? <span className="form-error">{f.lastSyncError}</span> : null}
+                <div>
+                  <strong>@{f.username}</strong>
+                  <span className="muted">
+                    {f.lastSyncAt ? new Date(f.lastSyncAt).toLocaleDateString() : "Not synced"}
+                  </span>
+                  {f.lastSyncError ? <span className="form-error">{f.lastSyncError}</span> : null}
+                </div>
+                <button
+                  type="button"
+                  className="text-btn"
+                  disabled={busy}
+                  aria-label={`Remove @${f.username}`}
+                  onClick={() => void removeOne(f)}
+                >
+                  Remove
+                </button>
               </li>
             ))}
             {!friends.length ? <li className="muted">Nobody yet.</li> : null}

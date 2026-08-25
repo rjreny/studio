@@ -67,6 +67,10 @@ export async function importFriendUsernames(text: string): Promise<number> {
   return invoke("import_friend_usernames", { text });
 }
 
+export async function removeFriend(id: string): Promise<string> {
+  return invoke("remove_friend", { id });
+}
+
 export async function setRating(id: string, rating: number): Promise<FilmDetail> {
   return invoke("film_set_rating", { input: { id, rating } });
 }

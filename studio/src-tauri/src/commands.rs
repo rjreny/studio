@@ -687,6 +687,12 @@ pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
+pub fn remove_friend(id: String, state: State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.remove_friend(&id)
+}
+
+#[tauri::command]
 pub fn list_friends(
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, String, Option<String>, Option<String>)>, String> {
