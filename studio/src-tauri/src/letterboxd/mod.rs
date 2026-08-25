@@ -1,4 +1,5 @@
 pub mod csv;
+pub mod feeds;
 pub mod fingerprint;
 pub mod import;
 pub mod normalize;

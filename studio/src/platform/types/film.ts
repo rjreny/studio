@@ -16,6 +16,8 @@ export type AppSession = {
   friendCount: number;
   hasSetup: boolean;
   coverage: LibraryCoverage;
+  lastRssSyncAt?: string | null;
+  rssPausedUntil?: string | null;
 };
 
 export type InstallInfo = {
@@ -60,6 +62,7 @@ export type JobProgress = {
   enrich?: EnrichReport | null;
   import?: ImportResult | null;
   taste?: TasteReport | null;
+  feeds?: FeedSyncReport | null;
 };
 
 export type LibraryItem = {
@@ -149,6 +152,16 @@ export type ImportResult = {
   coverage: LibraryCoverage;
 };
 
+export type FeedSyncReport = {
+  selfSynced: boolean;
+  friendsSynced: number;
+  entriesAdded: number;
+  skipped: boolean;
+  lastSyncAt?: string | null;
+  pausedUntil?: string | null;
+  errors: string[];
+};
+
 export type LibraryQuery = {
   search?: string;
   sort?: "recent" | "rating" | "title" | "year";
@@ -191,6 +204,24 @@ export type TasteDimension = {
   take: string;
 };
 
+export type TasteMatchedFeature = {
+  name: string;
+  family: string;
+  appearances: number;
+  recommendationMean: number;
+  scoringAffinity: number;
+  confidence: number;
+  portability: number;
+  citeable: boolean;
+  cited: boolean;
+};
+
+export type TasteEligibility = {
+  portableEvidenceRequired: boolean;
+  passed: boolean;
+  passedBecause: string[];
+};
+
 export type TastePick = {
   title: string;
   year: number | null;
@@ -201,8 +232,14 @@ export type TastePick = {
   tmdbId: number | null;
   source: string;
   reasons?: string[];
+  scoringReasons?: string[];
   evidence?: string[];
   mode?: string | null;
+  origin?: string | null;
+  originLabel?: string | null;
+  matchedFeatures?: TasteMatchedFeature[];
+  hiddenFeatures?: TasteMatchedFeature[];
+  eligibility?: TasteEligibility;
 };
 
 export type TasteStat = {
@@ -235,6 +272,7 @@ export type TasteReport = {
   ratedCount: number;
   webUsed?: boolean;
   note?: string | null;
+  runLogPath?: string | null;
 };
 
 export type TasteState = {

@@ -305,7 +305,30 @@ pub fn sync_self(username: String, app: AppHandle, state: State<'_, AppState>) -
                 },
             );
             let url = rss_url(&clean);
-            let xml = crate::fetch_url(&url)?;
+            let xml = match crate::fetch_rss(&url, None) {
+                crate::RssFetch::Xml { body, .. } => body,
+                crate::RssFetch::NotModified => {
+                    let _ = app.emit(
+                        "studio-job",
+                        JobProgress {
+                            job: "sync".into(),
+                            label: format!("@{clean} diary already current"),
+                            current: 1,
+                            total: 1,
+                            done: true,
+                            ..Default::default()
+                        },
+                    );
+                    return Ok(());
+                }
+                crate::RssFetch::RateLimited { .. } => {
+                    return Err("Letterboxd asked us to slow down".into());
+                }
+                crate::RssFetch::Forbidden => {
+                    return Err("Letterboxd blocked the public diary request".into());
+                }
+                crate::RssFetch::Failed(err) => return Err(err),
+            };
             let mut db = crate::jobs::open_worker_db(&db_path)?;
             let result = sync_rss(&mut db, &clean, &xml)?;
             let _ = app.emit(
@@ -328,181 +351,28 @@ pub fn sync_self(username: String, app: AppHandle, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
-pub fn sync_friends(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    crate::jobs::spawn_job(
+pub fn sync_feeds(
+    force: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    crate::letterboxd::feeds::spawn_feed_sync(
         app,
         state.job.clone(),
         state.db_path.clone(),
-        "friends",
-        move |app, db_path| {
-            let mut db = crate::jobs::open_worker_db(&db_path)?;
-            let mut stmt = db
-                .conn()
-                .prepare("SELECT id, username FROM friends WHERE enabled = 1")
-                .map_err(|e| e.to_string())?;
-            let friends: Vec<(String, String)> = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(|e| e.to_string())?
-                .filter_map(|r| r.ok())
-                .collect();
-            drop(stmt);
-            let total = friends.len() as u32;
-            let mut entries_added = 0u32;
-            let mut errors = Vec::new();
-            for (index, (friend_id, username)) in friends.into_iter().enumerate() {
-                let _ = app.emit(
-                    "studio-job",
-                    JobProgress {
-                        job: "friends".into(),
-                        label: format!("Syncing @{username} · {}/{}", index as u32 + 1, total.max(1)),
-                        current: index as u32 + 1,
-                        total: total.max(1),
-                        ..Default::default()
-                    },
-                );
-                let url = rss_url(&username);
-                match crate::fetch_url(&url) {
-                    Ok(xml) => {
-                        if let Err(err) = sync_friend_rss(&mut db, &friend_id, &username, &xml) {
-                            errors.push(format!("@{username}: {err}"));
-                            let _ = db.conn().execute(
-                                "UPDATE friends SET last_sync_error = ?2 WHERE id = ?1",
-                                rusqlite::params![friend_id, err],
-                            );
-                        } else {
-                            entries_added += 1;
-                            let _ = db.conn().execute(
-                                "UPDATE friends SET last_sync_at = ?2, last_sync_error = NULL WHERE id = ?1",
-                                rusqlite::params![friend_id, Utc::now().to_rfc3339()],
-                            );
-                        }
-                    }
-                    Err(err) => errors.push(format!("@{username}: {err}")),
-                }
-            }
-            let _ = app.emit(
-                "studio-job",
-                JobProgress {
-                    job: "friends".into(),
-                    label: if errors.is_empty() {
-                        format!("Synced {entries_added} friend feeds")
-                    } else {
-                        format!("Synced {entries_added} friend feeds · {} errors", errors.len())
-                    },
-                    current: total,
-                    total: total.max(1),
-                    errors: errors.len() as u32,
-                    done: true,
-                    ..Default::default()
-                },
-            );
-            Ok(())
-        },
+        force,
     )
 }
 
-fn sync_friend_rss(
-    db: &mut Database,
-    friend_id: &str,
-    username: &str,
-    xml: &str,
-) -> Result<(), String> {
-    use crate::letterboxd::fingerprint::{row_fingerprint, source_record_key};
-    use crate::letterboxd::import::upsert_source_movie;
-    use crate::letterboxd::normalize::parse_year;
-    use crate::letterboxd::posters::{
-        poster_from_rss_body, tmdb_id_from_rss_body, SourceMovieMeta,
-    };
-    use rusqlite::OptionalExtension;
-
-    let feed_url = rss_url(username);
-    let now = Utc::now().to_rfc3339();
-    let mut tx = db.transaction()?;
-
-    for item in xml
-        .split("<item>")
-        .skip(1)
-        .filter_map(|c| c.split("</item>").next())
-    {
-        let film_title = extract_tag(item, "filmTitle").unwrap_or_default();
-        let title = extract_tag(item, "title").unwrap_or_default();
-        let name = if film_title.is_empty() {
-            title.split(" - ").next().unwrap_or("").trim().to_string()
-        } else {
-            film_title
-        };
-        if name.is_empty() {
-            continue;
-        }
-        let guid = extract_tag(item, "guid").unwrap_or_else(|| {
-            row_fingerprint(&[("link", &extract_tag(item, "link").unwrap_or_default())])
-        });
-        let event_fp = row_fingerprint(&[("guid", &guid), ("feed", &feed_url)]);
-        let activity_key = source_record_key("letterboxd_rss", &feed_url, &event_fp);
-        if tx
-            .query_row(
-                "SELECT id FROM friend_activity WHERE source_record_key = ?1",
-                params![activity_key],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
-            continue;
-        }
-        let year = extract_tag(item, "filmYear").and_then(|y| parse_year(&y));
-        let link = extract_tag(item, "link").unwrap_or_default();
-        let movie_fp = row_fingerprint(&[
-            ("name", &name),
-            ("year", &year.map(|y| y.to_string()).unwrap_or_default()),
-            ("uri", &link),
-        ]);
-        let movie_key = source_record_key("letterboxd_rss", "film", &movie_fp);
-        let meta = SourceMovieMeta {
-            poster: poster_from_rss_body(item),
-            tmdb_id: tmdb_id_from_rss_body(item),
-        };
-        let _smr =
-            upsert_source_movie(&tx, "letterboxd_rss", &movie_key, &name, year, &link, &meta)?;
-        let rating: Option<f64> = extract_tag(item, "memberRating").and_then(|v| v.parse().ok());
-        let poster = poster_from_rss_body(item);
-        tx.execute(
-            "INSERT INTO friend_activity(
-              id, friend_id, source_movie_record_id, source_record_key, activity_type,
-              published_at, watched_at, rating, review, source_guid, raw_payload, poster_url
-            ) VALUES (?1, ?2, NULL, ?3, 'diary', ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
-            params![
-                Uuid::new_v4().to_string(),
-                friend_id,
-                activity_key,
-                extract_tag(item, "pubDate"),
-                extract_tag(item, "watchedDate"),
-                rating,
-                guid,
-                item,
-                poster
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn extract_tag(xml: &str, name: &str) -> Option<String> {
-    for marker in [name, &format!("letterboxd:{name}")] {
-        let open = format!("<{marker}");
-        let lower = xml.to_lowercase();
-        let start = lower.find(&open.to_lowercase())?;
-        let after = &xml[start..];
-        let content_start = after.find('>')? + 1;
-        let rest = &after[content_start..];
-        let close = format!("</{marker}>");
-        let end = rest.to_lowercase().find(&close.to_lowercase())?;
-        return Some(rest[..end].trim().to_string());
-    }
-    None
+#[tauri::command]
+pub fn sync_friends(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    crate::letterboxd::feeds::spawn_feed_sync(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        true,
+    )
+    .map(|_| ())
 }
 
 #[tauri::command]
@@ -964,16 +834,26 @@ pub fn taste_analyze(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
             crate::app_log::write(app, "taste analyze started");
             let db = crate::jobs::open_worker_db(&db_path)?;
             let app_for_progress = app.clone();
-            let report = crate::taste::analyze(&db, &mut |progress| {
-                let _ = app_for_progress.emit("studio-job", &progress);
-            })?;
+            let run_dir = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|p| p.join("taste-runs"));
+            let report = crate::taste::analyze_with_run_log(
+                &db,
+                &mut |progress| {
+                    let _ = app_for_progress.emit("studio-job", &progress);
+                },
+                run_dir.as_deref(),
+            )?;
             crate::app_log::write(
                 app,
                 &format!(
-                    "taste analyze finished model={} picks={} rated={}",
+                    "taste analyze finished model={} picks={} rated={} log={}",
                     report.model,
                     report.picks.len(),
-                    report.rated_count
+                    report.rated_count,
+                    report.run_log_path.as_deref().unwrap_or("-")
                 ),
             );
             let _ = app.emit(

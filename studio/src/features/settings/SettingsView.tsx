@@ -8,8 +8,10 @@ import {
   formatBytes,
   formatEnrich,
   formatImport,
+  formatRssSyncAt,
   importExportZip,
   importGetDiagnostics,
+  syncFeeds,
   tmdbClearKey,
   tmdbEnrich,
   tmdbKeyStatus,
@@ -52,17 +54,21 @@ export function SettingsView({
   version,
   username,
   coverage,
+  lastRssSyncAt,
+  rssPausedUntil,
   onTheme,
   onAccent,
   onUsername,
   onStatus,
-  onRefresh: _onRefresh,
+  onRefresh,
 }: {
   theme: Theme;
   accent: Accent;
   version: string;
   username: string;
   coverage: LibraryCoverage | null;
+  lastRssSyncAt?: string | null;
+  rssPausedUntil?: string | null;
   onTheme: (t: Theme) => void;
   onAccent: (a: Accent) => void;
   onUsername: (name: string) => void;
@@ -158,6 +164,24 @@ export function SettingsView({
       error: null,
     });
     await downloadAndInstallUpdate(setUpdateProgress);
+  }
+
+  async function refreshDiary() {
+    try {
+      setBusy(true);
+      const started = await syncFeeds(true);
+      onStatus(
+        started
+          ? "Refreshing public diary RSS in the background"
+          : "No public diary to refresh yet — add your username first",
+      );
+      await onRefresh();
+    } catch (err) {
+      log("warn", "diary rss sync skipped", err);
+      onStatus("Could not refresh diary RSS right now");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function importExport() {
@@ -302,10 +326,28 @@ export function SettingsView({
             <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
               {busy ? "Working…" : "Import ZIP"}
             </button>
+            <button
+              type="button"
+              className="ghost-pill"
+              disabled={busy || !username.trim()}
+              onClick={() => void refreshDiary()}
+            >
+              Sync diary now
+            </button>
             <button type="button" className="ghost-pill" disabled={busy} onClick={() => void runEnrich()}>
               Match posters
             </button>
           </div>
+          <p className="hint">
+            Studio refreshes your public Letterboxd diary RSS about once an hour while the app is
+            open, and when you launch it. Same official feeds RSS readers use — no site scraping.
+            Last refresh: {formatRssSyncAt(lastRssSyncAt)}.
+          </p>
+          {rssPausedUntil ? (
+            <p className="hint">
+              Paused until {formatRssSyncAt(rssPausedUntil)} because Letterboxd asked us to wait.
+            </p>
+          ) : null}
           {diagnostics.map((w) => (
             <p key={w} className="hint">
               {w}

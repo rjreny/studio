@@ -81,8 +81,9 @@ export function ConnectView({
       </div>
       {error ? <p className="form-error">{error}</p> : null}
       <p className="hint">
-        Full history: Letterboxd Settings, Import & Export, download ZIP. RSS only covers the latest
-        ~50 diary entries and never counts as full history.
+        Full history: Letterboxd Settings, Import & Export, download ZIP. After you connect, Studio
+        keeps your public diary RSS up to date on its own — same feed Letterboxd publishes for RSS
+        readers, about once an hour. Ratings without a diary log are not in that feed.
       </p>
     </div>
   );

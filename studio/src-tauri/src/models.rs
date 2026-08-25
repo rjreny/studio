@@ -22,6 +22,10 @@ pub struct AppSession {
     pub friend_count: u32,
     pub has_setup: bool,
     pub coverage: LibraryCoverage,
+    #[serde(default)]
+    pub last_rss_sync_at: Option<String>,
+    #[serde(default)]
+    pub rss_paused_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +81,8 @@ pub struct JobProgress {
     pub import: Option<ImportResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub taste: Option<crate::taste::TasteReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feeds: Option<FeedSyncReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +127,18 @@ pub struct SyncResult {
 pub struct FriendSyncResult {
     pub friends_synced: u32,
     pub entries_added: u32,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedSyncReport {
+    pub self_synced: bool,
+    pub friends_synced: u32,
+    pub entries_added: u32,
+    pub skipped: bool,
+    pub last_sync_at: Option<String>,
+    pub paused_until: Option<String>,
     pub errors: Vec<String>,
 }
 

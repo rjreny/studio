@@ -69,6 +69,12 @@ fn read_zip_texts(path: String) -> Result<HashMap<String, String>, String> {
     Ok(out)
 }
 
+const STUDIO_UA: &str = concat!(
+    "Studio/",
+    env!("CARGO_PKG_VERSION"),
+    " (personal Letterboxd RSS reader)"
+);
+
 fn allowed_fetch(url: &str) -> bool {
     url.starts_with("https://letterboxd.com/")
         && url.chars().all(|c| c.is_ascii() && !c.is_control())
@@ -79,7 +85,7 @@ pub fn fetch_url(url: &str) -> Result<String, String> {
         return Err("blocked host".into());
     }
     ureq::get(url)
-        .set("User-Agent", "Studio/0.1 (local film app)")
+        .set("User-Agent", STUDIO_UA)
         .set(
             "Accept",
             "application/rss+xml, application/xml, text/xml, */*",
@@ -88,6 +94,81 @@ pub fn fetch_url(url: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .into_string()
         .map_err(|e| e.to_string())
+}
+
+pub enum RssFetch {
+    Xml {
+        body: String,
+        etag: Option<String>,
+    },
+    NotModified,
+    RateLimited {
+        retry_after_secs: Option<u64>,
+    },
+    Forbidden,
+    Failed(String),
+}
+
+pub fn is_letterboxd_diary_rss(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://letterboxd.com/") else {
+        return false;
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let Some(user) = rest.strip_suffix("/rss") else {
+        return false;
+    };
+    !user.is_empty()
+        && !user.contains('/')
+        && user
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+pub fn fetch_rss(url: &str, etag: Option<&str>) -> RssFetch {
+    if !is_letterboxd_diary_rss(url) {
+        return RssFetch::Failed("blocked host".into());
+    }
+    let mut req = ureq::get(url)
+        .set("User-Agent", STUDIO_UA)
+        .set(
+            "Accept",
+            "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+        );
+    if let Some(tag) = etag.map(str::trim).filter(|t| !t.is_empty()) {
+        req = req.set("If-None-Match", tag);
+    }
+    match req.call() {
+        Ok(resp) => {
+            let etag = resp.header("etag").map(|v| v.to_string());
+            match resp.into_string() {
+                Ok(body) => RssFetch::Xml { body, etag },
+                Err(err) => RssFetch::Failed(err.to_string()),
+            }
+        }
+        Err(ureq::Error::Status(304, _)) => RssFetch::NotModified,
+        Err(ureq::Error::Status(429, resp)) => RssFetch::RateLimited {
+            retry_after_secs: resp
+                .header("retry-after")
+                .and_then(|v| v.parse().ok())
+                .filter(|n| *n > 0),
+        },
+        Err(ureq::Error::Status(403, _)) => RssFetch::Forbidden,
+        Err(err) => RssFetch::Failed(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::is_letterboxd_diary_rss;
+
+    #[test]
+    fn diary_rss_urls_only() {
+        assert!(is_letterboxd_diary_rss("https://letterboxd.com/ryan/rss/"));
+        assert!(is_letterboxd_diary_rss("https://letterboxd.com/ryan/rss"));
+        assert!(!is_letterboxd_diary_rss("https://letterboxd.com/film/heat/"));
+        assert!(!is_letterboxd_diary_rss("https://letterboxd.com/ryan/films/ratings/"));
+        assert!(!is_letterboxd_diary_rss("https://example.com/ryan/rss/"));
+    }
 }
 
 #[tauri::command]
@@ -130,7 +211,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let state = init_state(app.handle())?;
+            let job = state.job.clone();
+            let db_path = state.db_path.clone();
             app.manage(state);
+            crate::letterboxd::feeds::start_scheduler(app.handle().clone(), job, db_path);
 
             #[cfg(desktop)]
             {
@@ -170,6 +254,7 @@ pub fn run() {
             commands::import_get_diagnostics,
             commands::sync_self,
             commands::sync_friends,
+            commands::sync_feeds,
             commands::import_friend_usernames,
             commands::film_set_rating,
             commands::migrate_from_legacy,

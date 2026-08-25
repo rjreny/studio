@@ -317,7 +317,7 @@ impl Database {
             has_setup,
             coverage,
             last_rss_sync_at: self.get_meta("last_rss_sync_at")?,
-            rss_paused_until: self.get_meta("rss_paused_until")?,
+            rss_paused_until: self.get_meta("rss_backoff_until")?,
         })
     }
 

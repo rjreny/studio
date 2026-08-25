@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { DevUpdateButton } from "./app/shell/DevUpdateButton";
 import { NavTabs } from "./app/shell/NavTabs";
@@ -18,6 +18,7 @@ import {
   getSession,
   migrateFromLegacy,
   setSelfUsername,
+  syncFeeds,
   tmdbEnrich,
 } from "./platform/filmLibrary";
 import type { AppSession, HomeViewModel, JobProgress, LibraryCoverage } from "./platform/types/film";
@@ -51,6 +52,7 @@ export default function App() {
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [job, setJob] = useState<JobProgress | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const pendingLaunchEnrich = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -116,7 +118,18 @@ export default function App() {
           log("warn", "home load failed", err);
         }
 
-        void tmdbEnrich().catch((err) => log("warn", "poster enrich skipped", err));
+        void syncFeeds(false)
+          .then((started) => {
+            if (!started) {
+              void tmdbEnrich().catch((err) => log("warn", "poster enrich skipped", err));
+            } else {
+              pendingLaunchEnrich.current = true;
+            }
+          })
+          .catch((err) => {
+            log("warn", "diary rss sync skipped", err);
+            void tmdbEnrich().catch((enrichErr) => log("warn", "poster enrich skipped", enrichErr));
+          });
 
         setHydrated(true);
         log("info", "shell hydrated");
@@ -145,6 +158,16 @@ export default function App() {
       if (next.done || (next.current > 0 && next.current % 20 === 0)) {
         void refresh();
       }
+      if (next.done && next.job === "feeds") {
+        const added = next.feeds?.entriesAdded ?? 0;
+        if (pendingLaunchEnrich.current || added > 0) {
+          pendingLaunchEnrich.current = false;
+          void tmdbEnrich().catch((err) => log("warn", "poster enrich after diary sync skipped", err));
+        }
+      }
+      if (next.done && next.job === "sync") {
+        void tmdbEnrich().catch((err) => log("warn", "poster enrich after diary sync skipped", err));
+      }
       if (next.done && next.import) {
         void tmdbEnrich().catch((err) => log("warn", "poster enrich after import skipped", err));
       }
@@ -156,6 +179,7 @@ export default function App() {
 
   useEffect(() => {
     function onFocus() {
+      void syncFeeds(false).catch((err) => log("warn", "diary rss sync skipped", err));
       void refresh();
     }
     window.addEventListener("focus", onFocus);
@@ -279,6 +303,8 @@ export default function App() {
                     version={version}
                     username={username}
                     coverage={coverage}
+                    lastRssSyncAt={session?.lastRssSyncAt}
+                    rssPausedUntil={session?.rssPausedUntil}
                     onTheme={setTheme}
                     onAccent={setAccent}
                     onUsername={setUsername}

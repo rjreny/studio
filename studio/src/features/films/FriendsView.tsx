@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   getHome,
@@ -7,7 +8,7 @@ import {
   removeFriend,
   syncFriends,
 } from "../../platform/filmLibrary";
-import type { FriendActivityItem, FriendRow } from "../../platform/types/film";
+import type { FriendActivityItem, FriendRow, JobProgress } from "../../platform/types/film";
 import { Poster } from "./Poster";
 import { RatingDisplay } from "./RatingDisplay";
 
@@ -33,15 +34,29 @@ export function FriendsView({
     void load().catch(() => onStatus("Could not load friends"));
   }, [onStatus]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<JobProgress>("studio-job", (event) => {
+      if (event.payload.done && (event.payload.job === "feeds" || event.payload.job === "friends")) {
+        void load().catch(() => onStatus("Could not refresh friends"));
+        void onRefresh();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [onRefresh, onStatus]);
+
   async function addFriends() {
     if (!draft.trim()) return;
     setBusy(true);
     try {
       const added = await importFriendUsernames(draft);
       setDraft("");
+      await syncFriends();
       await load();
       await onRefresh();
-      onStatus(`Added ${added} friend${added === 1 ? "" : "s"}`);
+      onStatus(`Added ${added} friend${added === 1 ? "" : "s"} · refreshing their public diaries`);
     } finally {
       setBusy(false);
     }
@@ -81,7 +96,7 @@ export function FriendsView({
       <header className="page-head">
         <div>
           <h1>Friends</h1>
-          <p className="muted">Public Letterboxd diaries only</p>
+          <p className="muted">Public Letterboxd diaries — Studio refreshes these feeds on its own</p>
         </div>
         <button type="button" className="play-btn" disabled={busy} onClick={() => void refreshAll()}>
           Sync all

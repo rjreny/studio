@@ -63,6 +63,10 @@ export async function syncFriends(): Promise<void> {
   return invoke("sync_friends");
 }
 
+export async function syncFeeds(force = false): Promise<boolean> {
+  return invoke("sync_feeds", { force });
+}
+
 export async function importFriendUsernames(text: string): Promise<number> {
   return invoke("import_friend_usernames", { text });
 }
@@ -198,4 +202,11 @@ export function formatLibrarySummary(c: LibraryCoverage): string {
     parts.push(`RSS last ${c.rssWindowLimit}`);
   }
   return parts.join(" · ");
+}
+
+export function formatRssSyncAt(iso: string | null | undefined): string {
+  if (!iso) return "Not yet";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Not yet";
+  return date.toLocaleString();
 }
