@@ -7,6 +7,7 @@ mod migration;
 mod models;
 mod queries;
 mod storage;
+mod taste;
 #[cfg(windows)]
 mod windows_icon;
 
@@ -177,6 +178,12 @@ pub fn run() {
             commands::tmdb_has_key,
             commands::tmdb_key_status,
             commands::tmdb_enrich,
+            commands::taste_key_status,
+            commands::taste_set_key,
+            commands::taste_clear_key,
+            commands::taste_set_model,
+            commands::taste_get,
+            commands::taste_analyze,
             commands::list_friends,
             commands::update_preflight,
         ])

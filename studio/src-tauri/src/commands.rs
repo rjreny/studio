@@ -891,3 +891,89 @@ pub fn update_preflight(app: AppHandle) -> Result<UpdatePreflight, String> {
         }),
     }
 }
+
+#[tauri::command]
+pub fn taste_key_status(state: State<'_, AppState>) -> Result<crate::taste::TasteKeyStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::key_status(&db)
+}
+
+#[tauri::command]
+pub fn taste_set_key(
+    key: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<crate::taste::TasteKeyStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let status = crate::taste::store_api_key(&db, &key)?;
+    crate::app_log::write(
+        &app,
+        &format!(
+            "taste key save stored={} valid={:?} error={:?}",
+            status.stored, status.valid, status.last_error
+        ),
+    );
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn taste_clear_key(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<crate::taste::TasteKeyStatus, String> {
+    crate::taste::clear_api_key()?;
+    crate::app_log::write(&app, "taste key cleared");
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::key_status(&db)
+}
+
+#[tauri::command]
+pub fn taste_set_model(model: String, state: State<'_, AppState>) -> Result<crate::taste::TasteKeyStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::set_model(&db, &model)?;
+    crate::taste::key_status(&db)
+}
+
+#[tauri::command]
+pub fn taste_get(state: State<'_, AppState>) -> Result<crate::taste::TasteState, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::load_state(&db)
+}
+
+#[tauri::command]
+pub fn taste_analyze(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    crate::jobs::spawn_job(
+        app,
+        state.job.clone(),
+        state.db_path.clone(),
+        "taste",
+        move |app, db_path| {
+            crate::app_log::write(app, "taste analyze started");
+            let db = crate::jobs::open_worker_db(&db_path)?;
+            let app_for_progress = app.clone();
+            let report = crate::taste::analyze(&db, &mut |progress| {
+                let _ = app_for_progress.emit("studio-job", &progress);
+            })?;
+            crate::app_log::write(
+                app,
+                &format!(
+                    "taste analyze finished model={} picks={} rated={}",
+                    report.model,
+                    report.picks.len(),
+                    report.rated_count
+                ),
+            );
+            let _ = app.emit(
+                "studio-job",
+                JobProgress {
+                    job: "taste".into(),
+                    label: format!("Taste ready · {} picks", report.picks.len()),
+                    done: true,
+                    taste: Some(report),
+                    ..Default::default()
+                },
+            );
+            Ok(())
+        },
+    )
+}

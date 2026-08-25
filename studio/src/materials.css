@@ -1019,6 +1019,131 @@ html[data-theme="light"] .ghost {
   gap: 16px;
 }
 
+.taste-setup p,
+.taste-error,
+.recs .muted.pad {
+  max-width: 62ch;
+}
+
+.taste-error {
+  color: var(--danger);
+  margin: 0 0 var(--space-4);
+}
+
+.taste-setup {
+  padding: 20px;
+  max-width: 56ch;
+}
+
+.taste-setup h2,
+.taste-split h2,
+.recs .shelf-head h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.taste-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 var(--space-5);
+}
+
+.taste-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.taste-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 0 0 var(--space-5);
+}
+
+.taste-notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.taste-notes strong {
+  display: block;
+}
+
+.taste-notes span {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.taste-dims {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0 0 var(--space-5);
+}
+
+.taste-dims article {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.taste-dims h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.taste-dims p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.taste-pick {
+  display: flex;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 16px;
+}
+
+.taste-pick.is-static {
+  cursor: default;
+}
+
+.taste-pick:hover strong {
+  color: var(--accent);
+}
+
+.taste-rhyme {
+  font-size: 13px;
+}
+
+.recs .shelf-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -1102,7 +1227,9 @@ html[data-theme="light"] .ghost {
   .stats-split,
   .friends-layout,
   .settings-grid,
-  .stat-tiles {
+  .stat-tiles,
+  .taste-split,
+  .taste-dims {
     grid-template-columns: 1fr;
   }
 }

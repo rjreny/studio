@@ -287,11 +287,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .decade-bars div { height: 8px; background: var(--surface-hover); border-radius: 99px; overflow: hidden; }
 .decade-bars i { display: block; height: 100%; background: var(--accent); }
 .stats section, .recs, .friends, .films { min-height: 0; }
-.stats h2, .recs p { padding: 0 var(--space-4); }
+.stats h2 { padding: 0 var(--space-4); }
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); padding: var(--space-4); }
 .split ol { margin: var(--space-2) 0 0; padding-left: 18px; }
 .rec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
-.rec-list li { display: flex; gap: var(--space-3); }
+.rec-list li { display: block; }
 .rec-list p { padding: 0; margin: 6px 0 0; color: var(--text-muted); max-width: 62ch; }
 .rec-list .poster.is-large { width: 92px; height: 138px; }
 .friend-block { padding: 0 var(--space-4) var(--space-4); }

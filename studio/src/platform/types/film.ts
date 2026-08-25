@@ -59,6 +59,7 @@ export type JobProgress = {
   done: boolean;
   enrich?: EnrichReport | null;
   import?: ImportResult | null;
+  taste?: TasteReport | null;
 };
 
 export type LibraryItem = {
@@ -161,4 +162,67 @@ export type FriendRow = {
   username: string;
   lastSyncAt: string | null;
   lastSyncError: string | null;
+};
+
+export type TasteKeyStatus = {
+  stored: boolean;
+  valid: boolean | null;
+  lastError: string | null;
+  model: string;
+};
+
+export type TasteAffinity = {
+  label: string;
+  evidence: string;
+};
+
+export type TasteDimension = {
+  name: string;
+  take: string;
+};
+
+export type TastePick = {
+  title: string;
+  year: number | null;
+  poster: string | null;
+  why: string;
+  rhymesWith: string[];
+  filmId: string | null;
+  tmdbId: number | null;
+  source: string;
+};
+
+export type TasteStat = {
+  label: string;
+  count: number;
+  avg: number;
+};
+
+export type TasteSnapshot = {
+  ratedCount: number;
+  lovedCount: number;
+  hatedCount: number;
+  avgRating: number | null;
+  genres: TasteStat[];
+  decades: TasteStat[];
+  directors: TasteStat[];
+  actors: TasteStat[];
+};
+
+export type TasteReport = {
+  title: string;
+  summary: string;
+  affinities: TasteAffinity[];
+  aversions: TasteAffinity[];
+  dimensions: TasteDimension[];
+  picks: TastePick[];
+  model: string;
+  generatedAt: string;
+  ratedCount: number;
+};
+
+export type TasteState = {
+  key: TasteKeyStatus;
+  snapshot: TasteSnapshot;
+  report: TasteReport | null;
 };

@@ -10,6 +10,8 @@ import type {
   LibraryCoverage,
   LibraryPage,
   LibraryQuery,
+  TasteKeyStatus,
+  TasteState,
   TmdbKeyStatus,
 } from "./types/film";
 
@@ -104,6 +106,30 @@ export async function tmdbKeyStatus(): Promise<TmdbKeyStatus> {
 
 export async function tmdbEnrich(): Promise<void> {
   return invoke("tmdb_enrich");
+}
+
+export async function tasteKeyStatus(): Promise<TasteKeyStatus> {
+  return invoke("taste_key_status");
+}
+
+export async function tasteSetKey(key: string): Promise<TasteKeyStatus> {
+  return invoke("taste_set_key", { key });
+}
+
+export async function tasteClearKey(): Promise<TasteKeyStatus> {
+  return invoke("taste_clear_key");
+}
+
+export async function tasteSetModel(model: string): Promise<TasteKeyStatus> {
+  return invoke("taste_set_model", { model });
+}
+
+export async function tasteGet(): Promise<TasteState> {
+  return invoke("taste_get");
+}
+
+export async function tasteAnalyze(): Promise<void> {
+  return invoke("taste_analyze");
 }
 
 export function formatEnrich(r: EnrichReport): string {

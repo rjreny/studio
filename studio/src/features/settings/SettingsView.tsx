@@ -14,8 +14,12 @@ import {
   tmdbEnrich,
   tmdbKeyStatus,
   tmdbSetKey,
+  tasteClearKey,
+  tasteKeyStatus,
+  tasteSetKey,
+  tasteSetModel,
 } from "../../platform/filmLibrary";
-import type { EnrichReport, ImportResult, InstallInfo, JobProgress, LibraryCoverage, TmdbKeyStatus } from "../../platform/types/film";
+import type { EnrichReport, ImportResult, InstallInfo, JobProgress, LibraryCoverage, TasteKeyStatus, TmdbKeyStatus } from "../../platform/types/film";
 import {
   getInstallInfo,
   installKindLabel,
@@ -69,9 +73,12 @@ export function SettingsView({
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>(idleProgress);
   const [keyStatus, setKeyStatus] = useState<TmdbKeyStatus | null>(null);
+  const [tasteStatus, setTasteStatus] = useState<TasteKeyStatus | null>(null);
   const [replacing, setReplacing] = useState(false);
+  const [tasteReplacing, setTasteReplacing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [keyInput, setKeyInput] = useState("");
+  const [tasteKeyInput, setTasteKeyInput] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [installInfo, setInstallInfo] = useState<InstallInfo | null>(null);
   const [lastImport, setLastImport] = useState<ImportResult | null>(null);
@@ -82,6 +89,11 @@ export function SettingsView({
       try {
         const status = await tmdbKeyStatus();
         setKeyStatus(status);
+      } catch {
+        /* dev without tauri */
+      }
+      try {
+        setTasteStatus(await tasteKeyStatus());
       } catch {
         /* dev without tauri */
       }
@@ -200,7 +212,37 @@ export function SettingsView({
     }
   }
 
+  async function saveTasteKey() {
+    if (!tasteKeyInput.trim()) return;
+    try {
+      setBusy(true);
+      const status = await tasteSetKey(tasteKeyInput.trim());
+      setTasteStatus(status);
+      setTasteKeyInput("");
+      if (status.valid !== true || !status.stored) {
+        onStatus(status.lastError ?? "OpenRouter did not accept this key");
+        return;
+      }
+      setTasteReplacing(false);
+      onStatus("OpenRouter key saved. Taste is ready.");
+    } catch (err) {
+      log("error", "taste key save failed", err);
+      onStatus("Could not store OpenRouter key");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pickTasteModel(model: string) {
+    try {
+      setTasteStatus(await tasteSetModel(model));
+    } catch (err) {
+      log("warn", "taste model save failed", err);
+    }
+  }
+
   const keyConnected = Boolean(keyStatus?.stored && keyStatus.valid === true && !replacing);
+  const tasteConnected = Boolean(tasteStatus?.stored && tasteStatus.valid !== false && !tasteReplacing);
 
   async function confirmResetData() {
     const ok = await ask(
@@ -306,6 +348,83 @@ export function SettingsView({
             </button>
           </div>
           {lastEnrich ? <p className="hint">{formatEnrich(lastEnrich)}</p> : null}
+        </section>
+
+        <section className="settings-group solid-card">
+          <h2>Taste agent</h2>
+          <p className="hint">
+            Pay-as-you-go via{" "}
+            <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">
+              OpenRouter
+            </a>
+            . DeepSeek is cheap and strong at this. Kimi K3 is sharper and costs more per run.
+          </p>
+          <div className="field">
+            <span className="field-label">Model</span>
+            <div className="seg">
+              {([
+                ["deepseek", "DeepSeek"],
+                ["kimi-k3", "Kimi K3"],
+              ] as const).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={tasteStatus?.model === id ? "is-on" : ""}
+                  onClick={() => void pickTasteModel(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="settings-openrouter">OpenRouter API key</label>
+            {tasteConnected ? (
+              <p className="key-status is-ok">Saved in Windows Credential Manager</p>
+            ) : (
+              <input
+                id="settings-openrouter"
+                value={tasteKeyInput}
+                onChange={(e) => setTasteKeyInput(e.target.value)}
+                placeholder={tasteStatus?.stored ? "Paste a replacement key" : "sk-or-... from openrouter.ai/keys"}
+                spellCheck={false}
+                disabled={busy}
+              />
+            )}
+          </div>
+          {tasteStatus?.stored && tasteStatus.valid === false ? (
+            <p className="key-status is-bad">{tasteStatus.lastError ?? "OpenRouter rejected this key."}</p>
+          ) : null}
+          <div className="field-row">
+            {!tasteConnected ? (
+              <button
+                type="button"
+                className="ghost-pill"
+                disabled={busy || !tasteKeyInput.trim()}
+                onClick={() => void saveTasteKey()}
+              >
+                Save key
+              </button>
+            ) : (
+              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setTasteReplacing(true)}>
+                Replace key
+              </button>
+            )}
+            <button
+              type="button"
+              className="ghost-pill"
+              disabled={busy || !tasteStatus?.stored}
+              onClick={() =>
+                void tasteClearKey().then((status) => {
+                  setTasteStatus(status);
+                  setTasteReplacing(false);
+                  onStatus("OpenRouter key removed");
+                })
+              }
+            >
+              Remove key
+            </button>
+          </div>
         </section>
 
         <section className="settings-group solid-card">

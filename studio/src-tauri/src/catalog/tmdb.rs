@@ -162,6 +162,43 @@ struct TmdbSearchResult {
     id: i64,
     title: String,
     release_date: Option<String>,
+    poster_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MovieLookup {
+    pub tmdb_id: i64,
+    #[allow(dead_code)]
+    pub title: String,
+    pub year: Option<i32>,
+    pub poster: Option<String>,
+}
+
+pub fn lookup_movie(title: &str, year: Option<i32>) -> Result<Option<MovieLookup>, String> {
+    let Some(api_key) = get_api_key()? else {
+        return Ok(None);
+    };
+    let normalized = normalize_title(title);
+    let mut parsed = search_movies(&api_key, title, year)?;
+    if pick_search_match(&parsed.results, &normalized, year).is_none() && year.is_some() {
+        parsed = search_movies(&api_key, title, None)?;
+    }
+    let hit = pick_search_match(&parsed.results, &normalized, year).or_else(|| {
+        parsed
+            .results
+            .iter()
+            .find(|r| match year {
+                Some(y) => release_year(r) == Some(y),
+                None => true,
+            })
+            .or_else(|| parsed.results.first())
+    });
+    Ok(hit.map(|r| MovieLookup {
+        tmdb_id: r.id,
+        title: r.title.clone(),
+        year: release_year(r),
+        poster: poster_url(r.poster_path.clone()),
+    }))
 }
 
 pub fn enrich_catalog(db: &Database) -> Result<EnrichReport, String> {

@@ -11,7 +11,7 @@ import { HomeView } from "./features/films/HomeView";
 import { RecsView } from "./features/films/RecsView";
 import { StatsView } from "./features/films/StatsView";
 import { SettingsView } from "./features/settings/SettingsView";
-import { emptyLibrary, resolveTheme, type Accent, type Library, type Route, type Theme } from "./core/types";
+import { resolveTheme, type Accent, type Library, type Route, type Theme } from "./core/types";
 import { appVersion } from "./platform/app";
 import {
   getHome,
@@ -47,7 +47,6 @@ export default function App() {
   const [palette, setPalette] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [selectedFilmId, setSelectedFilmId] = useState<string | null>(null);
-  const [legacyLibrary, setLegacyLibrary] = useState<Library>(emptyLibrary);
   const [session, setSession] = useState<AppSession | null>(null);
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [job, setJob] = useState<JobProgress | null>(null);
@@ -85,7 +84,6 @@ export default function App() {
         if (r && NAV.some((n) => n.id === r)) setRoute(r);
         if (t) setTheme(t);
         if (a) setAccent(a);
-        if (lib) setLegacyLibrary({ ...emptyLibrary(), ...lib });
         setVersion(v);
 
         if (lib && !migrated && (lib.films?.length || lib.username)) {
@@ -271,7 +269,9 @@ export default function App() {
                   <FriendsView onStatus={setStatus} onRefresh={refresh} />
                 ) : null}
                 {route === "stats" ? <StatsView /> : null}
-                {route === "recs" ? <RecsView library={legacyLibrary} /> : null}
+                {route === "recs" ? (
+                  <RecsView onSelectFilm={setSelectedFilmId} onOpenSettings={() => setRoute("settings")} />
+                ) : null}
                 {route === "settings" ? (
                   <SettingsView
                     theme={theme}

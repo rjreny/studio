@@ -75,6 +75,8 @@ pub struct JobProgress {
     pub enrich: Option<EnrichReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import: Option<ImportResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taste: Option<crate::taste::TasteReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
