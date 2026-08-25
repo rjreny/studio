@@ -834,26 +834,16 @@ pub fn taste_analyze(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
             crate::app_log::write(app, "taste analyze started");
             let db = crate::jobs::open_worker_db(&db_path)?;
             let app_for_progress = app.clone();
-            let run_dir = app
-                .path()
-                .app_data_dir()
-                .ok()
-                .map(|p| p.join("taste-runs"));
-            let report = crate::taste::analyze_with_run_log(
-                &db,
-                &mut |progress| {
-                    let _ = app_for_progress.emit("studio-job", &progress);
-                },
-                run_dir.as_deref(),
-            )?;
+            let report = crate::taste::analyze(&db, &mut |progress| {
+                let _ = app_for_progress.emit("studio-job", &progress);
+            })?;
             crate::app_log::write(
                 app,
                 &format!(
-                    "taste analyze finished model={} picks={} rated={} log={}",
+                    "taste analyze finished model={} picks={} rated={}",
                     report.model,
                     report.picks.len(),
-                    report.rated_count,
-                    report.run_log_path.as_deref().unwrap_or("-")
+                    report.rated_count
                 ),
             );
             let _ = app.emit(
