@@ -367,13 +367,14 @@ export function SettingsView({
             <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">
               OpenRouter
             </a>
-            . Qwen Flash is the cheap default. You can also pick the model on the Taste tab.
+            . Llama 3.3 70B is the cheap default from models your OpenRouter privacy settings
+            actually allow. You can also pick the model on the Taste tab.
           </p>
           <div className="field">
             <span className="field-label">Model</span>
             <TasteModelList
               models={tasteStatus?.models ?? []}
-              selected={tasteStatus?.model ?? "qwen"}
+              selected={tasteStatus?.model ?? "llama"}
               disabled={busy}
               onPick={(id) => void pickTasteModel(id)}
             />

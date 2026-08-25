@@ -34,11 +34,8 @@ function pickId(pick: TastePick) {
   return pick.filmId || (pick.tmdbId ? `tmdb:${pick.tmdbId}` : null);
 }
 
-function waitHint(model: string | undefined) {
-  if (model === "kimi-k3") {
-    return "Kimi K3 thinks slowly. Several minutes is normal. If Windows times out, Taste retries once with Qwen Flash.";
-  }
-  return "Flash models usually finish in under a minute.";
+function waitHint(_model: string | undefined) {
+  return "Usually under a minute. If OpenRouter blocks a model, Taste retries without web search, then with Llama 3.3 or DeepSeek V3.";
 }
 
 export function RecsView({
@@ -190,8 +187,8 @@ export function RecsView({
         <section className="solid-card taste-setup">
           <h2>Pay as you go</h2>
           <p>
-            Taste uses OpenRouter. Qwen Flash is the cheap default with a million-token window.
-            Add a few dollars of credit, paste the key in Settings, then come back.
+            Taste uses OpenRouter. Llama 3.3 70B is the cheap default from models your key can
+            actually reach. Add a few dollars of credit, paste the key in Settings, then come back.
           </p>
           <button type="button" className="primary" onClick={onOpenSettings}>
             Open Settings
@@ -208,7 +205,7 @@ export function RecsView({
           <h2>How it reads</h2>
           <TasteModelList
             models={models}
-            selected={key?.model ?? "qwen"}
+            selected={key?.model ?? "llama"}
             disabled={running}
             onPick={(id) => void pickModel(id)}
           />

@@ -17,10 +17,10 @@ const META_WEB: &str = "taste_web";
 const OPENROUTER_CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY: &str = "https://openrouter.ai/api/v1/key";
 
-const MODEL_QWEN: &str = "qwen";
-const MODEL_GEMINI: &str = "gemini";
+const MODEL_LLAMA: &str = "llama";
 const MODEL_DEEPSEEK: &str = "deepseek";
-const MODEL_KIMI: &str = "kimi-k3";
+const MODEL_QWEN: &str = "qwen";
+const MODEL_NEMO: &str = "nemo";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,15 +153,15 @@ struct Budget {
 }
 
 fn budget_for(model: &str) -> Budget {
-    if model == MODEL_KIMI {
+    if tight_window(model) {
         Budget {
-            really_liked: 220,
-            liked: 80,
-            hated: 80,
-            candidates: 64,
-            watchlist: 20,
-            overview_chars: 140,
-            max_chars: 240_000,
+            really_liked: 70,
+            liked: 36,
+            hated: 36,
+            candidates: 36,
+            watchlist: 10,
+            overview_chars: 80,
+            max_chars: 68_000,
         }
     } else {
         Budget {
@@ -171,9 +171,13 @@ fn budget_for(model: &str) -> Budget {
             candidates: 56,
             watchlist: 18,
             overview_chars: 120,
-            max_chars: 200_000,
+            max_chars: 180_000,
         }
     }
+}
+
+fn tight_window(model: &str) -> bool {
+    model == MODEL_DEEPSEEK || model == MODEL_QWEN
 }
 
 fn estimate_tokens(payload: &Value) -> usize {
@@ -187,7 +191,7 @@ struct Corpus {
 }
 
 pub fn default_model() -> String {
-    MODEL_QWEN.to_string()
+    MODEL_LLAMA.to_string()
 }
 
 pub fn normalize_model(raw: &str) -> String {
@@ -195,77 +199,84 @@ pub fn normalize_model(raw: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace([' ', '_'], "-");
-    if compact.contains("kimi") || compact == "k3" {
-        MODEL_KIMI.into()
-    } else if compact.contains("gemini") {
-        MODEL_GEMINI.into()
-    } else if compact.contains("deepseek") {
+    if compact.contains("deepseek") {
         MODEL_DEEPSEEK.into()
-    } else if compact.contains("qwen") || compact.is_empty() {
+    } else if compact.contains("qwen") {
         MODEL_QWEN.into()
-    } else if compact == MODEL_GEMINI || compact == MODEL_DEEPSEEK || compact == MODEL_KIMI {
-        compact
+    } else if compact.contains("nemo") || compact.contains("mistral") {
+        MODEL_NEMO.into()
+    } else if compact.contains("llama")
+        || compact.contains("gemini")
+        || compact.contains("kimi")
+        || compact == "k3"
+        || compact.is_empty()
+    {
+        MODEL_LLAMA.into()
     } else {
-        MODEL_QWEN.into()
+        MODEL_LLAMA.into()
     }
 }
 
 fn openrouter_model_id(model: &str) -> &'static str {
     match model {
-        MODEL_KIMI => "moonshotai/kimi-k3",
-        MODEL_GEMINI => "google/gemini-3.7-flash",
-        MODEL_DEEPSEEK => "deepseek/deepseek-v4-flash",
-        _ => "qwen/qwen3.7-flash",
+        MODEL_DEEPSEEK => "deepseek/deepseek-chat",
+        MODEL_QWEN => "qwen/qwen-2.5-72b-instruct",
+        MODEL_NEMO => "mistralai/mistral-nemo",
+        _ => "meta-llama/llama-3.3-70b-instruct",
     }
 }
 
 fn model_label(model: &str) -> &'static str {
     match model {
-        MODEL_KIMI => "Kimi K3",
-        MODEL_GEMINI => "Gemini Flash",
-        MODEL_DEEPSEEK => "DeepSeek V4 Flash",
-        _ => "Qwen Flash",
+        MODEL_DEEPSEEK => "DeepSeek V3",
+        MODEL_QWEN => "Qwen2.5 72B",
+        MODEL_NEMO => "Mistral Nemo",
+        _ => "Llama 3.3 70B",
     }
 }
 
 pub fn model_catalog() -> Vec<TasteModelInfo> {
     vec![
         TasteModelInfo {
-            id: MODEL_QWEN.into(),
-            label: "Qwen Flash".into(),
-            blurb: "Cheapest 1M-context reader. Best stretch of $10.".into(),
-            context: "1M".into(),
-            cost: "cheapest".into(),
-        },
-        TasteModelInfo {
-            id: MODEL_GEMINI.into(),
-            label: "Gemini Flash".into(),
-            blurb: "Stronger reasoning, still cheap, same huge window.".into(),
-            context: "1M".into(),
+            id: MODEL_LLAMA.into(),
+            label: "Llama 3.3 70B".into(),
+            blurb: "Best fit from your OpenRouter list. 128k context, cheap, solid reasoning.".into(),
+            context: "128k".into(),
             cost: "cheap".into(),
         },
         TasteModelInfo {
             id: MODEL_DEEPSEEK.into(),
-            label: "DeepSeek V4 Flash".into(),
-            blurb: "Fast 1M reader if you already like DeepSeek.".into(),
-            context: "1M".into(),
+            label: "DeepSeek V3".into(),
+            blurb: "Strongest reader on the list. Some hosts cap it near 32k, so the log is packed tighter.".into(),
+            context: "32–164k".into(),
             cost: "cheap".into(),
         },
         TasteModelInfo {
-            id: MODEL_KIMI.into(),
-            label: "Kimi K3".into(),
-            blurb: "Sharpest take. Slow and expensive. Several minutes is normal.".into(),
-            context: "1M".into(),
-            cost: "expensive".into(),
+            id: MODEL_NEMO.into(),
+            label: "Mistral Nemo".into(),
+            blurb: "Cheapest 128k stretch of $10. Weaker taste take than the 70B models.".into(),
+            context: "128k".into(),
+            cost: "cheapest".into(),
+        },
+        TasteModelInfo {
+            id: MODEL_QWEN.into(),
+            label: "Qwen2.5 72B".into(),
+            blurb: "The Qwen your key can actually reach. Costs more than Llama 3.3.".into(),
+            context: "32k".into(),
+            cost: "mid".into(),
         },
     ]
 }
 
-fn request_timeout(model: &str) -> Duration {
-    match model {
-        MODEL_KIMI => Duration::from_secs(360),
-        MODEL_GEMINI => Duration::from_secs(180),
-        _ => Duration::from_secs(120),
+fn request_timeout(_model: &str) -> Duration {
+    Duration::from_secs(150)
+}
+
+fn fallback_model(model: &str) -> &'static str {
+    if model == MODEL_LLAMA {
+        MODEL_DEEPSEEK
+    } else {
+        MODEL_LLAMA
     }
 }
 
@@ -440,7 +451,7 @@ pub fn analyze(
     progress: &mut dyn FnMut(JobProgress),
 ) -> Result<TasteReport, String> {
     let key = get_api_key()?.ok_or_else(|| {
-        "Add an OpenRouter key in Settings. Qwen Flash is the cheap default."
+        "Add an OpenRouter key in Settings. Llama 3.3 70B is the cheap default."
             .to_string()
     })?;
     let model = stored_model(db)?;
@@ -472,29 +483,42 @@ pub fn analyze(
         ..Default::default()
     });
     let mut used_model = model.clone();
-    let mut used_web = web;
+    let mut used_web = false;
     let mut note = None;
     let raw = match chat_complete(&key, &model, &corpus.payload, web) {
-        Ok(raw) => raw,
-        Err(err) if should_fallback(&model, &err) => {
+        Ok((raw, actually_web)) => {
+            used_web = actually_web;
+            if web && !actually_web {
+                note = Some(format!(
+                    "Web search was blocked for {}. Ran without it.",
+                    model_label(&model)
+                ));
+            }
+            raw
+        }
+        Err(err) if should_fallback(&err) => {
+            let next = fallback_model(&model);
             progress(JobProgress {
                 job: "taste".into(),
                 label: format!(
-                    "{} stalled. Retrying with Qwen Flash, no web search…",
-                    model_label(&model)
+                    "{} was blocked or stalled. Retrying with {}, no web search…",
+                    model_label(&model),
+                    model_label(next)
                 ),
                 current: 2,
                 total: 3,
                 ..Default::default()
             });
-            used_model = MODEL_QWEN.to_string();
+            used_model = next.to_string();
             used_web = false;
             note = Some(format!(
-                "Fell back to Qwen Flash after {} timed out or failed.",
+                "Fell back to {} after {} was blocked or stalled.",
+                model_label(next),
                 model_label(&model)
             ));
-            chat_complete(&key, MODEL_QWEN, &corpus.payload, false)
-                .map_err(|e| friendly_err(&e, MODEL_QWEN))?
+            chat_complete(&key, next, &corpus.payload, false)
+                .map(|(raw, _)| raw)
+                .map_err(|e| friendly_err(&e, next))?
         }
         Err(err) => return Err(friendly_err(&err, &model)),
     };
@@ -524,10 +548,12 @@ pub fn analyze(
     Ok(report)
 }
 
-fn chat_complete(key: &str, model: &str, payload: &Value, web: bool) -> Result<String, String> {
+fn chat_complete(key: &str, model: &str, payload: &Value, web: bool) -> Result<(String, bool), String> {
     match send_chat(key, model, payload, web) {
-        Ok(raw) => Ok(raw),
-        Err(err) if web && tools_unsupported(&err) => send_chat(key, model, payload, false),
+        Ok(raw) => Ok((raw, web)),
+        Err(err) if web && (tools_unsupported(&err) || is_guardrail(&err)) => {
+            send_chat(key, model, payload, false).map(|raw| (raw, false))
+        }
         Err(err) => Err(err),
     }
 }
@@ -636,6 +662,13 @@ fn is_timeout_error(err: &str) -> bool {
         || lower.contains("time out")
 }
 
+fn is_guardrail(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("no endpoints")
+        || lower.contains("guardrail")
+        || lower.contains("data policy")
+}
+
 fn tools_unsupported(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("does not support")
@@ -644,25 +677,27 @@ fn tools_unsupported(err: &str) -> bool {
         || lower.contains("unknown tool")
 }
 
-fn should_fallback(model: &str, err: &str) -> bool {
-    if model == MODEL_QWEN {
-        return false;
-    }
+fn should_fallback(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     is_timeout_error(err)
-        || lower.contains("10060")
+        || is_guardrail(err)
         || lower.contains("502")
         || lower.contains("503")
         || lower.contains("524")
-        || lower.contains("no endpoints")
         || lower.contains("connection reset")
         || lower.contains("failed to connect")
 }
 
 fn friendly_err(err: &str, model: &str) -> String {
+    if is_guardrail(err) {
+        return format!(
+            "{} has no OpenRouter endpoint that matches your privacy settings. Taste retries without web search, then with another model from your list. To allow more models, open openrouter.ai/settings/privacy",
+            model_label(model)
+        );
+    }
     if is_timeout_error(err) {
         return format!(
-            "{} did not finish in time. Flash models usually return in under a minute. Kimi K3 can take several minutes. Taste will retry with Qwen Flash when it can; otherwise pick a Flash model and try again.",
+            "{} did not finish in time. Taste will retry with another model from your list.",
             model_label(model)
         );
     }
@@ -1544,8 +1579,8 @@ mod tests {
         let corpus = build_corpus(&db, MODEL_DEEPSEEK).unwrap();
         assert_eq!(corpus.snapshot.rated_count, 180);
         assert!(corpus.payload.get("seen").is_none());
-        assert!(corpus.payload["reallyLiked"].as_array().unwrap().len() <= 180);
-        assert!(estimate_tokens(&corpus.payload) < 80_000);
+        assert!(corpus.payload["reallyLiked"].as_array().unwrap().len() <= 70);
+        assert!(estimate_tokens(&corpus.payload) < 28_000);
     }
 
     #[test]
@@ -1557,25 +1592,32 @@ mod tests {
 
     #[test]
     fn model_ids_map() {
-        assert_eq!(default_model(), MODEL_QWEN);
-        assert_eq!(normalize_model("Kimi K3"), MODEL_KIMI);
-        assert_eq!(normalize_model("Gemini Flash"), MODEL_GEMINI);
+        assert_eq!(default_model(), MODEL_LLAMA);
+        assert_eq!(normalize_model("Kimi K3"), MODEL_LLAMA);
+        assert_eq!(normalize_model("Gemini Flash"), MODEL_LLAMA);
         assert_eq!(normalize_model("deepseek"), MODEL_DEEPSEEK);
-        assert_eq!(openrouter_model_id(MODEL_KIMI), "moonshotai/kimi-k3");
-        assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-v4-flash");
-        assert_eq!(openrouter_model_id(MODEL_QWEN), "qwen/qwen3.7-flash");
-        assert_eq!(openrouter_model_id(MODEL_GEMINI), "google/gemini-3.7-flash");
+        assert_eq!(normalize_model("Qwen2.5 72B"), MODEL_QWEN);
+        assert_eq!(openrouter_model_id(MODEL_LLAMA), "meta-llama/llama-3.3-70b-instruct");
+        assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-chat");
+        assert_eq!(openrouter_model_id(MODEL_QWEN), "qwen/qwen-2.5-72b-instruct");
+        assert_eq!(openrouter_model_id(MODEL_NEMO), "mistralai/mistral-nemo");
         assert_eq!(model_catalog().len(), 4);
     }
 
     #[test]
-    fn timeout_errors_are_rewritten_and_fall_back() {
-        let raw = "A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)";
-        assert!(is_timeout_error(raw));
-        assert!(should_fallback(MODEL_KIMI, raw));
-        assert!(!should_fallback(MODEL_QWEN, raw));
-        let msg = friendly_err(raw, MODEL_KIMI);
-        assert!(msg.contains("Kimi K3"));
-        assert!(!msg.contains("10060"));
+    fn timeout_and_guardrail_errors_are_rewritten() {
+        let timeout = "A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)";
+        assert!(is_timeout_error(timeout));
+        assert!(should_fallback(timeout));
+        let timeout_msg = friendly_err(timeout, MODEL_LLAMA);
+        assert!(timeout_msg.contains("Llama 3.3"));
+        assert!(!timeout_msg.contains("10060"));
+
+        let guard = "No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy";
+        assert!(is_guardrail(guard));
+        assert!(should_fallback(guard));
+        let guard_msg = friendly_err(guard, MODEL_QWEN);
+        assert!(guard_msg.contains("privacy"));
+        assert!(guard_msg.contains("Qwen2.5"));
     }
 }
