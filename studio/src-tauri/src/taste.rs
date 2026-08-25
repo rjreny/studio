@@ -483,7 +483,7 @@ pub fn analyze(
         ..Default::default()
     });
     let mut used_model = model.clone();
-    let mut used_web = false;
+    let mut used_web;
     let mut note = None;
     let raw = match chat_complete(&key, &model, &corpus.payload, web) {
         Ok((raw, actually_web)) => {
@@ -522,7 +522,40 @@ pub fn analyze(
         }
         Err(err) => return Err(friendly_err(&err, &model)),
     };
-    let parsed = parse_model_report(&raw)?;
+    let parsed = match parse_model_report(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let next = fallback_model(&used_model);
+            progress(JobProgress {
+                job: "taste".into(),
+                label: format!(
+                    "{} returned broken JSON. Asking {} for a clean copy…",
+                    model_label(&used_model),
+                    model_label(next)
+                ),
+                current: 2,
+                total: 3,
+                ..Default::default()
+            });
+            let (raw2, _) = chat_complete(&key, next, &corpus.payload, false)
+                .map_err(|e| friendly_err(&e, next))?;
+            used_model = next.to_string();
+            used_web = false;
+            note = Some(format!(
+                "Retried with {} after the first model returned invalid JSON.",
+                model_label(next)
+            ));
+            parse_model_report(&raw2).map_err(|e| {
+                format!(
+                    "{} wrote invalid JSON ({e}). Try Llama 3.3 70B with web search off.",
+                    model_label(next)
+                )
+            })?
+        }
+    };
+    if parsed.title.trim().is_empty() && parsed.picks.is_empty() {
+        return Err("Model returned empty taste JSON. Try Llama 3.3 70B with web search off.".into());
+    }
     progress(JobProgress {
         job: "taste".into(),
         label: "Matching posters…".into(),
@@ -532,7 +565,11 @@ pub fn analyze(
     });
     let picks = hydrate_picks(db, parsed.picks, &corpus.seen)?;
     let report = TasteReport {
-        title: parsed.title,
+        title: if parsed.title.trim().is_empty() {
+            "Taste".into()
+        } else {
+            parsed.title
+        },
         summary: parsed.summary,
         affinities: parsed.affinities,
         aversions: parsed.aversions,
@@ -568,7 +605,7 @@ fn send_chat(key: &str, model: &str, payload: &Value, web: bool) -> Result<Strin
     let mut body = json!({
         "model": openrouter_model_id(model),
         "temperature": 0.35,
-        "max_tokens": 2200,
+        "max_tokens": 6000,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": payload.to_string() }
@@ -736,11 +773,14 @@ Rules:
 - Never recommend a title that appears in reallyLiked, liked, or disliked.
 - 12 picks. Each why must name at least one film they rated.
 - Be concrete. No marketing language. No em dashes.
+- Raw JSON object only. No markdown, no trailing commas, no commentary before or after.
 "#;
 
 #[derive(Deserialize)]
 struct ModelReport {
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     summary: String,
     #[serde(default)]
     affinities: Vec<TasteAffinity>,
@@ -771,20 +811,155 @@ fn parse_model_report(raw: &str) -> Result<ModelReport, String> {
 }
 
 pub fn extract_json(raw: &str) -> Result<Value, String> {
+    let cleaned = strip_think(&strip_fences(raw));
+    let object = first_object(&cleaned).ok_or_else(|| "Model did not return JSON".to_string())?;
+    for candidate in [
+        object.clone(),
+        strip_trailing_commas(&object),
+        close_truncated(&strip_trailing_commas(&object)),
+    ] {
+        if let Ok(v) = serde_json::from_str::<Value>(&candidate) {
+            if v.is_object() {
+                return Ok(v);
+            }
+        }
+    }
+    Err("Model did not return JSON".into())
+}
+
+fn strip_fences(raw: &str) -> String {
     let trimmed = raw.trim();
-    let unfenced = if let Some(rest) = trimmed.strip_prefix("```json") {
-        rest.trim_start().trim_end_matches('`').trim()
+    let inner = if let Some(rest) = trimmed.strip_prefix("```json") {
+        rest
     } else if let Some(rest) = trimmed.strip_prefix("```") {
-        rest.trim_start().trim_end_matches('`').trim()
+        rest
+    } else if let Some(start) = trimmed.find("```json") {
+        &trimmed[start + 7..]
     } else {
         trimmed
     };
-    if let Ok(v) = serde_json::from_str::<Value>(unfenced) {
-        return Ok(v);
+    inner.trim().trim_end_matches('`').trim().into()
+}
+
+fn strip_think(raw: &str) -> String {
+    let mut s = raw.replace(['\u{201c}', '\u{201d}'], "\"");
+    if let Some(end) = s.find("</think>") {
+        s = s[end + 8..].to_string();
     }
-    let start = unfenced.find('{').ok_or("Model did not return JSON")?;
-    let end = unfenced.rfind('}').ok_or("Model did not return JSON")?;
-    serde_json::from_str(&unfenced[start..=end]).map_err(|e| e.to_string())
+    s
+}
+
+fn first_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut out = String::new();
+    for c in s[start..].chars() {
+        out.push(c);
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+fn strip_trailing_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn close_truncated(s: &str) -> String {
+    let mut out = s.trim_end().to_string();
+    if out.ends_with(',') {
+        out.pop();
+    }
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in out.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if in_string {
+        out.push('"');
+    }
+    while let Some(closer) = stack.pop() {
+        out.push(closer);
+    }
+    out
 }
 
 fn hydrate_picks(
@@ -1588,6 +1763,22 @@ mod tests {
         let raw = "```json\n{\"title\":\"Night owl\",\"summary\":\"x\",\"picks\":[]}\n```";
         let v = extract_json(raw).unwrap();
         assert_eq!(v["title"], "Night owl");
+    }
+
+    #[test]
+    fn extract_json_repairs_trailing_commas_and_prose() {
+        let raw = "Sure.\n{\"title\":\"Night owl\",\"picks\":[{\"title\":\"Heat\",}],}\nThanks";
+        let v = extract_json(raw).unwrap();
+        assert_eq!(v["title"], "Night owl");
+        assert_eq!(v["picks"][0]["title"], "Heat");
+    }
+
+    #[test]
+    fn extract_json_closes_truncated_objects() {
+        let raw = r#"{"title":"Night owl","summary":"x","picks":[{"title":"Heat""#;
+        let v = extract_json(raw).unwrap();
+        assert_eq!(v["title"], "Night owl");
+        assert_eq!(v["picks"][0]["title"], "Heat");
     }
 
     #[test]
