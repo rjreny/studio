@@ -25,6 +25,7 @@ pub fn hard_validate(
     shortlist: &[ScoredCandidate],
     discoveries: &[ScoredCandidate],
     seen: &HashSet<String>,
+    profile_mode_count: usize,
 ) -> ValidationResult {
     let mut allowed: HashMap<String, &ScoredCandidate> = HashMap::new();
     for c in shortlist.iter().chain(discoveries.iter()) {
@@ -118,7 +119,7 @@ pub fn hard_validate(
     }
 
     let warnings = diversity_warnings(&kept);
-    let narrow = is_narrow(&kept);
+    let narrow = profile_mode_count <= 2 || is_narrow(&kept);
     ValidationResult {
         picks: kept,
         dropped,
@@ -130,12 +131,16 @@ pub fn hard_validate(
 pub fn diversity_warnings(picks: &[ScoredCandidate]) -> Vec<DiversityWarning> {
     let mut dirs: HashMap<String, u32> = HashMap::new();
     let mut genres: HashMap<String, u32> = HashMap::new();
+    let mut modes: HashMap<String, u32> = HashMap::new();
     for p in picks {
         for d in &p.candidate.directors {
             *dirs.entry(d.clone()).or_insert(0) += 1;
         }
         if let Some(g) = p.candidate.genres.first() {
             *genres.entry(g.clone()).or_insert(0) += 1;
+        }
+        if let Some(m) = p.candidate.modes.first() {
+            *modes.entry(m.clone()).or_insert(0) += 1;
         }
     }
     let mut out = Vec::new();
@@ -150,6 +155,13 @@ pub fn diversity_warnings(picks: &[ScoredCandidate]) -> Vec<DiversityWarning> {
         if n > 4 {
             out.push(DiversityWarning {
                 message: format!("{n} films share primary genre {g}"),
+            });
+        }
+    }
+    for (m, n) in modes {
+        if n > 5 {
+            out.push(DiversityWarning {
+                message: format!("{n} films share taste mode {m}"),
             });
         }
     }
@@ -216,6 +228,7 @@ mod tests {
                 }],
                 directors: vec![director.into()],
                 genres: vec!["Crime".into()],
+                modes: vec![],
             },
             score: CandidateScore {
                 content: 0.5,
@@ -231,6 +244,7 @@ mod tests {
             evidence: vec!["Heat".into()],
             positive_features: vec![],
             negative_features: vec![],
+            contextual_only: false,
         }
     }
 
@@ -254,7 +268,7 @@ mod tests {
         ];
         let mut seen = HashSet::new();
         seen.insert("tmdb:1".into());
-        let result = hard_validate(&picks, &short, &[], &seen);
+        let result = hard_validate(&picks, &short, &[], &seen, 4);
         assert!(result.dropped.iter().any(|d| d.contains("seen")));
         assert!(result.dropped.iter().any(|d| d.contains("hallucinated")));
         assert!(result.picks.iter().any(|p| p.candidate.tmdb_id == Some(2)));
@@ -266,7 +280,7 @@ mod tests {
             .map(|i| scored(i, &format!("Film {i}"), "Mann"))
             .collect();
         let picks: Vec<_> = (1..13).map(|i| pick(i, &format!("Film {i}"))).collect();
-        let result = hard_validate(&picks, &short, &[], &HashSet::new());
+        let result = hard_validate(&picks, &short, &[], &HashSet::new(), 4);
         assert_eq!(result.picks.len(), 12);
         assert!(!result.warnings.is_empty());
         assert_eq!(result.picks[0].candidate.tmdb_id, Some(1));

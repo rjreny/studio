@@ -98,7 +98,7 @@ fn matches_sparse_facet(profile: &FeatureProfile, scored: &ScoredCandidate) -> b
     profile.affinities.iter().any(|a| {
         a.appearances <= 4
             && a.confidence > 0.35
-            && a.weighted_mean > 0.2
+            && a.recommendation_mean > 0.2
             && matches!(
                 a.key.family,
                 FeatureFamily::Keyword | FeatureFamily::Genre | FeatureFamily::Director

@@ -1,4 +1,4 @@
-use crate::taste::features::FeatureProfile;
+use crate::taste::features::{FeatureProfile, PORTABLE_CONTEXTUAL};
 use crate::taste::retrieve::FilmRecord;
 use crate::taste::score::ScoredCandidate;
 use serde::Deserialize;
@@ -24,7 +24,9 @@ Return JSON only:
 Rules:
 - Assess candidates that look superficial, polarizing, or mismatched. You may skip obvious strong fits.
 - fit must be one of: strong, mixed, superficial.
-- At most 3 discoveryQueries. Each must name a specific facet the shortlist is missing.
+- Mark contextualOnly candidates as fit=superficial unless another primary feature clearly saves them.
+- Decade, runtime, and catalog exposure are not recommendation targets.
+- At most 3 discoveryQueries. Each must name a specific facet the shortlist is missing, preferably a taste mode (visual, comedy, intensity, spectacle, atmosphere, comfort).
 - Do not emit picks, rankings, or a recommended list.
 - Do not ignore negative evidence or polarizing features.
 - Raw JSON object only.
@@ -40,13 +42,13 @@ Return JSON only:
   "affinities": [{"label":"...","evidence":"..."}],
   "aversions": [{"label":"...","evidence":"..."}],
   "dimensions": [
-    {"name":"genre","take":"..."},
-    {"name":"era","take":"..."},
-    {"name":"director","take":"..."},
-    {"name":"performance","take":"..."},
-    {"name":"image","take":"..."},
+    {"name":"visual","take":"..."},
+    {"name":"story","take":"..."},
     {"name":"intensity","take":"..."},
-    {"name":"motif","take":"..."}
+    {"name":"comedy","take":"..."},
+    {"name":"spectacle","take":"..."},
+    {"name":"atmosphere","take":"..."},
+    {"name":"comfort","take":"..."}
   ],
   "picks": [
     {"id":"tmdb:123","title":"...","year":1999,"why":"...","mode":"core|deepCut|adjacent|discovery","rhymesWith":["..."]}
@@ -57,7 +59,9 @@ Selection contract:
 - Exactly 12 picks.
 - At least 8 from the original shortlist (use their id).
 - At most 3 discoveries. Discovery is optional.
-- Favor distinct facets of taste, not twelve adjacent films.
+- Favor distinct high-confidence taste modes (visual, comedy, intensity, spectacle, atmosphere, comfort). Mix follows mode strengths, not one personality and not fixed quotas.
+- Do not hunt for a decade or treat catalog exposure as taste. Older films are allowed when they have portable evidence (people, visual language, keywords).
+- If the visual dimension is strong, cinematography is a real factor. Do not claim it is irrelevant.
 - Do not invent titles. Every pick id must appear in the shortlist or validatedDiscoveries.
 - Address Call 1 concerns in why when you keep a mixed/superficial candidate.
 - Be concrete. No marketing language. No em dashes.
@@ -212,10 +216,15 @@ fn affinity_json(profile: &FeatureProfile, positive: bool) -> Vec<Value> {
         .affinities
         .iter()
         .filter(|a| {
+            let allowed_family = a.key.family.is_primary()
+                || (a.key.family.is_contextual() && a.portability >= PORTABLE_CONTEXTUAL);
+            if !allowed_family {
+                return false;
+            }
             if positive {
-                a.weighted_mean > 0.08
+                a.recommendation_mean > 0.08
             } else {
-                a.weighted_mean < -0.08 || a.negative_weight > a.positive_weight
+                a.preference_mean < -0.08 || a.negative_weight > a.positive_weight
             }
         })
         .take(12)
@@ -223,8 +232,10 @@ fn affinity_json(profile: &FeatureProfile, positive: bool) -> Vec<Value> {
             json!({
                 "feature": a.key.name,
                 "family": a.key.family,
-                "affinity": (a.weighted_mean as f64 * 100.0).round() / 100.0,
+                "affinity": (a.recommendation_mean as f64 * 100.0).round() / 100.0,
+                "preferenceMean": (a.preference_mean as f64 * 100.0).round() / 100.0,
                 "confidence": (a.confidence as f64 * 100.0).round() / 100.0,
+                "portability": (a.portability as f64 * 100.0).round() / 100.0,
                 "positiveEvidence": a.positive_evidence,
                 "negativeEvidence": a.negative_evidence,
             })
@@ -234,6 +245,27 @@ fn affinity_json(profile: &FeatureProfile, positive: bool) -> Vec<Value> {
         items.truncate(8);
     }
     items
+}
+
+fn contextual_json(profile: &FeatureProfile) -> Vec<Value> {
+    profile
+        .affinities
+        .iter()
+        .filter(|a| a.key.family.is_contextual())
+        .take(8)
+        .map(|a| {
+            json!({
+                "feature": a.key.name,
+                "family": a.key.family,
+                "preferenceMean": (a.preference_mean as f64 * 100.0).round() / 100.0,
+                "recommendationMean": (a.recommendation_mean as f64 * 100.0).round() / 100.0,
+                "portability": (a.portability as f64 * 100.0).round() / 100.0,
+                "confidence": (a.confidence as f64 * 100.0).round() / 100.0,
+                "note": "Catalog exposure, not a recommendation target unless portability is high.",
+                "positiveEvidence": a.positive_evidence,
+            })
+        })
+        .collect()
 }
 
 fn candidate_payload(c: &ScoredCandidate, rank: usize) -> Value {
@@ -259,6 +291,8 @@ fn candidate_payload(c: &ScoredCandidate, rank: usize) -> Value {
         "negativeFeatures": c.negative_features,
         "directors": c.candidate.directors,
         "genres": c.candidate.genres,
+        "modes": c.candidate.modes,
+        "contextualOnly": c.contextual_only,
     })
 }
 
@@ -269,10 +303,14 @@ pub fn call1_payload(
 ) -> Value {
     json!({
         "tasteProfile": {
-            "strongAffinities": affinity_json(profile, true),
+            "primaryAffinities": affinity_json(profile, true),
             "strongAversions": affinity_json(profile, false),
+            "contextualSignals": contextual_json(profile),
             "polarizingFeatures": profile.polarizing,
             "recentChanges": profile.shifts,
+            "tasteDimensions": profile.dimensions,
+            "tasteModes": profile.modes,
+            "modeShifts": profile.mode_shifts,
         },
         "representativeHistory": representative_history(films),
         "candidates": shortlist.iter().enumerate().map(|(i, c)| candidate_payload(c, i + 1)).collect::<Vec<_>>(),
@@ -288,10 +326,14 @@ pub fn call2_payload(
 ) -> Value {
     json!({
         "tasteProfile": {
-            "strongAffinities": affinity_json(profile, true),
+            "primaryAffinities": affinity_json(profile, true),
             "strongAversions": affinity_json(profile, false),
+            "contextualSignals": contextual_json(profile),
             "polarizingFeatures": profile.polarizing,
             "recentChanges": profile.shifts,
+            "tasteDimensions": profile.dimensions,
+            "tasteModes": profile.modes,
+            "modeShifts": profile.mode_shifts,
         },
         "representativeHistory": representative_history(films),
         "originalShortlist": shortlist.iter().enumerate().map(|(i, c)| candidate_payload(c, i + 1)).collect::<Vec<_>>(),
@@ -356,6 +398,7 @@ mod tests {
                 }],
                 directors: vec!["Michael Mann".into()],
                 genres: vec!["Crime".into()],
+                modes: vec![],
             },
             score: CandidateScore {
                 content: 0.7,
@@ -371,6 +414,7 @@ mod tests {
             evidence: vec!["Heat".into(), "Collateral".into()],
             positive_features: vec!["Michael Mann".into()],
             negative_features: vec!["Blackhat".into()],
+            contextual_only: false,
         }
     }
 
@@ -382,17 +426,51 @@ mod tests {
 
     #[test]
     fn payloads_include_breakdown_and_evidence() {
-        let profile = FeatureProfile {
-            affinities: vec![],
-            polarizing: vec![],
-            shifts: vec![],
-        };
+        let profile = FeatureProfile::default();
         let p = call1_payload(&[], &profile, &[scored()]);
         assert!(payload_has_breakdown(&p));
         assert!(p["candidates"][0]["scoreBreakdown"]["content"].is_number());
         assert!(p["candidates"][0]["evidence"].as_array().unwrap().len() >= 1);
+        assert!(p["tasteProfile"]["contextualSignals"].is_array());
+        assert!(p["tasteProfile"]["tasteModes"].is_array());
+        assert!(p["tasteProfile"]["primaryAffinities"].is_array());
         let critic = empty_critic();
         let p2 = call2_payload(&[], &profile, &[scored()], &critic, &[]);
         assert!(payload_has_breakdown(&p2));
+    }
+
+    #[test]
+    fn nonportable_decade_stays_contextual() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let mut obs = Vec::new();
+        for i in 0..40 {
+            let s = interaction_signal(4.5, &p, Some(8.0), 6, false);
+            obs.extend(observations_from_film(
+                &format!("kid{i}"),
+                4.5,
+                Some(i),
+                &s,
+                Some(8.0),
+                &["Comedy".into()],
+                &[],
+                &[],
+                Some(2005),
+                None,
+            ));
+        }
+        let profile = build_profile(&obs);
+        let payload = call1_payload(&[], &profile, &[scored()]);
+        let primary = payload["tasteProfile"]["primaryAffinities"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(primary.iter().all(|v| v["family"] != "decade"));
+        let ctx = payload["tasteProfile"]["contextualSignals"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(ctx.iter().any(|v| v["feature"] == "2000s"));
     }
 }

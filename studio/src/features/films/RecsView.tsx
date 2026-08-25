@@ -6,12 +6,18 @@ import { log } from "../../platform/log";
 import { Poster } from "./Poster";
 
 const DIM_LABEL: Record<string, string> = {
+  visual: "Visual",
+  story: "Story",
+  intensity: "Intensity",
+  comedy: "Comedy",
+  spectacle: "Spectacle",
+  atmosphere: "Atmosphere",
+  comfort: "Comfort",
   genre: "Genre",
   era: "Era",
   director: "Director",
   performance: "Performance",
   image: "Image",
-  intensity: "Intensity",
   motif: "Motif",
 };
 
@@ -256,7 +262,7 @@ export function RecsView({
 
       {report?.note ? <p className="hint">{report.note}</p> : null}
 
-      {snapshot && (snapshot.genres.length || snapshot.directors.length) ? (
+      {snapshot && (snapshot.genres.length || snapshot.directors.length || snapshot.cinematographers?.length) ? (
         <div className="taste-stats">
           {snapshot.genres.slice(0, 6).map((g) => (
             <span key={`g-${g.label}`} className="taste-chip">
@@ -264,7 +270,13 @@ export function RecsView({
               {g.affinity != null ? ` · ${g.affinity >= 0 ? "+" : ""}${g.affinity.toFixed(2)}` : ` · ${g.avg.toFixed(1)}`}
             </span>
           ))}
-          {snapshot.decades.slice(0, 3).map((d) => (
+          {(snapshot.cinematographers ?? []).slice(0, 4).map((c) => (
+            <span key={`c-${c.label}`} className="taste-chip">
+              {c.label}
+              {c.affinity != null ? ` · ${c.affinity >= 0 ? "+" : ""}${c.affinity.toFixed(2)}` : ""}
+            </span>
+          ))}
+          {snapshot.decades.slice(0, 2).map((d) => (
             <span key={`d-${d.label}`} className="taste-chip">
               {d.label}
             </span>
@@ -364,9 +376,9 @@ export function RecsView({
 
       {keyReady && enoughRatings && !report && !running ? (
         <p className="muted pad">
-          The scorer reads every rating, heart, and rewatch, then ranks a shortlist. The model critiques
-          that list, may run a few targeted searches, and picks 12 films. Web search only feeds discovery
-          titles back through TMDB identity and the same scorer.
+          The scorer reads every rating, then separates films you like from films that should pull new recommendations.
+          Rewatches stay in the profile; they do not turn a decade of nostalgia into a hunt target. The model critiques a
+          scored shortlist across taste modes, may run a few targeted searches, and picks 12.
         </p>
       ) : null}
     </div>

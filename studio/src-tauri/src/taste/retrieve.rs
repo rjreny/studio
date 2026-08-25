@@ -87,7 +87,6 @@ pub fn seen_keys(films: &[FilmRecord]) -> HashSet<String> {
 }
 
 pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
-    let now = chrono::Utc::now();
     let mut stmt = db
         .conn()
         .prepare(
@@ -159,12 +158,19 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
         })
         .map_err(|e| e.to_string())?;
     let mut films: Vec<FilmRecord> = rows.filter_map(|r| r.ok()).collect();
-    let ratings: Vec<f32> = films.iter().filter_map(|f| f.rating).collect();
-    let profile = rating_profile(&ratings);
+    let now = chrono::Utc::now();
     for film in &mut films {
         if let Some(date) = film.last_date.as_deref() {
             film.age_years = years_since(date, now);
         }
+    }
+    Ok(films)
+}
+
+pub fn attach_signals(films: &mut [FilmRecord]) {
+    let ratings: Vec<f32> = films.iter().filter_map(|f| f.rating).collect();
+    let profile = rating_profile(&ratings);
+    for film in films {
         if let (Some(rating), Some(profile)) = (film.rating, profile.as_ref()) {
             film.signal = Some(interaction_signal(
                 rating,
@@ -175,7 +181,89 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
             ));
         }
     }
-    Ok(films)
+}
+
+fn needs_catalog_hydrate(film: &FilmRecord) -> bool {
+    if film.tmdb_id.is_none() || film.rating.is_none() {
+        return false;
+    }
+    let has_crew_ids = film
+        .credits
+        .iter()
+        .any(|c| c.id.is_some() && c.job != "Actor");
+    !has_crew_ids || film.keywords.is_empty()
+}
+
+pub fn enrich_rated_library(db: &Database, films: &mut [FilmRecord], cap: usize) -> usize {
+    let mut idxs: Vec<usize> = films
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| needs_catalog_hydrate(f))
+        .map(|(i, _)| i)
+        .collect();
+    idxs.sort_by(|&a, &b| {
+        let score = |f: &FilmRecord| {
+            let abs = f
+                .rating
+                .map(crate::taste::preference::absolute_preference)
+                .unwrap_or(0.0)
+                .abs();
+            abs * crate::taste::preference::recency_weight(f.age_years)
+        };
+        score(&films[b])
+            .partial_cmp(&score(&films[a]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut n = 0;
+    for i in idxs.into_iter().take(cap) {
+        let Some(tid) = films[i].tmdb_id else { continue };
+        if tmdb::refresh_movie_catalog(db, tid, false).is_ok() {
+            n += 1;
+            let _ = reload_catalog_fields(db, &mut films[i]);
+        }
+    }
+    n
+}
+
+fn reload_catalog_fields(db: &Database, film: &mut FilmRecord) -> Result<(), String> {
+    let Some(tid) = film.tmdb_id else {
+        return Ok(());
+    };
+    let row = db.conn().query_row(
+        "SELECT genres_json, credits_json, cast_json, crew_json, keywords_json, similar_json, runtime, vote_count, poster_path
+         FROM movies WHERE tmdb_id = ?1 LIMIT 1",
+        params![tid],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i32>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        },
+    );
+    let Ok((genres, credits, cast, crew, keywords, similar, runtime, vote_count, poster)) = row else {
+        return Ok(());
+    };
+    film.genres = json_vec(genres);
+    film.credits = parse_credits(credits.as_deref(), cast.as_deref(), crew.as_deref());
+    film.keywords = parse_keywords(keywords);
+    film.similar = parse_similar(similar);
+    if film.runtime.is_none() {
+        film.runtime = runtime;
+    }
+    if film.vote_count.is_none() {
+        film.vote_count = vote_count;
+    }
+    if film.poster.is_none() {
+        film.poster = poster_url(poster);
+    }
+    Ok(())
 }
 
 pub fn user_profile(films: &[FilmRecord]) -> Option<RatingProfile> {
@@ -199,8 +287,8 @@ pub fn retrieve(
     seeds.sort_by(|a, b| {
         let sa = a.signal.as_ref().unwrap();
         let sb = b.signal.as_ref().unwrap();
-        (sb.preference.absolute * sb.effective_weight)
-            .partial_cmp(&(sa.preference.absolute * sa.effective_weight))
+        (sb.preference.absolute * sb.recommendation_weight)
+            .partial_cmp(&(sa.preference.absolute * sa.recommendation_weight))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -247,8 +335,8 @@ pub fn retrieve(
                     | FeatureFamily::Cinematographer
                     | FeatureFamily::Composer
             ) && a.key.id.is_some()
-                && a.confidence > 0.4
-                && a.weighted_mean > 0.15
+                && a.appearances >= 2
+                && a.recommendation_mean > 0.15
         })
         .take(8)
         .collect();
@@ -326,7 +414,7 @@ pub fn retrieve(
     for aff in profile
         .affinities
         .iter()
-        .filter(|a| a.confidence > 0.5 && a.appearances <= 4 && a.weighted_mean > 0.25)
+        .filter(|a| a.confidence > 0.5 && a.appearances <= 4 && a.recommendation_mean > 0.25)
         .take(6)
     {
         if aff.key.family != FeatureFamily::Keyword && aff.key.family != FeatureFamily::Genre {
@@ -765,5 +853,17 @@ mod tests {
     fn identity_prefers_tmdb() {
         assert_eq!(identity_key(Some(99), "Heat", Some(1995)), "tmdb:99");
         assert_eq!(identity_key(None, "Heat", Some(1995)), "heat|1995");
+    }
+
+    #[test]
+    fn seed_rank_ignores_rewatch_boost() {
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let once = interaction_signal(4.5, &p, Some(1.0), 1, false);
+        let many = interaction_signal(4.5, &p, Some(1.0), 7, false);
+        let once_seed = once.preference.absolute * once.recommendation_weight;
+        let many_seed = many.preference.absolute * many.recommendation_weight;
+        assert!(many_seed < once_seed);
+        assert!(many.preference_weight > once.preference_weight);
     }
 }

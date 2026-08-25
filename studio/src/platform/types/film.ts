@@ -220,7 +220,7 @@ export type TasteSnapshot = {
   genres: TasteStat[];
   decades: TasteStat[];
   directors: TasteStat[];
-  actors: TasteStat[];
+  cinematographers?: TasteStat[];
 };
 
 export type TasteReport = {

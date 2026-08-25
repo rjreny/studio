@@ -15,12 +15,15 @@ pub const RUNTIME_W: f32 = 0.15;
 
 const PEOPLE_K: f32 = 4.0;
 const BROAD_K: f32 = 6.0;
-const RECENT_YEARS: f32 = 1.5;
+const CINEMATOGRAPHER_K: f32 = 2.5;
+pub const RECENT_YEARS: f32 = 1.5;
 const SHIFT_RECENT_N: usize = 8;
 const SHIFT_LONG_N: usize = 20;
 const SHIFT_CONF: f32 = 0.4;
 const SHIFT_DELTA: f32 = 0.35;
 const POLARIZING_VAR: f32 = 0.12;
+pub const PORTABILITY_SKIP: f32 = 0.15;
+pub const PORTABLE_CONTEXTUAL: f32 = 0.4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,8 +54,17 @@ impl FeatureFamily {
         }
     }
 
+    pub fn is_contextual(self) -> bool {
+        matches!(self, Self::Decade | Self::Runtime)
+    }
+
+    pub fn is_primary(self) -> bool {
+        !self.is_contextual()
+    }
+
     fn k(self) -> f32 {
         match self {
+            Self::Cinematographer => CINEMATOGRAPHER_K,
             Self::Genre | Self::Decade | Self::Runtime => BROAD_K,
             _ => PEOPLE_K,
         }
@@ -65,6 +77,19 @@ impl FeatureFamily {
             Self::Keyword => 5,
             _ => 4,
         }
+    }
+}
+
+pub fn family_for_job(job: &str) -> Option<FeatureFamily> {
+    match job {
+        "Director" => Some(FeatureFamily::Director),
+        "Writer" | "Screenplay" | "Original Screenplay" | "Story" => Some(FeatureFamily::Writer),
+        "Director of Photography" | "Cinematography" | "Cinematographer" => {
+            Some(FeatureFamily::Cinematographer)
+        }
+        "Original Music Composer" | "Music" => Some(FeatureFamily::Composer),
+        "Actor" => Some(FeatureFamily::Actor),
+        _ => None,
     }
 }
 
@@ -108,19 +133,26 @@ pub struct FeatureAffinity {
     pub key: FeatureKey,
     pub appearances: u32,
     pub weighted_mean: f32,
+    pub preference_mean: f32,
+    pub recommendation_mean: f32,
     pub weighted_variance: f32,
     pub positive_weight: f32,
     pub negative_weight: f32,
     pub recent_weight: f32,
     pub long_term_weight: f32,
     pub confidence: f32,
+    pub feature_strength: f32,
+    pub portability: f32,
     pub positive_evidence: Vec<EvidenceFilm>,
     pub negative_evidence: Vec<EvidenceFilm>,
 }
 
 impl FeatureAffinity {
     pub fn scoring_affinity(&self) -> f32 {
-        self.weighted_mean * self.confidence * self.key.family.weight()
+        self.recommendation_mean
+            * self.confidence
+            * self.key.family.weight()
+            * self.portability
     }
 
     pub fn polarizing(&self) -> bool {
@@ -155,11 +187,18 @@ pub struct RecentShift {
     pub recent_evidence: Vec<EvidenceFilm>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct FeatureProfile {
     pub affinities: Vec<FeatureAffinity>,
     pub polarizing: Vec<PolarizingFeature>,
     pub shifts: Vec<RecentShift>,
+    #[serde(default)]
+    pub dimensions: Vec<crate::taste::dimensions::TasteDimensionView>,
+    #[serde(default)]
+    pub modes: Vec<crate::taste::dimensions::TasteMode>,
+    #[serde(default)]
+    pub mode_shifts: Vec<crate::taste::dimensions::ModeShift>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,11 +233,14 @@ pub fn decade_label(year: i32) -> String {
 pub struct FeatureObservation {
     pub key: FeatureKey,
     pub affinity_preference: f32,
-    pub effective_weight: f32,
+    pub preference_weight: f32,
+    pub recommendation_weight: f32,
+    pub discovery_strength: f32,
     pub age_years: Option<f32>,
     pub evidence: EvidenceFilm,
     pub positive: f32,
     pub negative: f32,
+    pub genres: Vec<String>,
 }
 
 pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
@@ -210,16 +252,22 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
     let mut affinities = Vec::new();
     for group in groups.values() {
         let key = group[0].key.clone();
-        let pairs: Vec<(f32, f32)> = group
+        let pairs_pref: Vec<(f32, f32)> = group
             .iter()
-            .map(|o| (o.affinity_preference, o.effective_weight))
+            .map(|o| (o.affinity_preference, o.preference_weight))
             .collect();
-        let Some(mean) = weighted_mean(&pairs) else {
+        let pairs_rec: Vec<(f32, f32)> = group
+            .iter()
+            .map(|o| (o.affinity_preference, o.recommendation_weight))
+            .collect();
+        let Some(preference_mean) = weighted_mean(&pairs_pref) else {
             continue;
         };
-        let var = weighted_variance(&pairs, mean);
+        let recommendation_mean = weighted_mean(&pairs_rec).unwrap_or(preference_mean);
+        let var = weighted_variance(&pairs_pref, preference_mean);
         let appearances = group.len() as u32;
         let confidence = 1.0 - (-(appearances as f32) / key.family.k()).exp();
+        let portability = feature_portability(&key, group);
         let mut positive_weight = 0.0;
         let mut negative_weight = 0.0;
         let mut recent_pairs = Vec::new();
@@ -227,13 +275,13 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         let mut positive_evidence = Vec::new();
         let mut negative_evidence = Vec::new();
         for o in group {
-            positive_weight += o.positive * o.effective_weight;
-            negative_weight += o.negative * o.effective_weight;
+            positive_weight += o.positive * o.preference_weight;
+            negative_weight += o.negative * o.preference_weight;
             let recent = o.age_years.map(|y| y <= RECENT_YEARS).unwrap_or(false);
             if recent {
-                recent_pairs.push((o.affinity_preference, o.effective_weight));
+                recent_pairs.push((o.affinity_preference, o.recommendation_weight));
             } else {
-                long_pairs.push((o.affinity_preference, o.effective_weight));
+                long_pairs.push((o.affinity_preference, o.recommendation_weight));
             }
             if o.positive > 0.0 && positive_evidence.len() < 6 {
                 positive_evidence.push(o.evidence.clone());
@@ -245,13 +293,17 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         affinities.push(FeatureAffinity {
             key,
             appearances,
-            weighted_mean: mean,
+            weighted_mean: preference_mean,
+            preference_mean,
+            recommendation_mean,
             weighted_variance: var,
             positive_weight,
             negative_weight,
             recent_weight: weighted_mean(&recent_pairs).unwrap_or(0.0),
-            long_term_weight: weighted_mean(&long_pairs).unwrap_or(mean),
+            long_term_weight: weighted_mean(&long_pairs).unwrap_or(preference_mean),
             confidence,
+            feature_strength: recommendation_mean.abs(),
+            portability,
             positive_evidence,
             negative_evidence,
         });
@@ -328,7 +380,35 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         affinities,
         polarizing,
         shifts,
+        dimensions: Vec::new(),
+        modes: Vec::new(),
+        mode_shifts: Vec::new(),
     }
+}
+
+fn feature_portability(key: &FeatureKey, group: &[&FeatureObservation]) -> f32 {
+    if !key.family.is_contextual() {
+        return 1.0;
+    }
+    let mut genres = std::collections::HashSet::new();
+    let mut disc = 0.0;
+    let mut n = 0.0;
+    for o in group {
+        if o.positive > 0.0 {
+            for g in &o.genres {
+                genres.insert(g.to_lowercase());
+            }
+        }
+        disc += o.discovery_strength;
+        n += 1.0;
+    }
+    let unique = genres.len();
+    if unique < 3 {
+        return 0.0;
+    }
+    let genre_port = ((unique as f32 - 2.0) / 4.0).clamp(0.0, 1.0);
+    let mean_disc = if n > 0.0 { disc / n } else { 1.0 };
+    genre_port * mean_disc
 }
 
 pub fn observations_from_film(
@@ -356,24 +436,22 @@ pub fn observations_from_film(
         out.push(FeatureObservation {
             key,
             affinity_preference: signal.preference.affinity_preference,
-            effective_weight: signal.effective_weight,
+            preference_weight: signal.preference_weight,
+            recommendation_weight: signal.recommendation_weight,
+            discovery_strength: signal.discovery_strength,
             age_years,
             evidence: evidence.clone(),
             positive,
             negative,
+            genres: genres.to_vec(),
         });
     };
     for g in genres {
         push(&mut out, FeatureKey::new(FeatureFamily::Genre, None, g));
     }
     for c in credits {
-        let family = match c.job.as_str() {
-            "Director" => FeatureFamily::Director,
-            "Writer" | "Screenplay" | "Original Screenplay" | "Story" => FeatureFamily::Writer,
-            "Director of Photography" | "Cinematography" => FeatureFamily::Cinematographer,
-            "Original Music Composer" | "Music" => FeatureFamily::Composer,
-            "Actor" => FeatureFamily::Actor,
-            _ => continue,
+        let Some(family) = family_for_job(&c.job) else {
+            continue;
         };
         push(&mut out, FeatureKey::new(family, c.id, &c.name));
     }
@@ -524,9 +602,115 @@ mod tests {
             .iter()
             .find(|a| a.key.name == "Drama")
             .unwrap();
-        let expected = (s5.preference.affinity_preference * s5.effective_weight
-            + s4.preference.affinity_preference * s4.effective_weight)
-            / (s5.effective_weight + s4.effective_weight);
-        assert!((drama.weighted_mean - expected).abs() < 1e-4);
+        let expected = (s5.preference.affinity_preference * s5.preference_weight
+            + s4.preference.affinity_preference * s4.preference_weight)
+            / (s5.preference_weight + s4.preference_weight);
+        assert!((drama.preference_mean - expected).abs() < 1e-4);
+        assert!((drama.weighted_mean - drama.preference_mean).abs() < 1e-6);
+        assert!((drama.portability - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nostalgia_decade_is_not_portable() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let mut obs = Vec::new();
+        for i in 0..40 {
+            let s = interaction_signal(4.5, &p, Some(8.0), 6, false);
+            obs.extend(observations_from_film(
+                &format!("kid{i}"),
+                4.5,
+                Some(i),
+                &s,
+                Some(8.0),
+                &["Comedy".into()],
+                &[],
+                &[],
+                Some(2005),
+                None,
+            ));
+        }
+        let profile = build_profile(&obs);
+        let decade = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.family == FeatureFamily::Decade)
+            .unwrap();
+        assert_eq!(decade.portability, 0.0);
+        assert!(decade.scoring_affinity().abs() < 1e-5);
+        assert!(decade.preference_mean > 0.0);
+    }
+
+    #[test]
+    fn diverse_first_watch_decade_is_portable() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let genres = ["Drama", "Thriller", "Action", "Horror", "Comedy"];
+        let mut obs = Vec::new();
+        for (i, g) in genres.iter().cycle().take(20).enumerate() {
+            let s = interaction_signal(4.5, &p, Some(0.4), 1, false);
+            obs.extend(observations_from_film(
+                &format!("new{i}"),
+                4.5,
+                Some(i as i64),
+                &s,
+                Some(0.4),
+                &[(*g).into()],
+                &[],
+                &[],
+                Some(2005),
+                None,
+            ));
+        }
+        let profile = build_profile(&obs);
+        let decade = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.family == FeatureFamily::Decade)
+            .unwrap();
+        assert!(decade.portability >= 0.4, "got {}", decade.portability);
+        assert!(decade.scoring_affinity() > 0.0);
+    }
+
+    #[test]
+    fn two_films_establish_cinematographer() {
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let dp = Credit {
+            id: Some(77),
+            name: "Greig Fraser".into(),
+            job: "Director of Photography".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            4.5,
+            Some(1),
+            &interaction_signal(4.5, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[dp.clone()],
+            &[],
+            Some(2022),
+            Some(176),
+        );
+        obs.extend(observations_from_film(
+            "Project Hail Mary",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.2), 1, false),
+            Some(0.2),
+            &["Science Fiction".into()],
+            &[dp],
+            &[],
+            Some(2026),
+            Some(140),
+        ));
+        let profile = build_profile(&obs);
+        let fraser = profile
+            .affinities
+            .iter()
+            .find(|a| a.key.name == "Greig Fraser")
+            .unwrap();
+        assert_eq!(fraser.positive_evidence.len(), 2);
+        assert!(fraser.confidence > 0.4, "got {}", fraser.confidence);
+        assert!(fraser.scoring_affinity() > 0.0);
+        assert!((fraser.portability - 1.0).abs() < 1e-5);
     }
 }

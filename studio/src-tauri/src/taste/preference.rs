@@ -36,6 +36,11 @@ pub struct InteractionSignal {
     pub recency_weight: f32,
     pub rewatch_weight: f32,
     pub heart_weight: f32,
+    pub familiarity_strength: f32,
+    pub discovery_strength: f32,
+    pub preference_weight: f32,
+    pub recommendation_weight: f32,
+    /// Alias of `preference_weight` (likes this film).
     pub effective_weight: f32,
 }
 
@@ -107,6 +112,15 @@ pub fn heart_weight(liked: bool) -> f32 {
     }
 }
 
+pub fn familiarity_strength(viewings: u32) -> f32 {
+    let n = viewings.max(1) as f32;
+    1.0 - (-n / 2.5).exp()
+}
+
+pub fn discovery_strength(viewings: u32) -> f32 {
+    (1.0 - 0.75 * familiarity_strength(viewings)).clamp(0.20, 1.0)
+}
+
 pub fn interaction_signal(
     rating: f32,
     profile: &RatingProfile,
@@ -118,12 +132,20 @@ pub fn interaction_signal(
     let recency_weight = recency_weight(age_years);
     let rewatch_weight = rewatch_weight(viewings);
     let heart_weight = heart_weight(liked);
+    let familiarity_strength = familiarity_strength(viewings);
+    let discovery_strength = discovery_strength(viewings);
+    let preference_weight = recency_weight * rewatch_weight * heart_weight;
+    let recommendation_weight = recency_weight * heart_weight * discovery_strength;
     InteractionSignal {
         preference,
         recency_weight,
         rewatch_weight,
         heart_weight,
-        effective_weight: recency_weight * rewatch_weight * heart_weight,
+        familiarity_strength,
+        discovery_strength,
+        preference_weight,
+        recommendation_weight,
+        effective_weight: preference_weight,
     }
 }
 
@@ -219,7 +241,7 @@ mod tests {
         assert!((w6m - 1.20).abs() < 0.02);
         assert!((w1 - 1.09).abs() < 0.03);
         assert!((w2 - 0.93).abs() < 0.03);
-        assert!((w5 - 0.75).abs() < 0.02);
+        assert!((w5 - 0.751).abs() < 0.02);
         assert!((winf - 0.70).abs() < 0.02);
         assert!(winf > 0.69);
     }
@@ -233,9 +255,23 @@ mod tests {
         assert!(many.rewatch_weight > once.rewatch_weight);
         assert!((heart.heart_weight - 1.25).abs() < 1e-5);
         assert!(
-            (heart.effective_weight - once.effective_weight * 1.25).abs() < 1e-4
+            (heart.preference_weight - once.preference_weight * 1.25).abs() < 1e-4
         );
+        assert!((once.effective_weight - once.preference_weight).abs() < 1e-6);
         assert!((once.rewatch_weight - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rewatch_raises_preference_and_lowers_recommendation() {
+        let p = generous();
+        let once = interaction_signal(4.5, &p, Some(1.0), 1, false);
+        let many = interaction_signal(4.5, &p, Some(1.0), 7, false);
+        assert!(many.preference_weight > once.preference_weight);
+        assert!(many.recommendation_weight < once.recommendation_weight);
+        assert!((once.recommendation_weight - once.recency_weight * once.heart_weight * once.discovery_strength).abs() < 1e-5);
+        assert!(many.familiarity_strength > once.familiarity_strength);
+        assert!(many.discovery_strength < once.discovery_strength);
+        assert!(many.discovery_strength >= 0.20 - 1e-5);
     }
 
     #[test]

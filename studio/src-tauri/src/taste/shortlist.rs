@@ -33,6 +33,17 @@ fn similarity(a: &ScoredCandidate, b: &ScoredCandidate) -> f32 {
     if same_seed {
         s += 0.2;
     }
+    if !a.candidate.modes.is_empty() {
+        let shared = a
+            .candidate
+            .modes
+            .iter()
+            .filter(|m| b.candidate.modes.contains(m))
+            .count();
+        if shared > 0 {
+            s += 0.35;
+        }
+    }
     s.min(1.0)
 }
 
@@ -88,6 +99,7 @@ mod tests {
                 }],
                 directors: vec![director.into()],
                 genres: vec!["Crime".into()],
+                modes: vec![],
             },
             score: CandidateScore {
                 content: total,
@@ -103,6 +115,7 @@ mod tests {
             evidence: vec!["Heat".into()],
             positive_features: vec![director.into()],
             negative_features: vec![],
+            contextual_only: false,
         }
     }
 

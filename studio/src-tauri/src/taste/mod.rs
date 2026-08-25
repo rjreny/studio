@@ -1,3 +1,4 @@
+pub mod dimensions;
 pub mod discover;
 pub mod eval;
 pub mod features;
@@ -13,14 +14,15 @@ use crate::catalog::tmdb;
 use crate::models::JobProgress;
 use crate::storage::db::Database;
 use crate::taste::features::{
-    build_profile, observations_from_film, FeatureFamily, FeatureProfile,
+    build_profile, observations_from_film, FeatureFamily, FeatureProfile, PORTABLE_CONTEXTUAL,
 };
+use crate::taste::dimensions::ModeFilm;
 use crate::taste::preference::MIN_RATINGS;
 use crate::taste::reason::{
     call1_payload, call2_payload, empty_critic, parse_critic, parse_reasoner, CALL1_SYSTEM,
     CALL2_SYSTEM, CriticReport, ReasonerPick,
 };
-use crate::taste::retrieve::{load_films, retrieve, seen_keys, FilmRecord};
+use crate::taste::retrieve::{attach_signals, load_films, retrieve, seen_keys, FilmRecord};
 use crate::taste::score::{score_all, ScoredCandidate};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -117,6 +119,8 @@ pub struct TasteSnapshot {
     pub decades: Vec<TasteStat>,
     pub directors: Vec<TasteStat>,
     pub actors: Vec<TasteStat>,
+    #[serde(default)]
+    pub cinematographers: Vec<TasteStat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,12 +402,15 @@ fn snapshot_of(films: &[FilmRecord], profile: Option<&FeatureProfile>) -> TasteS
             .map(|p| {
                 p.affinities
                     .iter()
-                    .filter(|a| a.key.family == family)
+                    .filter(|a| {
+                        a.key.family == family
+                            && (!family.is_contextual() || a.portability >= PORTABLE_CONTEXTUAL)
+                    })
                     .take(16)
                     .map(|a| TasteStat {
                         label: a.key.name.clone(),
                         count: a.appearances,
-                        avg: (a.weighted_mean as f64 * 100.0).round() / 100.0,
+                        avg: (a.preference_mean as f64 * 100.0).round() / 100.0,
                         affinity: Some((a.scoring_affinity() as f64 * 100.0).round() / 100.0),
                     })
                     .collect()
@@ -419,6 +426,7 @@ fn snapshot_of(films: &[FilmRecord], profile: Option<&FeatureProfile>) -> TasteS
         decades: stats(FeatureFamily::Decade),
         directors: stats(FeatureFamily::Director),
         actors: stats(FeatureFamily::Actor),
+        cinematographers: stats(FeatureFamily::Cinematographer),
     }
 }
 
@@ -441,11 +449,30 @@ fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile {
             film.runtime,
         ));
     }
-    build_profile(&obs)
+    let mut profile = build_profile(&obs);
+    let inputs: Vec<ModeFilm<'_>> = films
+        .iter()
+        .map(|f| ModeFilm {
+            title: &f.title,
+            rating: f.rating,
+            tmdb_id: f.tmdb_id,
+            genres: &f.genres,
+            credits: &f.credits,
+            keywords: &f.keywords,
+            signal: f.signal.as_ref(),
+            age_years: f.age_years,
+        })
+        .collect();
+    let (dimensions, modes, mode_shifts) = crate::taste::dimensions::derive(&inputs);
+    profile.dimensions = dimensions;
+    profile.modes = modes;
+    profile.mode_shifts = mode_shifts;
+    profile
 }
 
 pub fn load_state(db: &Database) -> Result<TasteState, String> {
-    let films = load_films(db)?;
+    let mut films = load_films(db)?;
+    attach_signals(&mut films);
     let profile = feature_profile_from_films(&films);
     let report = db
         .get_meta(META_REPORT)?
@@ -473,11 +500,13 @@ pub fn analyze(
         total: 6,
         ..Default::default()
     });
-    let films = load_films(db)?;
+    let mut films = load_films(db)?;
     let rated = films.iter().filter(|f| f.rating.is_some()).count();
     if rated < MIN_RATINGS {
         return Err("Rate at least 8 films first so the agent has edges to work with.".into());
     }
+    retrieve::enrich_rated_library(db, &mut films, 40);
+    attach_signals(&mut films);
     let profile = feature_profile_from_films(&films);
     let seen = seen_keys(&films);
     progress(JobProgress {
@@ -488,7 +517,7 @@ pub fn analyze(
         ..Default::default()
     });
     let mut candidates = retrieve(db, &films, &profile, &seen)?;
-    retrieve::enrich_missing(db, &mut candidates, 80);
+    retrieve::enrich_missing(db, &mut candidates, 40);
     let ranked = score_all(&profile, &candidates);
     let short = shortlist::shortlist(&ranked);
     if short.is_empty() {
@@ -577,7 +606,13 @@ pub fn analyze(
     });
     let mut call2_body = call2_payload(&films, &profile, &short, &critic, &discoveries);
     let mut reasoner = run_reasoner(&key, &used_model, &call2_body)?;
-    let mut validated = validate::hard_validate(&reasoner.picks, &short, &discoveries, &seen);
+    let mut validated = validate::hard_validate(
+        &reasoner.picks,
+        &short,
+        &discoveries,
+        &seen,
+        profile.modes.len(),
+    );
     if !validated.warnings.is_empty() && !validated.narrow_profile {
         call2_body["diversityWarnings"] = json!(validated
             .warnings
@@ -586,7 +621,13 @@ pub fn analyze(
             .collect::<Vec<_>>());
         if let Ok(repaired) = run_reasoner(&key, &used_model, &call2_body) {
             reasoner = repaired;
-            validated = validate::hard_validate(&reasoner.picks, &short, &discoveries, &seen);
+            validated = validate::hard_validate(
+                &reasoner.picks,
+                &short,
+                &discoveries,
+                &seen,
+                profile.modes.len(),
+            );
         }
     }
 

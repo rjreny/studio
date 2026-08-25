@@ -782,6 +782,7 @@ const CREW_JOBS: &[&str] = &[
     "Characters",
     "Director of Photography",
     "Cinematography",
+    "Cinematographer",
     "Original Music Composer",
     "Music",
     "Editor",
