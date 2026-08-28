@@ -2,7 +2,7 @@ use super::csv::{parse_csv, CsvKind, Record};
 use super::fingerprint::{row_fingerprint, source_record_key};
 use super::normalize::{normalize_title, parse_year};
 use super::posters::{merge_source_movie_metadata_tx, parse_tmdb_id, SourceMovieMeta};
-use crate::models::{ImportResult, LibraryCoverage};
+use crate::models::ImportResult;
 use crate::storage::db::Database;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -75,7 +75,13 @@ pub fn import_zip_discovery(
                     ingest_watchlist_flag(&tx, &import_id, &file.relative_path, &record)?;
                 }
                 CsvKind::Reviews => {
-                    stats.skipped += 1;
+                    ingest_review(
+                        &tx,
+                        &import_id,
+                        &file.relative_path,
+                        &record,
+                        &mut stats,
+                    )?;
                 }
             }
         }
@@ -388,6 +394,53 @@ fn ingest_watchlist_flag(
     Ok(())
 }
 
+fn ingest_review(
+    tx: &Transaction<'_>,
+    import_id: &str,
+    dataset: &str,
+    record: &Record,
+    stats: &mut ImportStats,
+) -> Result<(), String> {
+    let name = record.get(&["Name", "name"]);
+    let review = record.get(&["Review", "review", "Review Text", "Text", "text"]);
+    if name.is_empty() || review.is_empty() {
+        stats.skipped += 1;
+        return Ok(());
+    }
+    let year = parse_year(&record.get(&["Year", "year"]));
+    let uri = record.get(&["Letterboxd URI", "URI", "uri"]);
+    let meta = movie_meta_from_record(record);
+    let fp = row_fingerprint(&[
+        ("name", &name),
+        ("year", &year.map(|y| y.to_string()).unwrap_or_default()),
+        ("uri", &uri),
+    ]);
+    let movie_key = source_record_key("letterboxd_export", "film", &fp);
+    let smr_id = upsert_source_movie(
+        tx,
+        "letterboxd_export",
+        &movie_key,
+        &name,
+        year,
+        &uri,
+        &meta,
+    )?;
+    tx.execute(
+        "UPDATE source_movie_records
+         SET raw_identity = json_set(COALESCE(raw_identity, '{}'), '$.review', ?2)
+         WHERE id = ?1",
+        params![smr_id, review],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO import_entries(id, import_id, source_path, row_number, entity_type, status, warning)
+         VALUES (?1, ?2, ?3, ?4, 'reviews', 'imported', NULL)",
+        params![Uuid::new_v4().to_string(), import_id, dataset, record.row_number],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn upsert_source_movie(
     tx: &Transaction<'_>,
     source_type: &str,
@@ -535,5 +588,29 @@ mod tests {
         let (viewings, smr, _) = count_events(&db).unwrap();
         assert_eq!(viewings, 0);
         assert_eq!(smr, 0);
+    }
+
+    #[test]
+    fn reviews_are_stored_as_source_metadata() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("reviews.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Name,Year,Review,Letterboxd URI\nInception,2010,Beautifully shot and tightly paced,/film/inception/\n",
+        )
+        .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let mut db = Database::in_memory().unwrap();
+        import_zip_discovery(&mut db, &discover_zip_bytes(&bytes).unwrap()).unwrap();
+        let review: String = db
+            .conn()
+            .query_row(
+                "SELECT json_extract(raw_identity, '$.review') FROM source_movie_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review, "Beautifully shot and tightly paced");
     }
 }

@@ -10,6 +10,7 @@ import type {
   LibraryCoverage,
   LibraryPage,
   LibraryQuery,
+  TasteFeedback,
   TasteKeyStatus,
   TasteState,
   TmdbKeyStatus,
@@ -140,8 +141,20 @@ export async function tasteGet(): Promise<TasteState> {
   return invoke("taste_get");
 }
 
-export async function tasteAnalyze(): Promise<void> {
-  return invoke("taste_analyze");
+export async function tasteAnalyze(forceRefresh = false): Promise<void> {
+  return invoke("taste_analyze", { forceRefresh });
+}
+
+export async function tasteFeedbackSet(
+  tmdbId: number,
+  action: "interested" | "rejected" | "seen",
+  reason?: string | null,
+): Promise<TasteFeedback> {
+  return invoke("taste_feedback_set", { tmdbId, action, reason: reason ?? null });
+}
+
+export async function tasteFeedbackClear(tmdbId: number): Promise<void> {
+  return invoke("taste_feedback_clear", { tmdbId });
 }
 
 export function formatEnrich(r: EnrichReport): string {

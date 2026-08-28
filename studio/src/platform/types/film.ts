@@ -220,6 +220,15 @@ export type TasteEligibility = {
   portableEvidenceRequired: boolean;
   passed: boolean;
   passedBecause: string[];
+  candidateFit?: number;
+  evidenceGrade?: "none" | "medium" | "strong";
+};
+
+export type TasteEvidence = {
+  title: string;
+  filmId: string | null;
+  tmdbId: number | null;
+  poster: string | null;
 };
 
 export type TastePick = {
@@ -234,12 +243,28 @@ export type TastePick = {
   reasons?: string[];
   scoringReasons?: string[];
   evidence?: string[];
+  evidenceItems?: TasteEvidence[];
   mode?: string | null;
   origin?: string | null;
   originLabel?: string | null;
+  originDisplay?: string | null;
   matchedFeatures?: TasteMatchedFeature[];
   hiddenFeatures?: TasteMatchedFeature[];
   eligibility?: TasteEligibility;
+  matchScore?: number;
+  thinEvidence?: boolean;
+  semanticFit?: number;
+  semanticCoverage?: boolean;
+};
+
+export type TasteFeedback = {
+  contentKey: string;
+  tmdbId: number;
+  mediaKind: string;
+  action: "interested" | "rejected" | "seen" | string;
+  reason?: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TasteStat = {
@@ -266,6 +291,9 @@ export type TasteReport = {
   affinities: TasteAffinity[];
   aversions: TasteAffinity[];
   dimensions: TasteDimension[];
+  newPicks?: TastePick[];
+  explorePicks?: TastePick[];
+  watchlistPicks?: TastePick[];
   picks: TastePick[];
   model: string;
   generatedAt: string;
@@ -279,4 +307,5 @@ export type TasteState = {
   key: TasteKeyStatus;
   snapshot: TasteSnapshot;
   report: TasteReport | null;
+  feedback?: TasteFeedback[];
 };

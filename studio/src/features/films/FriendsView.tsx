@@ -103,7 +103,7 @@ export function FriendsView({
         </button>
       </header>
       <div className="friends-layout">
-        <aside className="solid-card friends-side">
+        <aside className="friends-side">
           <h2>Following</h2>
           <form
             className="friend-add"
@@ -147,7 +147,7 @@ export function FriendsView({
             {!friends.length ? <li className="muted">Nobody yet.</li> : null}
           </ul>
         </aside>
-        <section className="solid-card friends-feed">
+        <section className="friends-feed">
           <h2>Latest ratings</h2>
           <ul className="activity-list">
             {feed.map((e, idx) => (

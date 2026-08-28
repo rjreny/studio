@@ -574,23 +574,49 @@ fn upsert_tmdb_movie(db: &Database, tmdb_id: i64) -> Result<String, String> {
 
 pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result<String, String> {
     if !force {
-        if let Some((existing_id, poster, collection_json)) = db
+        if let Some((
+            existing_id,
+            poster,
+            collection_json,
+            genres_json,
+            credits_json,
+            keywords_json,
+            similar_json,
+            fresh,
+        )) = db
             .conn()
             .query_row(
-                "SELECT id, COALESCE(poster_path, ''), collection_json FROM movies WHERE tmdb_id = ?1",
+                "SELECT id, COALESCE(poster_path, ''), collection_json,
+                        genres_json, credits_json, keywords_json, similar_json,
+                        CASE WHEN enriched_at IS NOT NULL
+                              AND datetime(enriched_at) >= datetime('now', '-30 days')
+                             THEN 1 ELSE 0 END
+                 FROM movies WHERE tmdb_id = ?1",
                 params![tmdb_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| e.to_string())?
         {
-            if !poster.is_empty() && collection_json.is_some() {
+            if !poster.is_empty()
+                && collection_json.is_some()
+                && genres_json.is_some()
+                && credits_json.is_some()
+                && keywords_json.is_some()
+                && similar_json.is_some()
+                && fresh == 1
+            {
                 return Ok(existing_id);
             }
         }
@@ -610,7 +636,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     let poster = v["poster_path"].as_str().unwrap_or("").to_string();
     let tagline = v["tagline"].as_str().map(str::to_string).filter(|s| !s.is_empty());
     let (collection_name, collection_items) = collection_from_movie(&api_key, &v);
-    let similar = related_items(&v);
+    let (recommendations, similar) = related_lists(&v);
     let existing_id: Option<String> = db
         .conn()
         .query_row(
@@ -635,7 +661,11 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     let genres = serde_json::to_string(&genre_names(&v)).unwrap_or_else(|_| "[]".into());
     let cast = serde_json::to_string(&cast_names(&v)).unwrap_or_else(|_| "[]".into());
     let crew = serde_json::to_string(&crew_names(&v)).unwrap_or_else(|_| "[]".into());
-    let similar_json = serde_json::to_string(&similar).unwrap_or_else(|_| "[]".into());
+    let similar_json = serde_json::to_string(&serde_json::json!({
+        "recommendations": recommendations,
+        "similar": similar,
+    }))
+    .unwrap_or_else(|_| r#"{"recommendations":[],"similar":[]}"#.into());
     let reviews = serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into());
     let collection_json =
         serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
@@ -874,21 +904,40 @@ pub struct PersonCredit {
     pub tmdb_id: i64,
     pub title: String,
     pub year: Option<i32>,
+    #[serde(default)]
+    pub job: String,
 }
 
 pub fn person_movie_credits(db: &Database, person_id: i64) -> Result<Vec<PersonCredit>, String> {
-    if let Some(raw) = db
-        .conn()
-        .query_row(
-            "SELECT credits_json FROM person_credits WHERE person_id = ?1",
-            params![person_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?
-    {
-        if let Ok(items) = serde_json::from_str::<Vec<PersonCredit>>(&raw) {
-            return Ok(items);
+    person_movie_credits_with_force(db, person_id, false)
+}
+
+pub fn person_movie_credits_with_force(
+    db: &Database,
+    person_id: i64,
+    force: bool,
+) -> Result<Vec<PersonCredit>, String> {
+    if !force {
+        if let Some((raw, fresh)) = db
+            .conn()
+            .query_row(
+                "SELECT credits_json,
+                        CASE WHEN datetime(fetched_at) >= datetime('now', '-30 days')
+                             THEN 1 ELSE 0 END
+                 FROM person_credits WHERE person_id = ?1",
+                params![person_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        {
+            if fresh == 1 {
+                if let Ok(items) = serde_json::from_str::<Vec<PersonCredit>>(&raw) {
+                    if items.iter().all(|i| !i.job.trim().is_empty()) {
+                        return Ok(items);
+                    }
+                }
+            }
         }
     }
     let api_key = get_api_key()?.ok_or("missing api key")?;
@@ -896,27 +945,30 @@ pub fn person_movie_credits(db: &Database, person_id: i64) -> Result<Vec<PersonC
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for key in ["crew", "cast"] {
-        if let Some(arr) = v[key].as_array() {
-            for row in arr.iter().take(40) {
-                let Some(lib) = library_item_from_tmdb_value(row) else {
-                    continue;
-                };
-                let Some(id) = parse_tmdb_ref(&lib.id) else {
-                    continue;
-                };
-                if !seen.insert(id) {
-                    continue;
-                }
-                items.push(PersonCredit {
-                    tmdb_id: id,
-                    title: lib.title,
-                    year: lib.year,
-                });
+    if let Some(arr) = v["crew"].as_array() {
+        for row in arr {
+            let job = row["job"].as_str().unwrap_or("").trim();
+            if crate::taste::features::family_for_job(job).is_none() {
+                continue;
             }
+            let Some(lib) = library_item_from_movie_value(row) else {
+                continue;
+            };
+            let Some(id) = parse_tmdb_ref(&lib.id) else {
+                continue;
+            };
+            if !seen.insert((id, job.to_string())) {
+                continue;
+            }
+            items.push(PersonCredit {
+                tmdb_id: id,
+                title: lib.title,
+                year: lib.year,
+                job: job.to_string(),
+            });
         }
     }
-    items.truncate(40);
+    items.truncate(80);
     let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
     let _ = db.conn().execute(
         "INSERT OR REPLACE INTO person_credits(person_id, credits_json, fetched_at)
@@ -930,6 +982,66 @@ fn parse_tmdb_ref(id: &str) -> Option<i64> {
     id.strip_prefix("tmdb:")
         .and_then(|s| s.parse().ok())
         .or_else(|| id.parse().ok())
+}
+
+pub fn library_item_from_movie_value(v: &serde_json::Value) -> Option<LibraryItem> {
+    classify_tmdb_value(v)
+        .ok()
+        .filter(|(kind, _)| *kind == crate::taste::retrieve::MediaKind::Movie)
+        .map(|(_, item)| item)
+}
+
+pub fn classify_tmdb_value(
+    v: &serde_json::Value,
+) -> Result<(crate::taste::retrieve::MediaKind, LibraryItem), crate::taste::retrieve::MediaKind> {
+    use crate::taste::retrieve::MediaKind;
+    let Some(tmdb_id) = v["id"].as_i64() else {
+        return Err(MediaKind::Ambiguous);
+    };
+    if let Some(media_type) = v.get("media_type").and_then(|t| t.as_str()) {
+        match media_type {
+            "movie" => {}
+            "tv" => return Err(MediaKind::TvSeries),
+            other if other.contains("episode") => return Err(MediaKind::TvEpisode),
+            _ => return Err(MediaKind::Other),
+        }
+    }
+    let title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let name = v
+        .get("name")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let release = v
+        .get("release_date")
+        .and_then(|d| d.as_str())
+        .filter(|s| !s.is_empty());
+    let first_air = v
+        .get("first_air_date")
+        .and_then(|d| d.as_str())
+        .filter(|s| !s.is_empty());
+    let Some(title) = title else {
+        if name.is_some() && first_air.is_some() {
+            return Err(MediaKind::TvSeries);
+        }
+        return Err(MediaKind::Ambiguous);
+    };
+    let year = release.and_then(|d| d.get(0..4)).and_then(|y| y.parse().ok());
+    Ok((
+        MediaKind::Movie,
+        LibraryItem::catalog(
+            format!("tmdb:{tmdb_id}"),
+            title.to_string(),
+            year,
+            poster_url(v["poster_path"].as_str().map(str::to_string)),
+            backdrop_url(v["backdrop_path"].as_str().map(str::to_string)),
+            v["overview"].as_str().map(str::to_string),
+        ),
+    ))
 }
 
 pub fn library_item_from_tmdb_value(v: &serde_json::Value) -> Option<LibraryItem> {
@@ -956,21 +1068,23 @@ pub fn library_item_from_tmdb_value(v: &serde_json::Value) -> Option<LibraryItem
     ))
 }
 
-fn related_items(v: &serde_json::Value) -> Vec<LibraryItem> {
+fn related_list(v: &serde_json::Value, key: &str, take: usize) -> Vec<LibraryItem> {
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for key in ["recommendations", "similar"] {
-        if let Some(arr) = v[key]["results"].as_array() {
-            for item in arr.iter().take(12) {
-                if let Some(lib) = library_item_from_tmdb_value(item) {
-                    if seen.insert(lib.id.clone()) {
-                        items.push(lib);
-                    }
+    if let Some(arr) = v[key]["results"].as_array() {
+        for item in arr.iter().take(take) {
+            if let Some(lib) = library_item_from_movie_value(item) {
+                if seen.insert(lib.id.clone()) {
+                    items.push(lib);
                 }
             }
         }
     }
-    items.into_iter().take(16).collect()
+    items
+}
+
+fn related_lists(v: &serde_json::Value) -> (Vec<LibraryItem>, Vec<LibraryItem>) {
+    (related_list(v, "recommendations", 12), related_list(v, "similar", 12))
 }
 
 fn collection_from_movie(api_key: &str, v: &serde_json::Value) -> (Option<String>, Vec<LibraryItem>) {
@@ -992,7 +1106,7 @@ fn collection_from_movie(api_key: &str, v: &serde_json::Value) -> (Option<String
     };
     let parts = parsed["parts"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(library_item_from_tmdb_value).collect())
+        .map(|arr| arr.iter().filter_map(library_item_from_movie_value).collect())
         .unwrap_or_default();
     (name, parts)
 }
@@ -1029,6 +1143,102 @@ mod tests {
     fn match_progress_uses_library_total_not_batch_size() {
         assert_eq!(match_progress_label(2, 1097), "Matching TMDB · 2/1097");
         assert_ne!(match_progress_label(2, 1097), "Matching TMDB · 2/50");
+    }
+
+    #[test]
+    fn movie_parser_rejects_tv_name_and_air_date() {
+        let tv = serde_json::json!({
+            "id": 1,
+            "name": "Some Series",
+            "first_air_date": "2020-01-01"
+        });
+        assert!(library_item_from_movie_value(&tv).is_none());
+        assert!(matches!(
+            classify_tmdb_value(&tv),
+            Err(crate::taste::retrieve::MediaKind::TvSeries)
+        ));
+    }
+
+    #[test]
+    fn movie_parser_rejects_explicit_tv_media_type() {
+        let tv = serde_json::json!({
+            "id": 2,
+            "title": "Looks Like A Movie",
+            "release_date": "2021-01-01",
+            "media_type": "tv"
+        });
+        assert!(library_item_from_movie_value(&tv).is_none());
+    }
+
+    #[test]
+    fn movie_parser_accepts_title_without_media_type() {
+        let movie = serde_json::json!({
+            "id": 3,
+            "title": "The Prestige",
+            "release_date": "2006-10-20"
+        });
+        let item = library_item_from_movie_value(&movie).expect("movie");
+        assert_eq!(item.title, "The Prestige");
+        assert_eq!(item.year, Some(2006));
+    }
+
+    #[test]
+    fn movie_parser_rejects_name_only_ambiguous() {
+        let row = serde_json::json!({ "id": 4, "name": "Mystery" });
+        assert!(matches!(
+            classify_tmdb_value(&row),
+            Err(crate::taste::retrieve::MediaKind::Ambiguous)
+        ));
+    }
+
+    #[test]
+    fn movie_parser_ignores_video_flag_and_keeps_shorts() {
+        let row = serde_json::json!({
+            "id": 5,
+            "title": "A Short",
+            "release_date": "2020-01-01",
+            "video": true,
+            "runtime": 8
+        });
+        let item = library_item_from_movie_value(&row).expect("movie");
+        assert_eq!(item.title, "A Short");
+    }
+
+    #[test]
+    fn force_refresh_bypasses_person_credit_cache() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO person_credits(person_id, credits_json, fetched_at)
+                 VALUES (1, '[{\"tmdb_id\":999001,\"title\":\"SENTINEL\",\"year\":1999}]', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        let cached = person_movie_credits(&db, 1);
+        match cached {
+            Ok(items) => {
+                assert!(
+                    items.is_empty() || items.iter().any(|i| i.title != "SENTINEL"),
+                    "jobless person-credit cache must not be reused"
+                );
+            }
+            Err(_) => {}
+        }
+        db.conn()
+            .execute(
+                "INSERT OR REPLACE INTO person_credits(person_id, credits_json, fetched_at)
+                 VALUES (1, '[{\"tmdb_id\":999001,\"title\":\"SENTINEL\",\"year\":1999,\"job\":\"Director\"}]', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        let cached = person_movie_credits(&db, 1).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].title, "SENTINEL");
+        assert_eq!(cached[0].job, "Director");
+        match person_movie_credits_with_force(&db, 1, true) {
+            Ok(items) => assert!(items.iter().all(|i| i.title != "SENTINEL")),
+            Err(_) => {}
+        }
     }
 }
 

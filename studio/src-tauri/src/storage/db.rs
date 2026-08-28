@@ -97,6 +97,56 @@ impl Database {
                 [],
             );
         }
+        if version < 5 {
+            let _ = self.conn.execute(
+                r#"CREATE TABLE IF NOT EXISTS taste_feedback (
+                  content_key TEXT PRIMARY KEY,
+                  tmdb_id INTEGER NOT NULL,
+                  media_kind TEXT NOT NULL DEFAULT 'movie',
+                  action TEXT NOT NULL,
+                  reason TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )"#,
+                [],
+            );
+        }
+        if version < 6 {
+            let _ = self.conn.execute(
+                r#"CREATE TABLE IF NOT EXISTS taste_run_snapshot (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  algorithm_version TEXT NOT NULL,
+                  profile_fingerprint TEXT NOT NULL,
+                  library_state_fingerprint TEXT NOT NULL,
+                  candidate_input_fingerprint TEXT NOT NULL,
+                  scoring_fingerprint TEXT NOT NULL,
+                  narrative_key TEXT NOT NULL,
+                  catalog_valid_until TEXT NOT NULL,
+                  scored_pool_json TEXT NOT NULL,
+                  narrative_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                )"#,
+                [],
+            );
+        }
+        if version < 7 {
+            let _ = self.conn.execute(
+                r#"CREATE TABLE IF NOT EXISTS taste_embeddings (
+                  tmdb_id INTEGER NOT NULL,
+                  model TEXT NOT NULL,
+                  content_hash TEXT NOT NULL,
+                  dimension INTEGER NOT NULL,
+                  vector_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (tmdb_id, model)
+                )"#,
+                [],
+            );
+            let _ = self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_taste_embeddings_model ON taste_embeddings(model)",
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -154,7 +204,7 @@ impl Database {
                 SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id
               ) OR EXISTS (
                 SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id
-              ) THEN 1 ELSE 0 END,
+              ) OR json_extract(smr.raw_identity, '$.review') IS NOT NULL THEN 1 ELSE 0 END,
               COALESCE(smr.on_watchlist, 0),
               0,
               (
@@ -191,7 +241,8 @@ impl Database {
                    SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id
                  ) OR EXISTS (
                    SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id
-                 )"
+                 ) OR json_extract(smr.raw_identity, '$.review') IS NOT NULL
+                 "
                 ),
                 [],
                 |row| row.get(0),
@@ -211,6 +262,7 @@ impl Database {
                  AND (
                    EXISTS (SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id)
                    OR EXISTS (SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id)
+                   OR json_extract(smr.raw_identity, '$.review') IS NOT NULL
                    OR smr.on_watchlist = 1
                  )"
                 ),
@@ -348,6 +400,9 @@ impl Database {
         self.conn()
             .execute_batch(
                 r#"
+                DELETE FROM taste_run_snapshot;
+                DELETE FROM taste_embeddings;
+                DELETE FROM taste_feedback;
                 DELETE FROM person_credits;
                 DELETE FROM friend_activity;
                 DELETE FROM friends;
@@ -375,7 +430,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("4".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("7".into()));
     }
 
     #[test]
@@ -440,5 +495,44 @@ mod tests {
             db.remove_friend("missing").unwrap_err(),
             "Friend not found"
         );
+    }
+
+    #[test]
+    fn schema_v7_has_feedback_snapshot_and_embedding_tables() {
+        let db = Database::in_memory().expect("db");
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("7".into()));
+        let feedback: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'taste_feedback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snap: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'taste_run_snapshot'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let embeddings: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'taste_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(feedback, 1);
+        assert_eq!(snap, 1);
+        assert_eq!(embeddings, 1);
+        db.reset_all_data().unwrap();
+        let leftover: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM taste_feedback", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(leftover, 0);
     }
 }

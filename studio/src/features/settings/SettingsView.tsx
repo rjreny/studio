@@ -311,7 +311,7 @@ export function SettingsView({
         </div>
       </header>
       <div className="settings-grid">
-        <section className="settings-group solid-card">
+        <section className="settings-group">
           <h2>Library</h2>
           <div className="field">
             <label htmlFor="settings-user">Letterboxd user</label>
@@ -402,21 +402,21 @@ export function SettingsView({
           {lastEnrich ? <p className="hint">{formatEnrich(lastEnrich)}</p> : null}
         </section>
 
-        <section className="settings-group solid-card">
+        <section className="settings-group">
           <h2>Taste agent</h2>
           <p className="hint">
             Pay-as-you-go via{" "}
             <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">
               OpenRouter
             </a>
-            . Llama 3.3 70B is the cheap default from models your OpenRouter privacy settings
-            actually allow. You can also pick the model on the Taste tab.
+            . DeepSeek V4 Pro 0813 is the recommended default from the models your OpenRouter
+            privacy settings actually allow. Choose the reader and web access here.
           </p>
           <div className="field">
             <span className="field-label">Model</span>
             <TasteModelList
               models={tasteStatus?.models ?? []}
-              selected={tasteStatus?.model ?? "llama"}
+              selected={tasteStatus?.model ?? "deepseek/deepseek-v4-pro-0813"}
               disabled={busy}
               onPick={(id) => void pickTasteModel(id)}
             />
@@ -491,7 +491,7 @@ export function SettingsView({
           </div>
         </section>
 
-        <section className="settings-group solid-card">
+        <section className="settings-group">
           <h2>Look</h2>
           <div className="field">
             <span className="field-label">Theme</span>
@@ -515,7 +515,7 @@ export function SettingsView({
           </div>
         </section>
 
-        <section className="settings-group solid-card">
+        <section className="settings-group">
           <h2>This PC</h2>
           {installInfo ? (
             <>
@@ -547,7 +547,7 @@ export function SettingsView({
           </div>
         </section>
 
-        <section className="settings-group solid-card">
+        <section className="settings-group">
           <h2>Updates</h2>
           <div className="update-line">
             <button type="button" className="ghost-pill" onClick={() => void checkUpdates()}>

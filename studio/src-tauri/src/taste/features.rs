@@ -78,6 +78,20 @@ impl FeatureFamily {
             _ => 4,
         }
     }
+
+    pub fn sort_key(self) -> u8 {
+        match self {
+            Self::Director => 0,
+            Self::Writer => 1,
+            Self::Cinematographer => 2,
+            Self::Composer => 3,
+            Self::Actor => 4,
+            Self::Keyword => 5,
+            Self::Genre => 6,
+            Self::Decade => 7,
+            Self::Runtime => 8,
+        }
+    }
 }
 
 pub fn family_for_job(job: &str) -> Option<FeatureFamily> {
@@ -144,6 +158,10 @@ pub struct EvidenceFilm {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub genres: Vec<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub runtime: Option<i32>,
 }
 
 pub(crate) fn evidence_film_id(e: &EvidenceFilm) -> String {
@@ -164,7 +182,79 @@ pub enum KeywordRole {
     Ignore,
 }
 
+/// Strength class for keywords that already made it past ignore/contextual.
+/// Frozen preference math is unchanged; this only gates retrieval carry
+/// and final selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordStrength {
+    Strong,
+    Thematic,
+    Broad,
+    Contextual,
+    Ignore,
+}
+
 pub fn keyword_role(name: &str) -> KeywordRole {
+    match keyword_strength(name) {
+        KeywordStrength::Ignore => KeywordRole::Ignore,
+        KeywordStrength::Contextual => KeywordRole::Contextual,
+        KeywordStrength::Strong | KeywordStrength::Thematic | KeywordStrength::Broad => {
+            KeywordRole::Signal
+        }
+    }
+}
+
+pub fn keyword_can_carry_alone(name: &str) -> bool {
+    keyword_strength(name) == KeywordStrength::Strong
+}
+
+pub fn keyword_strength_label(name: &str) -> &'static str {
+    match keyword_strength(name) {
+        KeywordStrength::Strong => "strong",
+        KeywordStrength::Thematic => "thematic",
+        KeywordStrength::Broad => "broad",
+        KeywordStrength::Contextual => "contextual",
+        KeywordStrength::Ignore => "ignore",
+    }
+}
+
+/// Headline reasons on a pick card. Adjectival metadata may still score;
+/// it should not be presented as a core taste signal.
+pub fn keyword_is_display_reason(name: &str) -> bool {
+    if is_adjectival_keyword(name) {
+        return false;
+    }
+    matches!(
+        keyword_strength(name),
+        KeywordStrength::Strong | KeywordStrength::Thematic
+    )
+}
+
+fn is_adjectival_keyword(name: &str) -> bool {
+    let compact: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    is_reaction_keyword(&compact)
+        || matches!(
+            compact.as_str(),
+            "bold"
+                | "enthusiastic"
+                | "amused"
+                | "adoring"
+                | "joyful"
+                | "nostalgic"
+                | "dramatic"
+                | "excited"
+                | "whimsical"
+                | "romantic"
+                | "anxious"
+        )
+}
+
+pub fn keyword_strength(name: &str) -> KeywordStrength {
     let lower = name.trim().to_ascii_lowercase();
     let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     if compact.contains("stinger")
@@ -172,12 +262,91 @@ pub fn keyword_role(name: &str) -> KeywordRole {
         || compact.contains("aftercredits")
         || compact.starts_with("basedon")
     {
-        return KeywordRole::Ignore;
+        return KeywordStrength::Ignore;
     }
-    if is_geographic_keyword(&lower) || is_generic_keyword(&compact) {
-        return KeywordRole::Contextual;
+    if is_geographic_keyword(&lower)
+        || is_generic_keyword(&compact)
+        || is_reaction_keyword(&compact)
+    {
+        return KeywordStrength::Contextual;
     }
-    KeywordRole::Signal
+    if is_strong_keyword(&lower, &compact) {
+        return KeywordStrength::Strong;
+    }
+    if is_broad_keyword(&lower, &compact) {
+        return KeywordStrength::Broad;
+    }
+    if is_thematic_keyword(&compact) {
+        return KeywordStrength::Thematic;
+    }
+    // TMDB emits many descriptive/marketing attributes that look like taste
+    // signals but are not stable enough to drive retrieval or membership.
+    KeywordStrength::Contextual
+}
+
+fn is_thematic_keyword(compact: &str) -> bool {
+    matches!(
+        compact,
+        "comingofage"
+            | "dysfunctionalfamily"
+            | "fathersonrelationship"
+            | "fatherdaughterrelationship"
+            | "motherdaughterrelationship"
+            | "parentchildrelationship"
+            | "siblingrelationship"
+            | "lossoflovedone"
+            | "foundfamily"
+            | "heist"
+            | "creature"
+            | "supernaturalhorror"
+    )
+}
+
+fn is_strong_keyword(lower: &str, compact: &str) -> bool {
+    compact.contains("neonoir")
+        || compact.contains("filmnoir")
+        || compact.contains("nonlinear")
+        || compact.contains("longtake")
+        || compact == "oner"
+        || compact.contains("oneshot")
+        || compact.contains("timeloop")
+        || lower.contains("neo-noir")
+        || lower.contains("film noir")
+        || lower.contains("long take")
+        || lower.contains("one-shot")
+        || lower.contains("non-linear")
+}
+
+fn is_broad_keyword(lower: &str, compact: &str) -> bool {
+    matches!(
+        compact,
+        "drugs"
+            | "drug"
+            | "murder"
+            | "battle"
+            | "friends"
+            | "friendship"
+            | "bestfriend"
+            | "war"
+            | "violence"
+            | "fight"
+            | "dramatic"
+            | "spacecraft"
+            | "spinoff"
+            | "prequel"
+            | "sequel"
+            | "phonecall"
+            | "workaholic"
+            | "teenmovie"
+            | "highschool"
+            | "sports"
+            | "revenge"
+            | "crime"
+    ) || lower == "best friend"
+        || lower == "phone call"
+        || lower == "spin off"
+        || lower == "teen movie"
+        || lower == "high school"
 }
 
 fn is_geographic_keyword(lower: &str) -> bool {
@@ -201,9 +370,203 @@ fn is_generic_keyword(compact: &str) -> bool {
     )
 }
 
+/// Mood/reaction adjectives are too broad to retrieve with. They stay on the
+/// profile as context, like location tags, but they do not hunt or rank.
+fn is_reaction_keyword(compact: &str) -> bool {
+    matches!(
+        compact,
+        "hilarious"
+            | "admiring"
+            | "funny"
+            | "amusing"
+            | "entertaining"
+            | "cute"
+            | "cool"
+            | "awesome"
+            | "weird"
+            | "quirky"
+            | "sad"
+            | "scary"
+            | "exciting"
+            | "emotional"
+            | "touching"
+            | "heartwarming"
+            | "feelgood"
+            | "feelgoodmovie"
+    )
+}
+
 /// Observed keywords. Contextual locations/generics are still observed.
 pub fn keyword_is_taste_signal(name: &str) -> bool {
     keyword_role(name) != KeywordRole::Ignore
+}
+
+/// Explicit execution-language signals from personal reviews. A phrase must
+/// occur in at least two separate reviews before it becomes profile evidence;
+/// one-off jokes, sarcasm, and isolated reactions stay out of retrieval.
+pub fn repeated_execution_signals(reviews: &[&str]) -> Vec<String> {
+    EXECUTION_LEXICON
+        .iter()
+        .filter(|(_, phrases)| {
+            reviews
+                .iter()
+                .filter(|review| review_mentions_any(review, phrases))
+                .count()
+                >= 2
+        })
+        .map(|(label, _)| (*label).to_string())
+        .collect()
+}
+
+/// Turn only already-repeated review signals into candidate/profile keywords.
+/// The returned names are deliberately human-readable because they can appear
+/// in explanations and profile exports.
+pub fn execution_keywords_for_review(review: &str, accepted: &[String]) -> Vec<Keyword> {
+    EXECUTION_LEXICON
+        .iter()
+        .filter(|(label, phrases)| {
+            accepted.iter().any(|signal| signal == label)
+                && review_mentions_any(review, phrases)
+        })
+        .map(|(label, _)| Keyword {
+            id: None,
+            name: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// Polarity for the small, repeated review lexicon. These labels are only
+/// admitted after `repeated_execution_signals`, so a single joke or aside
+/// cannot become a durable preference.
+pub fn execution_signal_polarity(name: &str) -> Option<f32> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "strong performances"
+        | "beautiful cinematography"
+        | "polished visual effects"
+        | "tight pacing"
+        | "strong dialogue" => Some(1.0),
+        "weak performances"
+        | "poor visual effects"
+        | "slow pacing"
+        | "overlong"
+        | "weak dialogue" => {
+            Some(-1.0)
+        }
+        _ => None,
+    }
+}
+
+const EXECUTION_LEXICON: &[(&str, &[&str])] = &[
+    (
+        "strong performances",
+        &[
+            "great acting",
+            "excellent acting",
+            "strong acting",
+            "acting was great",
+            "acting was excellent",
+            "great performances",
+            "excellent performances",
+            "strong performances",
+            "well acted",
+            "well-acted",
+            "phenomenal acting",
+            "brilliant acting",
+        ],
+    ),
+    (
+        "beautiful cinematography",
+        &[
+            "beautiful cinematography",
+            "great cinematography",
+            "stunning cinematography",
+            "beautifully shot",
+            "stunning visuals",
+        ],
+    ),
+    (
+        "polished visual effects",
+        &[
+            "great visual effects",
+            "excellent visual effects",
+            "impressive visual effects",
+            "great effects",
+            "excellent effects",
+        ],
+    ),
+    (
+        "tight pacing",
+        &[
+            "tight pacing",
+            "pacing was tight",
+            "well paced",
+            "well-paced",
+            "good pacing",
+            "pacing was good",
+        ],
+    ),
+    (
+        "strong dialogue",
+        &[
+            "great dialogue",
+            "excellent dialogue",
+            "strong dialogue",
+            "sharp dialogue",
+            "witty dialogue",
+        ],
+    ),
+    (
+        "weak performances",
+        &[
+            "bad acting",
+            "poor acting",
+            "weak acting",
+            "bad performances",
+            "poor performances",
+            "weak performances",
+            "badly acted",
+        ],
+    ),
+    (
+        "poor visual effects",
+        &[
+            "bad visual effects",
+            "poor visual effects",
+            "cheap visual effects",
+            "bad cgi",
+            "poor cgi",
+            "cheap cgi",
+            "terrible cgi",
+        ],
+    ),
+    (
+        "slow pacing",
+        &["slow pacing", "poor pacing", "dragged", "dragging"],
+    ),
+    (
+        "overlong",
+        &["too long", "overlong", "way too long", "felt too long"],
+    ),
+    (
+        "weak dialogue",
+        &[
+            "bad dialogue",
+            "poor dialogue",
+            "weak dialogue",
+            "clunky dialogue",
+            "wooden dialogue",
+            "terrible dialogue",
+        ],
+    ),
+];
+
+fn review_mentions_any(review: &str, phrases: &[&str]) -> bool {
+    let normalized = review
+        .to_ascii_lowercase()
+        .replace(['-', '–', '—'], " ");
+    phrases.iter().any(|phrase| {
+        normalized.contains(&phrase.to_ascii_lowercase().replace(['-', '–', '—'], " "))
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -453,6 +816,9 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
         b.scoring_affinity()
             .partial_cmp(&a.scoring_affinity())
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.key.family.sort_key().cmp(&b.key.family.sort_key()))
+            .then_with(|| a.key.name.cmp(&b.key.name))
+            .then_with(|| a.key.id.cmp(&b.key.id))
     });
 
     let polarizing: Vec<PolarizingFeature> = affinities
@@ -514,6 +880,8 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
             .abs()
             .partial_cmp(&a.delta.abs())
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.family.sort_key().cmp(&b.family.sort_key()))
+            .then_with(|| a.feature.cmp(&b.feature))
     });
     shifts.truncate(8);
 
@@ -657,6 +1025,8 @@ pub fn observations_from_film(
             .map(|k| k.name.clone())
             .collect(),
         genres: genres.to_vec(),
+        year,
+        runtime,
     };
     let abs = signal.preference.absolute;
     let positive = abs.max(0.0) * crate::taste::preference::relative_strength(signal.preference.relative);
@@ -759,6 +1129,15 @@ mod tests {
     #[test]
     fn cartoon_and_anti_hero_are_not_citeable_engines() {
         for name in ["cartoon", "anti hero"] {
+            let a = two_film_keyword(name);
+            assert_eq!(a.appearances, 2, "{name} should still be observed");
+            assert!(!a.citeable(), "{name}");
+        }
+    }
+
+    #[test]
+    fn reaction_keywords_are_not_citeable_engines() {
+        for name in ["hilarious", "admiring"] {
             let a = two_film_keyword(name);
             assert_eq!(a.appearances, 2, "{name} should still be observed");
             assert!(!a.citeable(), "{name}");
@@ -973,6 +1352,25 @@ mod tests {
             .unwrap();
         assert!(decade.portability >= 0.4, "got {}", decade.portability);
         assert!(decade.scoring_affinity() > 0.0);
+    }
+
+    #[test]
+    fn execution_language_requires_repeated_explicit_phrases() {
+        let one = ["The acting was great, honestly."].as_slice();
+        assert!(repeated_execution_signals(&one).is_empty());
+
+        let repeated = [
+            "The acting was great and the pacing was tight.",
+            "Great acting with tight pacing throughout.",
+        ];
+        let signals = repeated_execution_signals(&repeated);
+        assert!(signals.iter().any(|s| s == "strong performances"));
+        assert!(signals.iter().any(|s| s == "tight pacing"));
+        let keywords = execution_keywords_for_review(&repeated[0], &signals);
+        assert!(keywords.iter().any(|k| k.name == "strong performances"));
+        assert!(keywords.iter().any(|k| k.name == "tight pacing"));
+        assert_eq!(execution_signal_polarity("strong performances"), Some(1.0));
+        assert_eq!(execution_signal_polarity("slow pacing"), Some(-1.0));
     }
 
     #[test]
@@ -1314,5 +1712,31 @@ mod tests {
             &[],
             &["comedy".into()]
         ));
+    }
+
+    #[test]
+    fn keyword_strength_classes() {
+        assert_eq!(keyword_strength("neo-noir"), KeywordStrength::Strong);
+        assert_eq!(keyword_strength("nonlinear timeline"), KeywordStrength::Strong);
+        assert_eq!(keyword_strength("long take"), KeywordStrength::Strong);
+        assert_eq!(keyword_strength("coming of age"), KeywordStrength::Thematic);
+        assert_eq!(keyword_strength("dysfunctional family"), KeywordStrength::Thematic);
+        assert_eq!(keyword_strength("drugs"), KeywordStrength::Broad);
+        assert_eq!(keyword_strength("murder"), KeywordStrength::Broad);
+        assert_eq!(keyword_strength("battle"), KeywordStrength::Broad);
+        assert_eq!(keyword_strength("friends"), KeywordStrength::Broad);
+        assert_eq!(keyword_strength("hilarious"), KeywordStrength::Contextual);
+        assert_eq!(keyword_strength("based on novel"), KeywordStrength::Ignore);
+        assert!(keyword_can_carry_alone("neo-noir"));
+        assert!(!keyword_can_carry_alone("coming of age"));
+        assert!(!keyword_can_carry_alone("drugs"));
+        assert!(!keyword_can_carry_alone("hilarious"));
+        assert!(keyword_is_display_reason("neo-noir"));
+        assert!(keyword_is_display_reason("coming of age"));
+        assert!(keyword_is_display_reason("supernatural horror"));
+        assert!(!keyword_is_display_reason("bold"));
+        assert!(!keyword_is_display_reason("enthusiastic"));
+        assert!(!keyword_is_display_reason("amused"));
+        assert!(!keyword_is_display_reason("dramatic"));
     }
 }

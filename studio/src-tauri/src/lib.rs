@@ -270,6 +270,8 @@ pub fn run() {
             commands::taste_set_web,
             commands::taste_get,
             commands::taste_analyze,
+            commands::taste_feedback_set,
+            commands::taste_feedback_clear,
             commands::list_friends,
             commands::remove_friend,
             commands::update_preflight,

@@ -1,5 +1,6 @@
-use crate::taste::score::CandidateScore;
+use crate::taste::explain::{EligibilityTrace, MatchedFeatureView};
 use crate::taste::retrieve::{RetrievalKind, RetrievalSource};
+use crate::taste::score::CandidateScore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,11 +34,18 @@ impl RecommendationMode {
 #[serde(rename_all = "camelCase")]
 pub struct RecommendationProvenance {
     pub tmdb_id: Option<i64>,
+    pub title: String,
     pub origin: RecommendationOrigin,
+    pub retrieval_kind: String,
     pub retrieval_sources: Vec<RetrievalSource>,
     pub deterministic_score: CandidateScore,
     pub llm_mode: RecommendationMode,
     pub seed_films: Vec<String>,
+    pub scoring_reasons: Vec<String>,
+    pub display_reasons: Vec<String>,
+    pub matched_features: Vec<MatchedFeatureView>,
+    pub hidden_features: Vec<MatchedFeatureView>,
+    pub eligibility: EligibilityTrace,
     pub positive_features: Vec<String>,
     pub negative_features_considered: Vec<String>,
     pub call1_fit: Option<String>,

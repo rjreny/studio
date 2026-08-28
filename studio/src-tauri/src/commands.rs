@@ -824,19 +824,40 @@ pub fn taste_get(state: State<'_, AppState>) -> Result<crate::taste::TasteState,
 }
 
 #[tauri::command]
-pub fn taste_analyze(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub fn taste_analyze(
+    force_refresh: Option<bool>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let force = force_refresh.unwrap_or(false);
     crate::jobs::spawn_job(
         app,
         state.job.clone(),
         state.db_path.clone(),
         "taste",
         move |app, db_path| {
-            crate::app_log::write(app, "taste analyze started");
             let db = crate::jobs::open_worker_db(&db_path)?;
+            let model = crate::taste::stored_model(&db).unwrap_or_else(|_| "unknown".into());
+            let web = crate::taste::stored_web(&db).unwrap_or(true);
+            crate::app_log::write(
+                app,
+                &format!("taste analyze started model={model} web={web} force={force}"),
+            );
             let app_for_progress = app.clone();
-            let report = crate::taste::analyze(&db, &mut |progress| {
-                let _ = app_for_progress.emit("studio-job", &progress);
-            })?;
+            let run_dir = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|p| p.join("taste-runs"));
+            let report = crate::taste::analyze_with_run_log(
+                &db,
+                &mut |progress| {
+                    crate::app_log::write(&app_for_progress, &format!("taste · {}", progress.label));
+                    let _ = app_for_progress.emit("studio-job", &progress);
+                },
+                run_dir.as_deref(),
+                force,
+            )?;
             crate::app_log::write(
                 app,
                 &format!(
@@ -859,4 +880,21 @@ pub fn taste_analyze(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
             Ok(())
         },
     )
+}
+
+#[tauri::command]
+pub fn taste_feedback_set(
+    tmdb_id: i64,
+    action: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::taste::feedback::TasteFeedback, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::feedback::set_feedback(&db, tmdb_id, &action, reason)
+}
+
+#[tauri::command]
+pub fn taste_feedback_clear(tmdb_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::feedback::clear_feedback(&db, tmdb_id)
 }

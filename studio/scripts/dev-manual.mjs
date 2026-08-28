@@ -6,7 +6,7 @@ const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const tauriRoot = path.join(studioRoot, "src-tauri");
 const stampPath = path.join(tauriRoot, "target", ".studio-dev-stamp");
 
-function run(cmd: string, args: string[], cwd: string) {
+function run(cmd, args, cwd) {
   const child = spawn(cmd, args, {
     cwd,
     shell: process.platform === "win32",

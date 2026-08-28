@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 7;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -151,4 +151,40 @@ CREATE INDEX IF NOT EXISTS idx_viewings_source_movie ON viewings(source_movie_re
 CREATE INDEX IF NOT EXISTS idx_rating_events_source_movie ON rating_events(source_movie_record_id);
 CREATE INDEX IF NOT EXISTS idx_source_movie_title ON source_movie_records(normalized_title, release_year);
 CREATE INDEX IF NOT EXISTS idx_movie_links_state ON movie_links(match_state);
+
+CREATE TABLE IF NOT EXISTS taste_feedback (
+  content_key TEXT PRIMARY KEY,
+  tmdb_id INTEGER NOT NULL,
+  media_kind TEXT NOT NULL DEFAULT 'movie',
+  action TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS taste_run_snapshot (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  algorithm_version TEXT NOT NULL,
+  profile_fingerprint TEXT NOT NULL,
+  library_state_fingerprint TEXT NOT NULL,
+  candidate_input_fingerprint TEXT NOT NULL,
+  scoring_fingerprint TEXT NOT NULL,
+  narrative_key TEXT NOT NULL,
+  catalog_valid_until TEXT NOT NULL,
+  scored_pool_json TEXT NOT NULL,
+  narrative_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS taste_embeddings (
+  tmdb_id INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  vector_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tmdb_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_embeddings_model ON taste_embeddings(model);
 "#;

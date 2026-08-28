@@ -54,11 +54,14 @@ where
             let result = work(&app, db_path);
             if let Err(err) = result {
                 crate::app_log::write(&app, &format!("{name} failed: {err}"));
+                if name == "taste" {
+                    persist_taste_failure(&app, &err);
+                }
                 let _ = app.emit(
                     "studio-job",
                     JobProgress {
                         job: name.into(),
-                        label: format!("{name} failed · {err}"),
+                        label: format!("{name} failed · {}", toast_err(&err)),
                         errors: 1,
                         done: true,
                         ..Default::default()
@@ -77,6 +80,30 @@ where
 
 pub fn open_worker_db(path: &PathBuf) -> Result<Database, String> {
     Database::open(path)
+}
+
+fn toast_err(err: &str) -> String {
+    let short = err.split(" · raw:").next().unwrap_or(err).trim();
+    if short.chars().count() <= 180 {
+        short.to_string()
+    } else {
+        format!("{}…", short.chars().take(177).collect::<String>())
+    }
+}
+
+fn persist_taste_failure(app: &AppHandle, err: &str) {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let body = serde_json::json!({
+        "ok": false,
+        "at": chrono::Utc::now().to_rfc3339(),
+        "error": err,
+    })
+    .to_string();
+    if let Some(path) = crate::app_log::write_json(app, "taste-runs", &format!("{stamp}-failed.json"), &body)
+    {
+        let _ = crate::app_log::write_json(app, "taste-runs", "latest.json", &body);
+        crate::app_log::write(app, &format!("taste · failure trace {}", path.display()));
+    }
 }
 
 #[cfg(test)]

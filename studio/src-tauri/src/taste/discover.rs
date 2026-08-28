@@ -2,7 +2,7 @@ use crate::catalog::tmdb::{self, MovieLookup};
 use crate::storage::db::Database;
 use crate::taste::features::{FeatureFamily, FeatureProfile};
 use crate::taste::retrieve::{
-    identity_key, Candidate, RetrievalKind, RetrievalSource,
+    identity_key, Candidate, MediaKind, RetrievalKind, RetrievalSource,
 };
 use crate::taste::score::{score_candidate, ScoredCandidate};
 use serde_json::Value;
@@ -80,13 +80,15 @@ fn score_lookup(
             kind: RetrievalKind::Discovery,
             label: query.to_string(),
             seed_tmdb_id: None,
+            seed_rating: None,
         }],
         friend_affinity: 0.0,
         tmdb_related: 0.0,
+    media_kind: MediaKind::Movie,
     };
-    let _ = crate::taste::retrieve::enrich_missing(db, std::slice::from_mut(&mut candidate), 1);
+    let _ = crate::taste::retrieve::enrich_missing(db, std::slice::from_mut(&mut candidate), 1, false);
     let scored = score_candidate(profile, &candidate);
-    if scored.contextual_only {
+    if !scored.eligibility.passed || !scored.eligibility.evidence_grade.displayable() {
         return None;
     }
     let sparse_facet = matches_sparse_facet(profile, &scored);

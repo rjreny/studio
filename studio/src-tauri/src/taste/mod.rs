@@ -1,20 +1,30 @@
+pub mod cache;
+pub mod confidence;
 pub mod dimensions;
 pub mod discover;
 pub mod eval;
+pub mod explain;
 pub mod features;
+pub mod feedback;
+pub mod freeze;
 pub mod preference;
 pub mod provenance;
 pub mod reason;
 pub mod retrieve;
+pub mod runlog;
 pub mod score;
+pub mod semantic;
 pub mod shortlist;
 pub mod validate;
+pub mod workspace;
 
 use crate::catalog::tmdb;
 use crate::models::JobProgress;
 use crate::storage::db::Database;
 use crate::taste::features::{
-    build_profile, observations_from_film, FeatureFamily, FeatureProfile, PORTABLE_CONTEXTUAL,
+    build_profile, execution_keywords_for_review, execution_signal_polarity,
+    observations_from_film, repeated_execution_signals, FeatureFamily, FeatureProfile, Keyword,
+    PORTABLE_CONTEXTUAL,
 };
 use crate::taste::dimensions::ModeFilm;
 use crate::taste::preference::MIN_RATINGS;
@@ -22,11 +32,14 @@ use crate::taste::reason::{
     call1_payload, call2_payload, empty_critic, parse_critic, parse_reasoner, CALL1_SYSTEM,
     CALL2_SYSTEM, CriticReport, ReasonerPick,
 };
-use crate::taste::retrieve::{attach_signals, load_films, retrieve, seen_keys, FilmRecord};
-use crate::taste::score::{score_all, ScoredCandidate};
+use crate::taste::retrieve::{
+    attach_signals, load_films, retrieve_with_coverage, seen_keys, FilmRecord,
+};
+use crate::taste::score::ScoredCandidate;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::time::Duration;
 
 const KEYRING_SERVICE: &str = "studio";
@@ -36,10 +49,10 @@ const META_MODEL: &str = "taste_model";
 const META_WEB: &str = "taste_web";
 const OPENROUTER_CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY: &str = "https://openrouter.ai/api/v1/key";
-const MODEL_LLAMA: &str = "llama";
-const MODEL_DEEPSEEK: &str = "deepseek";
-const MODEL_QWEN: &str = "qwen";
-const MODEL_NEMO: &str = "nemo";
+const MODEL_DEEPSEEK: &str = "deepseek/deepseek-v4-pro-0813";
+const MODEL_QWEN_MAX: &str = "qwen/qwen3.8-2.4t-a95b";
+const MODEL_QWEN_BALANCED: &str = "qwen/qwen3.8-27b";
+const MODEL_GEMINI: &str = "google/gemini-3.7-flash";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +93,18 @@ pub struct TasteDimension {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TasteEvidence {
+    pub title: String,
+    #[serde(default)]
+    pub film_id: Option<String>,
+    #[serde(default)]
+    pub tmdb_id: Option<i64>,
+    #[serde(default)]
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TastePick {
     pub title: String,
     pub year: Option<i32>,
@@ -93,9 +118,37 @@ pub struct TastePick {
     #[serde(default)]
     pub reasons: Vec<String>,
     #[serde(default)]
+    pub scoring_reasons: Vec<String>,
+    #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]
+    pub evidence_items: Vec<TasteEvidence>,
+    #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub origin_label: Option<String>,
+    #[serde(default)]
+    pub origin_display: Option<String>,
+    #[serde(default)]
+    pub matched_features: Vec<crate::taste::explain::MatchedFeatureView>,
+    #[serde(default)]
+    pub hidden_features: Vec<crate::taste::explain::MatchedFeatureView>,
+    #[serde(default)]
+    pub eligibility: crate::taste::explain::EligibilityTrace,
+    #[serde(default)]
+    pub match_score: u8,
+    #[serde(default)]
+    pub thin_evidence: bool,
+    #[serde(default = "default_semantic_fit")]
+    pub semantic_fit: f32,
+    #[serde(default)]
+    pub semantic_coverage: bool,
+}
+
+fn default_semantic_fit() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +184,12 @@ pub struct TasteReport {
     pub affinities: Vec<TasteAffinity>,
     pub aversions: Vec<TasteAffinity>,
     pub dimensions: Vec<TasteDimension>,
+    #[serde(default)]
+    pub new_picks: Vec<TastePick>,
+    #[serde(default)]
+    pub explore_picks: Vec<TastePick>,
+    #[serde(default)]
+    pub watchlist_picks: Vec<TastePick>,
     pub picks: Vec<TastePick>,
     pub model: String,
     pub generated_at: String,
@@ -139,6 +198,23 @@ pub struct TasteReport {
     pub web_used: bool,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub run_log_path: Option<String>,
+}
+
+impl TasteReport {
+    pub fn normalize(mut self) -> Self {
+        if self.new_picks.is_empty() && self.watchlist_picks.is_empty() && !self.picks.is_empty() {
+            self.new_picks = self.picks.clone();
+        }
+        self.picks = self
+            .new_picks
+            .iter()
+            .cloned()
+            .chain(self.watchlist_picks.iter().cloned())
+            .collect();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,74 +223,84 @@ pub struct TasteState {
     pub key: TasteKeyStatus,
     pub snapshot: TasteSnapshot,
     pub report: Option<TasteReport>,
+    #[serde(default)]
+    pub feedback: Vec<crate::taste::feedback::TasteFeedback>,
 }
 
 pub fn default_model() -> String {
-    MODEL_LLAMA.to_string()
+    MODEL_DEEPSEEK.to_string()
 }
 
 pub fn normalize_model(raw: &str) -> String {
     let compact = raw.trim().to_ascii_lowercase().replace([' ', '_'], "-");
     if compact.contains("deepseek") {
         MODEL_DEEPSEEK.into()
-    } else if compact.contains("qwen") {
-        MODEL_QWEN.into()
-    } else if compact.contains("nemo") || compact.contains("mistral") {
-        MODEL_NEMO.into()
+    } else if compact.contains("gemini-3.7") || compact == "gemini" {
+        MODEL_GEMINI.into()
+    } else if compact.contains("qwen3.8-2.4t") {
+        MODEL_QWEN_MAX.into()
+    } else if compact.contains("qwen3.8-27b") {
+        MODEL_QWEN_BALANCED.into()
     } else {
-        MODEL_LLAMA.into()
+        // Legacy picker values are no longer offered. Use the recommended
+        // model instead of sending an obsolete provider ID.
+        default_model()
     }
 }
 
 fn openrouter_model_id(model: &str) -> &'static str {
     match model {
-        MODEL_DEEPSEEK => "deepseek/deepseek-chat",
-        MODEL_QWEN => "qwen/qwen-2.5-72b-instruct",
-        MODEL_NEMO => "mistralai/mistral-nemo",
-        _ => "meta-llama/llama-3.3-70b-instruct",
+        MODEL_DEEPSEEK => MODEL_DEEPSEEK,
+        MODEL_QWEN_MAX => MODEL_QWEN_MAX,
+        MODEL_QWEN_BALANCED => MODEL_QWEN_BALANCED,
+        MODEL_GEMINI => MODEL_GEMINI,
+        _ => MODEL_DEEPSEEK,
     }
 }
 
 fn model_label(model: &str) -> &'static str {
     match model {
-        MODEL_DEEPSEEK => "DeepSeek V3",
-        MODEL_QWEN => "Qwen2.5 72B",
-        MODEL_NEMO => "Mistral Nemo",
-        _ => "Llama 3.3 70B",
+        MODEL_DEEPSEEK => "DeepSeek V4 Pro 0813",
+        MODEL_QWEN_MAX => "Qwen3.8 2.4T A95B",
+        MODEL_QWEN_BALANCED => "Qwen3.8 27B",
+        MODEL_GEMINI => "Gemini 3.7 Flash",
+        _ => "DeepSeek V4 Pro 0813",
     }
 }
 
 pub fn model_catalog() -> Vec<TasteModelInfo> {
-    vec![
-        TasteModelInfo {
-            id: MODEL_LLAMA.into(),
-            label: "Llama 3.3 70B".into(),
-            blurb: "Reasons over a scored shortlist. 128k context, cheap default.".into(),
-            context: "128k".into(),
-            cost: "cheap".into(),
-        },
+    let mut models = vec![
         TasteModelInfo {
             id: MODEL_DEEPSEEK.into(),
-            label: "DeepSeek V3".into(),
-            blurb: "Strong critic pass. Some hosts cap context, so the shortlist stays tight.".into(),
+            label: "DeepSeek V4 Pro 0813".into(),
+            blurb: "Best fit for nuanced taste synthesis and long scored shortlists.".into(),
+            context: "1M".into(),
+            cost: "premium".into(),
+        },
+        TasteModelInfo {
+            id: MODEL_QWEN_MAX.into(),
+            label: "Qwen3.8 2.4T A95B".into(),
+            blurb: "Maximum-depth alternative for a large, careful editorial pass.".into(),
             context: "32–164k".into(),
-            cost: "cheap".into(),
+            cost: "highest".into(),
         },
         TasteModelInfo {
-            id: MODEL_NEMO.into(),
-            label: "Mistral Nemo".into(),
-            blurb: "Cheapest 128k option. Weaker editorial take than the 70B models.".into(),
-            context: "128k".into(),
-            cost: "cheapest".into(),
+            id: MODEL_GEMINI.into(),
+            label: "Gemini 3.7 Flash".into(),
+            blurb: "Fast, lower-cost fallback with plenty of context for the full pass.".into(),
+            context: "1M".into(),
+            cost: "low".into(),
         },
         TasteModelInfo {
-            id: MODEL_QWEN.into(),
-            label: "Qwen2.5 72B".into(),
-            blurb: "The Qwen your key can actually reach. Costs more than Llama 3.3.".into(),
-            context: "32k".into(),
+            id: MODEL_QWEN_BALANCED.into(),
+            label: "Qwen3.8 27B".into(),
+            blurb: "Balanced open-weight option when you want speed without a tiny model.".into(),
+            context: "1M".into(),
             cost: "mid".into(),
         },
-    ]
+    ];
+    models[1].context = "1M".into();
+    models
 }
 
 fn request_timeout(_model: &str) -> Duration {
@@ -222,10 +308,10 @@ fn request_timeout(_model: &str) -> Duration {
 }
 
 fn fallback_model(model: &str) -> &'static str {
-    if model == MODEL_LLAMA {
-        MODEL_DEEPSEEK
+    if model == MODEL_DEEPSEEK {
+        MODEL_GEMINI
     } else {
-        MODEL_LLAMA
+        MODEL_DEEPSEEK
     }
 }
 
@@ -257,6 +343,7 @@ pub fn stored_model(db: &Database) -> Result<String, String> {
 pub fn set_model(db: &Database, model: &str) -> Result<String, String> {
     let id = normalize_model(model);
     db.set_meta(META_MODEL, &id)?;
+    crate::taste::cache::invalidate_snapshot(db)?;
     Ok(id)
 }
 
@@ -269,6 +356,7 @@ pub fn stored_web(db: &Database) -> Result<bool, String> {
 
 pub fn set_web(db: &Database, enabled: bool) -> Result<bool, String> {
     db.set_meta(META_WEB, if enabled { "1" } else { "0" })?;
+    crate::taste::cache::invalidate_snapshot(db)?;
     Ok(enabled)
 }
 
@@ -431,12 +519,36 @@ fn snapshot_of(films: &[FilmRecord], profile: Option<&FeatureProfile>) -> TasteS
 }
 
 pub(crate) fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile {
+    let review_texts: Vec<&str> = films
+        .iter()
+        .filter(|film| film.rating.is_some() && film.signal.is_some())
+        .filter_map(|film| film.review.as_deref())
+        .collect();
+    let repeated_execution = repeated_execution_signals(&review_texts);
+    let enriched_keywords: Vec<Vec<Keyword>> = films
+        .iter()
+        .map(|film| {
+            let mut keywords = film.keywords.clone();
+            if let Some(review) = film.review.as_deref() {
+                keywords.extend(execution_keywords_for_review(
+                    review,
+                    &repeated_execution,
+                ));
+            }
+            keywords
+        })
+        .collect();
     let mut obs = Vec::new();
-    for film in films {
+    for (index, film) in films.iter().enumerate() {
         let (Some(rating), Some(signal)) = (film.rating, film.signal.as_ref()) else {
             continue;
         };
-        obs.extend(observations_from_film(
+        let review_keywords = film
+            .review
+            .as_deref()
+            .map(|review| execution_keywords_for_review(review, &repeated_execution))
+            .unwrap_or_default();
+        let mut film_observations = observations_from_film(
             &film.title,
             rating,
             film.tmdb_id,
@@ -444,21 +556,43 @@ pub(crate) fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile
             film.age_years,
             &film.genres,
             &film.credits,
-            &film.keywords,
+            &enriched_keywords[index],
             film.year,
             film.runtime,
-        ));
+        );
+        for observation in &mut film_observations {
+            if !review_keywords
+                .iter()
+                .any(|keyword| keyword.name.eq_ignore_ascii_case(&observation.key.name))
+            {
+                continue;
+            }
+            let Some(polarity) = execution_signal_polarity(&observation.key.name) else {
+                continue;
+            };
+            let strength = observation.affinity_preference.abs().clamp(0.35, 1.0);
+            observation.affinity_preference = polarity * strength;
+            if polarity > 0.0 {
+                observation.positive = strength;
+                observation.negative = 0.0;
+            } else {
+                observation.positive = 0.0;
+                observation.negative = strength;
+            }
+        }
+        obs.extend(film_observations);
     }
     let mut profile = build_profile(&obs);
     let inputs: Vec<ModeFilm<'_>> = films
         .iter()
-        .map(|f| ModeFilm {
+        .zip(enriched_keywords.iter())
+        .map(|(f, keywords)| ModeFilm {
             title: &f.title,
             rating: f.rating,
             tmdb_id: f.tmdb_id,
             genres: &f.genres,
             credits: &f.credits,
-            keywords: &f.keywords,
+            keywords,
             signal: f.signal.as_ref(),
             age_years: f.age_years,
         })
@@ -474,39 +608,83 @@ pub fn load_state(db: &Database) -> Result<TasteState, String> {
     let mut films = load_films(db)?;
     attach_signals(&mut films);
     let profile = feature_profile_from_films(&films);
+    let feedback = crate::taste::feedback::list_feedback(db).unwrap_or_default();
+    let hide = crate::taste::feedback::hide_ids(&feedback);
     let report = db
         .get_meta(META_REPORT)?
-        .and_then(|raw| serde_json::from_str(&raw).ok());
+        .and_then(|raw| serde_json::from_str::<TasteReport>(&raw).ok())
+        .map(|r| filter_report(r.normalize(), &hide));
     Ok(TasteState {
         key: stored_status(db)?,
         snapshot: snapshot_of(&films, Some(&profile)),
         report,
+        feedback,
     })
+}
+
+fn filter_report(mut report: TasteReport, hide: &std::collections::HashSet<i64>) -> TasteReport {
+    let keep = |p: &TastePick| p.tmdb_id.map(|id| !hide.contains(&id)).unwrap_or(true);
+    report.new_picks.retain(keep);
+    report.explore_picks.retain(keep);
+    report.watchlist_picks.retain(keep);
+    report.picks = report
+        .new_picks
+        .iter()
+        .cloned()
+        .chain(report.watchlist_picks.iter().cloned())
+        .collect();
+    report
 }
 
 pub fn analyze(
     db: &Database,
     progress: &mut dyn FnMut(JobProgress),
 ) -> Result<TasteReport, String> {
-    let key = get_api_key()?.ok_or_else(|| {
-        "Add an OpenRouter key in Settings. Llama 3.3 70B is the cheap default.".to_string()
-    })?;
+    analyze_with_run_log(db, progress, None, false)
+}
+
+pub fn analyze_with_run_log(
+    db: &Database,
+    progress: &mut dyn FnMut(JobProgress),
+    run_log_dir: Option<&Path>,
+    force_refresh: bool,
+) -> Result<TasteReport, String> {
     let model = stored_model(db)?;
     let web = stored_web(db)?;
+    let mut films = load_films(db)?;
+    let rated = films.iter().filter(|f| f.rating.is_some()).count();
     progress(JobProgress {
         job: "taste".into(),
-        label: "Reading your log…".into(),
+        label: format!("Reading your log · {rated} ratings"),
         current: 1,
         total: 6,
         ..Default::default()
     });
-    let mut films = load_films(db)?;
-    let rated = films.iter().filter(|f| f.rating.is_some()).count();
     if rated < MIN_RATINGS {
         return Err("Rate at least 8 films first so the agent has edges to work with.".into());
     }
-    retrieve::enrich_rated_library(db, &mut films, 40);
     attach_signals(&mut films);
+    let friend_keys = retrieve::friend_identity_keys(db);
+    if !force_refresh {
+        if let Ok(Some(snap)) = crate::taste::cache::load_snapshot(db) {
+            if crate::taste::cache::snapshot_usable(db, &snap, &films, &friend_keys)? {
+                progress(JobProgress {
+                    job: "taste".into(),
+                    label: "Using cached recommendations…".into(),
+                    current: 6,
+                    total: 6,
+                    ..Default::default()
+                });
+                return finish_from_snapshot(db, &snap, &model, web, rated as u32, None);
+            }
+        }
+    }
+    let key = get_api_key()?.ok_or_else(|| {
+        "Add an OpenRouter key in Settings. DeepSeek V4 Pro 0813 is the recommended default."
+            .to_string()
+    })?;
+    let seeds_refreshed =
+        retrieve::enrich_eligible_seeds(db, &mut films, 40, force_refresh);
     let profile = feature_profile_from_films(&films);
     let seen = seen_keys(&films);
     progress(JobProgress {
@@ -516,25 +694,64 @@ pub fn analyze(
         total: 6,
         ..Default::default()
     });
-    let mut candidates = retrieve(db, &films, &profile, &seen)?;
-    retrieve::enrich_missing(db, &mut candidates, 40);
-    let ranked = score_all(&profile, &candidates);
-    let short = shortlist::shortlist(&ranked);
+    let retrieved = retrieve_with_coverage(db, &films, &profile, &seen, force_refresh)?;
+    let mut coverage = retrieved.coverage;
+    coverage.seeds_refreshed = seeds_refreshed;
+    let mut candidates = retrieved.candidates;
+    // The watchlist is an explicit user request and currently contains the
+    // sparse metadata most likely to be dropped by the evidence gate. Give
+    // the one-time backfill enough room to cover it before related results.
+    retrieve::enrich_missing(db, &mut candidates, 320, force_refresh);
+    progress(JobProgress {
+        job: "taste".into(),
+        label: "Comparing candidates with your liked and disliked films…".into(),
+        current: 2,
+        total: 6,
+        ..Default::default()
+    });
+    let (semantic_scores, semantic_stats) =
+        semantic::score_candidates(db, &key, &films, &candidates);
+    let pool = crate::taste::score::score_pool_with_semantic(
+        &profile,
+        &candidates,
+        &semantic_scores,
+    );
+    let replay = if cfg!(debug_assertions) && std::env::var_os("STUDIO_TASTE_REPLAY").is_some() {
+        Some(match eval::run_replay(db, &key, &films, 20) {
+            Ok(report) => report,
+            Err(err) => eval::ReplayReport {
+                error: Some(err),
+                ..Default::default()
+            },
+        })
+    } else {
+        None
+    };
+    let llm_ranked = shortlist::llm_pool(&pool.ranked);
+    let short = shortlist::shortlist(&llm_ranked);
     if short.is_empty() {
         return Err("Could not build a candidate shortlist. Finish matching posters, then try again.".into());
     }
 
+    let mut used_model = model.clone();
+    let mut used_web = false;
+    let mut note = semantic_stats
+        .error
+        .as_ref()
+        .map(|err| format!("Semantic fit was partially unavailable: {err}"));
+    let call1_body = call1_payload(&films, &profile, &short);
     progress(JobProgress {
         job: "taste".into(),
-        label: format!("Asking {} to critique the shortlist…", model_label(&model)),
+        label: format!(
+            "Asking {} to critique the shortlist… ({} KB)",
+            model_label(&model),
+            (call1_body.to_string().len() / 1024).max(1)
+        ),
         current: 3,
         total: 6,
         ..Default::default()
     });
-    let mut used_model = model.clone();
-    let mut used_web = false;
-    let mut note = None;
-    let critic = match run_json(&key, &model, CALL1_SYSTEM, &call1_payload(&films, &profile, &short), false)
+    let critic = match run_json(&key, &model, CALL1_SYSTEM, &call1_body, false)
     {
         Ok((raw, _)) => match parse_critic(&extract_json(&raw)?) {
             Ok(c) => c,
@@ -548,7 +765,7 @@ pub fn analyze(
                 model_label(next),
                 model_label(&model)
             ));
-            run_json(&key, next, CALL1_SYSTEM, &call1_payload(&films, &profile, &short), false)
+            run_json(&key, next, CALL1_SYSTEM, &call1_body, false)
                 .ok()
                 .and_then(|(raw, _)| extract_json(&raw).ok())
                 .and_then(|v| parse_critic(&v).ok())
@@ -597,39 +814,38 @@ pub fn analyze(
         discoveries.truncate(3);
     }
 
+    let mut ranked_for_workspace = pool.ranked.clone();
+    ranked_for_workspace.extend(discoveries.iter().cloned());
+    let validated = validate::hard_validate(
+        &[],
+        &ranked_for_workspace,
+        &[],
+        &seen,
+        profile.modes.len(),
+    );
+    let call2_body = call2_payload(&films, &profile, &short, &critic, &discoveries);
     progress(JobProgress {
         job: "taste".into(),
-        label: format!("Asking {} for the final 12…", model_label(&used_model)),
+        label: format!(
+            "Asking {} for your taste profile… ({} KB)",
+            model_label(&used_model),
+            (call2_body.to_string().len() / 1024).max(1)
+        ),
         current: 5,
         total: 6,
         ..Default::default()
     });
-    let mut call2_body = call2_payload(&films, &profile, &short, &critic, &discoveries);
-    let mut reasoner = run_reasoner(&key, &used_model, &call2_body)?;
-    let mut validated = validate::hard_validate(
-        &reasoner.picks,
-        &short,
-        &discoveries,
-        &seen,
-        profile.modes.len(),
-    );
-    if !validated.warnings.is_empty() && !validated.narrow_profile {
-        call2_body["diversityWarnings"] = json!(validated
-            .warnings
+    let mut reasoner = run_reasoner(&key, &used_model, &call2_body)
+        .map_err(|e| format!("taste profile · {}: {e}", model_label(&used_model)))?;
+    reasoner = reason::ground_reasoner_with(
+        reasoner,
+        &profile,
+        &films
             .iter()
-            .map(|w| &w.message)
-            .collect::<Vec<_>>());
-        if let Ok(repaired) = run_reasoner(&key, &used_model, &call2_body) {
-            reasoner = repaired;
-            validated = validate::hard_validate(
-                &reasoner.picks,
-                &short,
-                &discoveries,
-                &seen,
-                profile.modes.len(),
-            );
-        }
-    }
+            .filter(|f| f.watchlist)
+            .map(|f| f.title.clone())
+            .collect::<Vec<_>>(),
+    );
 
     progress(JobProgress {
         job: "taste".into(),
@@ -638,23 +854,162 @@ pub fn analyze(
         total: 6,
         ..Default::default()
     });
-    let picks = to_taste_picks(db, &reasoner.picks, &validated.picks, &critic, &discoveries)?;
-    let report = TasteReport {
+    let display_ws = crate::taste::cache::workspace_from_pool(
+        db,
+        &validated.workspace.pre_feedback_pool,
+    )?;
+    let new_picks = to_taste_picks(
+        db,
+        &reasoner.picks,
+        &display_ws.new_picks,
+        &critic,
+        &discoveries,
+    )?;
+    let watch_picks = to_taste_picks(
+        db,
+        &reasoner.picks,
+        &display_ws.watchlist_picks,
+        &critic,
+        &discoveries,
+    )?;
+    let explore_picks = to_taste_picks(
+        db,
+        &reasoner.picks,
+        &display_ws.explore_picks,
+        &critic,
+        &discoveries,
+    )?;
+    let picks_out = (
+        [
+            new_picks.0.clone(),
+            watch_picks.0.clone(),
+        ]
+        .concat(),
+        [new_picks.1.clone(), watch_picks.1.clone(), explore_picks.1.clone()].concat(),
+    );
+    let run = runlog::assemble(
+        model_label(&used_model),
+        used_web,
+        rated as u32,
+        candidates.len(),
+        &profile,
+        &pool,
+        &short,
+        &discoveries,
+        &critic,
+        &reasoner,
+        &validated,
+        &picks_out.1,
+        call1_body,
+        call2_body,
+        &coverage,
+        &semantic_stats,
+        replay.as_ref(),
+    );
+    let run_log_path = match run_log_dir {
+        Some(dir) => match runlog::persist(dir, &run) {
+            Ok(path) => Some(path.to_string_lossy().into_owned()),
+            Err(err) => {
+                note = Some(match note {
+                    Some(prev) => format!("{prev} Run log failed: {err}"),
+                    None => format!("Run log failed: {err}"),
+                });
+                None
+            }
+        },
+        None => None,
+    };
+    let narrative = crate::taste::cache::TasteNarrative {
         title: if reasoner.title.trim().is_empty() {
             "Taste".into()
         } else {
-            reasoner.title
+            reasoner.title.clone()
         },
-        summary: reasoner.summary,
-        affinities: reasoner.affinities,
-        aversions: reasoner.aversions,
-        dimensions: reasoner.dimensions,
-        picks,
+        summary: reasoner.summary.clone(),
+        affinities: reasoner.affinities.clone(),
+        aversions: reasoner.aversions.clone(),
+        dimensions: reasoner.dimensions.clone(),
+    };
+    let mut fps = crate::taste::cache::fingerprints(
+        &films,
+        &candidates,
+        &friend_keys,
+        &used_model,
+        used_web,
+    );
+    let pool_ids: Vec<i64> = validated
+        .workspace
+        .pre_feedback_pool
+        .iter()
+        .filter_map(|c| c.candidate.tmdb_id)
+        .collect();
+    fps.candidate_input_fingerprint = crate::taste::cache::bind_catalog_fingerprint(
+        db,
+        &fps.candidate_input_fingerprint,
+        &pool_ids,
+    );
+    let _ = crate::taste::cache::save_snapshot(
+        db,
+        &crate::taste::cache::RunSnapshot {
+            fingerprints: fps,
+            catalog_valid_until: crate::taste::cache::catalog_valid_until_from_now(),
+            scored_pool: validated.workspace.pre_feedback_pool.clone(),
+            narrative: narrative.clone(),
+        },
+    );
+    let report = TasteReport {
+        title: narrative.title,
+        summary: narrative.summary,
+        affinities: narrative.affinities,
+        aversions: narrative.aversions,
+        dimensions: narrative.dimensions,
+        new_picks: new_picks.0,
+        explore_picks: explore_picks.0,
+        watchlist_picks: watch_picks.0,
+        picks: picks_out.0,
         model: model_label(&used_model).into(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         rated_count: rated as u32,
         web_used: used_web,
         note,
+        run_log_path,
+    };
+    db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
+    Ok(report)
+}
+
+fn finish_from_snapshot(
+    db: &Database,
+    snap: &crate::taste::cache::RunSnapshot,
+    model: &str,
+    web: bool,
+    rated: u32,
+    note: Option<String>,
+) -> Result<TasteReport, String> {
+    let ws = crate::taste::cache::workspace_from_pool(db, &snap.scored_pool)?;
+    let empty_critic = empty_critic();
+    let new_picks = to_taste_picks(db, &[], &ws.new_picks, &empty_critic, &[])?;
+    let explore_picks = to_taste_picks(db, &[], &ws.explore_picks, &empty_critic, &[])?;
+    let watch_picks = to_taste_picks(db, &[], &ws.watchlist_picks, &empty_critic, &[])?;
+    let new_list = new_picks.0;
+    let explore_list = explore_picks.0;
+    let watch_list = watch_picks.0;
+    let report = TasteReport {
+        title: snap.narrative.title.clone(),
+        summary: snap.narrative.summary.clone(),
+        affinities: snap.narrative.affinities.clone(),
+        aversions: snap.narrative.aversions.clone(),
+        dimensions: snap.narrative.dimensions.clone(),
+        picks: [new_list.clone(), watch_list.clone()].concat(),
+        new_picks: new_list,
+        explore_picks: explore_list,
+        watchlist_picks: watch_list,
+        model: model_label(model).into(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        rated_count: rated,
+        web_used: web,
+        note,
+        run_log_path: None,
     };
     db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
     Ok(report)
@@ -671,14 +1026,14 @@ fn run_reasoner(key: &str, model: &str, payload: &Value) -> Result<reason::Reaso
     };
     let parsed = extract_json(&raw).and_then(|v| parse_reasoner(&v));
     match parsed {
-        Ok(r) if !r.picks.is_empty() || !r.title.is_empty() => Ok(r),
+        Ok(r) if !r.title.is_empty() || !r.summary.is_empty() => Ok(r),
         _ => {
             let next = fallback_model(model);
             let (raw2, _) = run_json(key, next, CALL2_SYSTEM, payload, false)
                 .map_err(|e| friendly_err(&e, next))?;
             parse_reasoner(&extract_json(&raw2)?).map_err(|e| {
                 format!(
-                    "{} wrote invalid JSON ({e}). Try Llama 3.3 70B with web search off.",
+                    "{} wrote invalid JSON ({e}). Try Gemini 3.7 Flash with web search off.",
                     model_label(next)
                 )
             })
@@ -692,8 +1047,11 @@ fn to_taste_picks(
     validated: &[ScoredCandidate],
     critic: &CriticReport,
     discoveries: &[ScoredCandidate],
-) -> Result<Vec<TastePick>, String> {
+) -> Result<(Vec<TastePick>, Vec<crate::taste::provenance::RecommendationProvenance>), String> {
+    let films = crate::taste::retrieve::load_films(db).unwrap_or_default();
+    let allow = crate::taste::score::close_to_allowlist(&films);
     let mut out = Vec::new();
+    let mut traces = Vec::new();
     for scored in validated {
         let rp = reasoner_picks.iter().find(|p| {
             (!p.id.is_empty()
@@ -730,36 +1088,144 @@ fn to_taste_picks(
                 .map(|id| a.id == format!("tmdb:{id}"))
                 .unwrap_or(false)
         });
-        let _provenance = crate::taste::provenance::RecommendationProvenance {
+        let (retrieval_kind, origin_label) =
+            crate::taste::explain::primary_retrieval(&scored.candidate.sources);
+        let provenance = crate::taste::provenance::RecommendationProvenance {
             tmdb_id: scored.candidate.tmdb_id,
+            title: scored.candidate.title.clone(),
             origin: crate::taste::provenance::origin_from_sources(&scored.candidate.sources),
+            retrieval_kind: retrieval_kind.clone(),
             retrieval_sources: scored.candidate.sources.clone(),
             deterministic_score: scored.score.clone(),
             llm_mode: crate::taste::provenance::RecommendationMode::parse(
                 rp.map(|p| p.mode.as_str()).unwrap_or(origin),
             ),
             seed_films: scored.evidence.clone(),
+            scoring_reasons: scored.scoring_reasons.clone(),
+            display_reasons: scored.display_reasons.clone(),
+            matched_features: scored.matched_features.clone(),
+            hidden_features: scored.hidden_features.clone(),
+            eligibility: scored.eligibility.clone(),
             positive_features: scored.positive_features.clone(),
             negative_features_considered: scored.negative_features.clone(),
             call1_fit: assess.map(|a| a.fit.clone()),
             call1_concerns: assess.map(|a| a.concerns.clone()).unwrap_or_default(),
         };
-        let _ = &_provenance;
+        traces.push(provenance);
+        let display = crate::taste::explain::canonicalize_reason_lines(if scored.display_reasons.is_empty() {
+            scored.reasons.clone()
+        } else {
+            scored.display_reasons.clone()
+        });
+        let provenance = crate::taste::explain::format_provenance(&scored.candidate.sources);
+        let why = rp
+            .map(|p| p.why.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_default();
+        let why = crate::taste::explain::ground_why(&why, &display, &scored.hidden_features);
+        let evidence = if films.is_empty() {
+            scored.evidence.clone()
+        } else {
+            crate::taste::score::filter_close_to_evidence(&scored.evidence, &allow)
+        };
+        let evidence_items = evidence_items_for(&scored.candidate.sources, &evidence, &films);
         out.push(TastePick {
             title: scored.candidate.title.clone(),
             year: scored.candidate.year,
             poster,
-            why: rp.map(|p| p.why.clone()).unwrap_or_default(),
-            rhymes_with: rp.map(|p| p.rhymes_with.clone()).unwrap_or_else(|| scored.evidence.clone()),
+            why,
+            rhymes_with: evidence.clone(),
             film_id,
             tmdb_id: scored.candidate.tmdb_id,
             source: origin.into(),
-            reasons: scored.reasons.clone(),
-            evidence: scored.evidence.clone(),
+            reasons: display,
+            scoring_reasons: scored.scoring_reasons.clone(),
+            evidence,
+            evidence_items,
             mode: rp.map(|p| p.mode.clone()).filter(|s| !s.is_empty()),
+            origin: Some(retrieval_kind),
+            origin_label: if origin_label.is_empty() {
+                None
+            } else {
+                Some(origin_label)
+            },
+            origin_display: if provenance.is_empty() {
+                None
+            } else {
+                Some(provenance)
+            },
+            matched_features: scored.matched_features.clone(),
+            hidden_features: scored.hidden_features.clone(),
+            eligibility: scored.eligibility.clone(),
+            match_score: crate::taste::confidence::match_score(scored),
+            thin_evidence: crate::taste::confidence::thin_evidence(scored),
+            semantic_fit: scored.score.semantic_fit,
+            semantic_coverage: scored.score.semantic_coverage,
         });
     }
-    Ok(out)
+    Ok((out, traces))
+}
+
+/// Compact, navigable evidence for a Taste pick. Prefer explicit related-film
+/// retrieval seeds, then accept title evidence only when the local match is
+/// unambiguous. The scorer's existing evidence list intentionally contains
+/// strings, so guessing between same-title remakes here would open the wrong
+/// detail page.
+fn evidence_items_for(
+    sources: &[crate::taste::retrieve::RetrievalSource],
+    evidence: &[String],
+    films: &[FilmRecord],
+) -> Vec<TasteEvidence> {
+    const MAX_ITEMS: usize = 2;
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for source in sources {
+        if !source.kind.is_related() {
+            continue;
+        }
+        let Some(tmdb_id) = source.seed_tmdb_id else {
+            continue;
+        };
+        if let Some(film) = films.iter().find(|film| film.tmdb_id == Some(tmdb_id)) {
+            push_evidence_item(&mut items, &mut seen, film, MAX_ITEMS);
+        }
+    }
+
+    for title in evidence {
+        if items.len() >= MAX_ITEMS {
+            break;
+        }
+        let title_key = title.trim().to_ascii_lowercase();
+        let mut matches = films
+            .iter()
+            .filter(|film| film.title.trim().to_ascii_lowercase() == title_key);
+        let Some(film) = matches.next() else {
+            continue;
+        };
+        if matches.next().is_none() {
+            push_evidence_item(&mut items, &mut seen, film, MAX_ITEMS);
+        }
+    }
+
+    items
+}
+
+fn push_evidence_item(
+    items: &mut Vec<TasteEvidence>,
+    seen: &mut std::collections::HashSet<String>,
+    film: &FilmRecord,
+    max_items: usize,
+) {
+    if items.len() >= max_items || !seen.insert(film.key.clone()) {
+        return;
+    }
+    items.push(TasteEvidence {
+        title: film.title.clone(),
+        film_id: Some(film.key.clone()),
+        tmdb_id: film.tmdb_id,
+        poster: film.poster.clone(),
+    });
 }
 
 fn library_id_for_tmdb(db: &Database, tmdb_id: i64) -> Result<Option<String>, String> {
@@ -841,25 +1307,16 @@ fn send_chat(
         .send_string(&body.to_string())
     {
         Ok(resp) => resp.into_string().map_err(|e| e.to_string())?,
-        Err(ureq::Error::Status(_, resp)) => {
+        Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                if let Some(msg) = v["error"]["message"].as_str() {
-                    return Err(msg.to_string());
-                }
-            }
-            return Err(if text.is_empty() {
-                "OpenRouter returned an error status".into()
-            } else {
-                text
-            });
+            return Err(format_openrouter_err(Some(code), &text));
         }
         Err(err) => return Err(err.to_string()),
     };
     let v: Value = serde_json::from_str(&response)
         .map_err(|e| format!("OpenRouter returned non-JSON: {e}"))?;
-    if let Some(err) = v["error"]["message"].as_str() {
-        return Err(err.to_string());
+    if v.get("error").is_some() {
+        return Err(format_openrouter_err(None, &response));
     }
     let content = v["choices"]
         .as_array()
@@ -913,11 +1370,72 @@ fn should_fallback(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     is_timeout_error(err)
         || is_guardrail(err)
+        || lower.contains("context length")
+        || lower.contains("too many tokens")
+        || lower.contains("input is too long")
         || lower.contains("502")
         || lower.contains("503")
         || lower.contains("524")
         || lower.contains("connection reset")
         || lower.contains("failed to connect")
+        || lower.contains("provider returned error")
+}
+
+fn clip_log(text: &str, max: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        format!("{}…", flat.chars().take(max).collect::<String>())
+    }
+}
+
+fn format_openrouter_err(http_status: Option<u16>, body: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let err = parsed.as_ref().map(|v| &v["error"]);
+    let msg = err
+        .and_then(|e| e["message"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let code = err.and_then(|e| {
+        e["code"]
+            .as_u64()
+            .map(|c| c.to_string())
+            .or_else(|| e["code"].as_i64().map(|c| c.to_string()))
+            .or_else(|| e["code"].as_str().map(|s| s.to_string()))
+    });
+    let provider = err.and_then(|e| {
+        e["metadata"]["provider_name"]
+            .as_str()
+            .or_else(|| e["metadata"]["provider"].as_str())
+    });
+    let raw = err.and_then(|e| e["metadata"]["raw"].as_str());
+    let mut parts = Vec::new();
+    if let Some(status) = http_status {
+        parts.push(format!("HTTP {status}"));
+    }
+    if let Some(code) = code {
+        parts.push(format!("code {code}"));
+    }
+    if let Some(provider) = provider {
+        parts.push(provider.to_string());
+    }
+    parts.push(msg.unwrap_or("OpenRouter returned an error").to_string());
+    if let Some(raw) = raw {
+        let clipped = clip_log(raw, 400);
+        if !clipped.is_empty() {
+            parts.push(format!("raw: {clipped}"));
+        }
+    } else if parsed.is_none() {
+        let clipped = clip_log(body, 400);
+        if !clipped.is_empty() {
+            parts.push(clipped);
+        }
+    }
+    if parts.len() == 1 && http_status.is_none() && body.trim().is_empty() {
+        return "OpenRouter returned an error status".into();
+    }
+    parts.join(" · ")
 }
 
 fn friendly_err(err: &str, model: &str) -> String {
@@ -1106,6 +1624,37 @@ impl<T> OptionalRow<T> for rusqlite::Result<T> {
 mod tests {
     use super::*;
 
+    fn evidence_film(
+        key: &str,
+        title: &str,
+        tmdb_id: Option<i64>,
+        poster: Option<&str>,
+    ) -> FilmRecord {
+        FilmRecord {
+            key: key.into(),
+            title: title.into(),
+            year: Some(2000),
+            tmdb_id,
+            rating: Some(4.5),
+            liked: true,
+            watched: true,
+            watchlist: false,
+            viewings: 1,
+            last_date: None,
+            genres: vec![],
+            credits: vec![],
+            keywords: vec![],
+            recommendations: vec![],
+            similar: vec![],
+            runtime: Some(100),
+            poster: poster.map(str::to_string),
+            vote_count: Some(100),
+            review: None,
+            signal: None,
+            age_years: None,
+        }
+    }
+
     #[test]
     fn extract_json_unwraps_fences() {
         let raw = "```json\n{\"title\":\"Night owl\",\"summary\":\"x\",\"picks\":[]}\n```";
@@ -1115,9 +1664,136 @@ mod tests {
 
     #[test]
     fn model_ids_map() {
-        assert_eq!(default_model(), MODEL_LLAMA);
+        assert_eq!(default_model(), MODEL_DEEPSEEK);
         assert_eq!(normalize_model("deepseek"), MODEL_DEEPSEEK);
-        assert_eq!(openrouter_model_id(MODEL_LLAMA), "meta-llama/llama-3.3-70b-instruct");
+        assert_eq!(normalize_model("Qwen2.5 72B"), MODEL_DEEPSEEK);
+        assert_eq!(normalize_model("Qwen3.8 2.4T A95B"), MODEL_QWEN_MAX);
+        assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-v4-pro-0813");
         assert_eq!(model_catalog().len(), 4);
+    }
+
+    #[test]
+    fn context_length_errors_are_retryable() {
+        assert!(should_fallback(
+            "HTTP 400: maximum context length is 32768 tokens"
+        ));
+    }
+
+    #[test]
+    fn openrouter_error_keeps_provider_and_raw() {
+        let body = r#"{
+            "error": {
+                "message": "Provider returned error",
+                "code": 502,
+                "metadata": {
+                    "provider_name": "DeepInfra",
+                    "raw": "upstream overloaded\ntry again"
+                }
+            }
+        }"#;
+        let out = format_openrouter_err(Some(502), body);
+        assert!(out.contains("HTTP 502"), "{out}");
+        assert!(out.contains("DeepInfra"), "{out}");
+        assert!(out.contains("upstream overloaded"), "{out}");
+        assert!(should_fallback(&out));
+    }
+
+    #[test]
+    fn old_report_json_loads_as_new_section() {
+        let raw = r#"{
+            "title":"Night owl",
+            "summary":"x",
+            "affinities":[],
+            "aversions":[],
+            "dimensions":[],
+            "picks":[{
+                "title":"Heat",
+                "year":1995,
+                "poster":null,
+                "why":"because",
+                "rhymesWith":[],
+                "filmId":null,
+                "tmdbId":949,
+                "source":"related"
+            }],
+            "model":"llama",
+            "generatedAt":"2020-01-01T00:00:00Z",
+            "ratedCount":8
+        }"#;
+        let report = serde_json::from_str::<TasteReport>(raw).unwrap().normalize();
+        assert_eq!(report.new_picks.len(), 1);
+        assert_eq!(report.new_picks[0].title, "Heat");
+        assert!(report.new_picks[0].evidence_items.is_empty());
+        assert!(report.watchlist_picks.is_empty());
+        assert!(report.explore_picks.is_empty());
+        assert_eq!(report.picks.len(), 1);
+    }
+
+    #[test]
+    fn evidence_items_prefer_related_seeds_and_skip_ambiguous_titles() {
+        use crate::taste::retrieve::{RetrievalKind, RetrievalSource};
+
+        let films = vec![
+            evidence_film("seed-id", "Seed", Some(1), Some("seed-poster")),
+            evidence_film("duplicate-a", "Duplicate", Some(2), Some("duplicate-a-poster")),
+            evidence_film("duplicate-b", "Duplicate", Some(3), Some("duplicate-b-poster")),
+            evidence_film("unique-id", "Unique", None, Some("unique-poster")),
+        ];
+        let sources = vec![RetrievalSource::new(
+            RetrievalKind::Related,
+            "similar to Seed",
+            Some(1),
+        )];
+        let evidence = vec!["Duplicate".into(), "Unique".into()];
+
+        let items = evidence_items_for(&sources, &evidence, &films);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Seed");
+        assert_eq!(items[0].film_id.as_deref(), Some("seed-id"));
+        assert_eq!(items[0].tmdb_id, Some(1));
+        assert_eq!(items[0].poster.as_deref(), Some("seed-poster"));
+        assert_eq!(items[1].title, "Unique");
+        assert_eq!(items[1].film_id.as_deref(), Some("unique-id"));
+        assert_eq!(items[1].tmdb_id, None);
+    }
+
+    #[test]
+    fn saved_report_drops_rejected_ids_on_load() {
+        let raw = r#"{
+            "title":"T",
+            "summary":"s",
+            "affinities":[],
+            "aversions":[],
+            "dimensions":[],
+            "newPicks":[{
+                "title":"Keep","year":2000,"poster":null,"why":"y","rhymesWith":[],
+                "filmId":null,"tmdbId":2,"source":"related"
+            },{
+                "title":"Hide","year":2000,"poster":null,"why":"y","rhymesWith":[],
+                "filmId":null,"tmdbId":1,"source":"related"
+            }],
+            "watchlistPicks":[],
+            "explorePicks":[{
+                "title":"HideExplore","year":1992,"poster":null,"why":"","rhymesWith":[],
+                "filmId":null,"tmdbId":500,"source":"related"
+            }],
+            "picks":[],
+            "model":"llama",
+            "generatedAt":"2020-01-01T00:00:00Z",
+            "ratedCount":8
+        }"#;
+        let report = serde_json::from_str::<TasteReport>(raw).unwrap().normalize();
+        let mut hide = std::collections::HashSet::new();
+        hide.insert(1);
+        let filtered = filter_report(report, &hide);
+        assert!(filtered.new_picks.iter().all(|p| p.tmdb_id != Some(1)));
+        assert!(filtered.new_picks.iter().any(|p| p.tmdb_id == Some(2)));
+        hide.insert(500);
+        let filtered = filter_report(
+            serde_json::from_str::<TasteReport>(raw).unwrap().normalize(),
+            &hide,
+        );
+        assert!(filtered.explore_picks.iter().all(|p| p.tmdb_id != Some(500)));
     }
 }

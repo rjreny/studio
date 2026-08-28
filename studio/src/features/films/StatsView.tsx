@@ -72,7 +72,7 @@ export function StatsView() {
         </div>
       </div>
       <div className="stats-split">
-        <section className="solid-card">
+        <section className="stats-panel">
           <h2>Ratings</h2>
           <div className="chart" role="img" aria-label="Rating histogram">
             {distribution.map((count, idx) => {
@@ -89,7 +89,7 @@ export function StatsView() {
             })}
           </div>
         </section>
-        <section className="solid-card">
+        <section className="stats-panel">
           <h2>By decade</h2>
           <ul className="decade-bars">
             {decades.map(([decade, count]) => (

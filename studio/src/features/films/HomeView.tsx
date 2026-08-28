@@ -93,7 +93,14 @@ export function HomeView({
     <div className="home-cinema">
       {featured ? (
         <section className="hero">
-          {image ? <img className="hero-image" src={image} alt="" /> : <div className="hero-image is-empty" />}
+          {image ? (
+            <>
+              <img className="hero-image hero-image-backdrop" src={image} alt="" />
+              <img className="hero-image hero-image-main" src={image} alt="" />
+            </>
+          ) : (
+            <div className="hero-image is-empty" />
+          )}
           <div className="hero-scrim" />
           <div className="hero-copy">
             {castLine ? <p className="hero-cast">{castLine}</p> : null}
@@ -105,28 +112,23 @@ export function HomeView({
               <RatingDisplay value={featured.currentRating} compact />
             </p>
             {overview ? <p className="hero-lede">{overview}</p> : null}
-            <div className="hero-actions">
-              <button type="button" className="play-btn" onClick={() => onSelectFilm(featured.id)}>
-                Open
-              </button>
-              {slides.length > 1 ? (
-                <div className="hero-dots" role="tablist" aria-label="Featured films">
-                  {slides.map((film, i) => (
-                    <button
-                      key={film.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={i === index}
-                      className={i === index ? "is-on" : ""}
-                      onClick={() => setIndex(i)}
-                    >
-                      <span className="sr-only">{film.title}</span>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
           </div>
+          {slides.length > 1 ? (
+            <div className="hero-dots" role="tablist" aria-label="Featured films">
+              {slides.map((film, i) => (
+                <button
+                  key={film.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={i === index}
+                  className={i === index ? "is-on" : ""}
+                  onClick={() => setIndex(i)}
+                >
+                  <span className="sr-only">{film.title}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </section>
       ) : (
         <section className="hero is-empty-hero">

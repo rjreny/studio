@@ -1,41 +1,19 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { tasteAnalyze, tasteGet, tasteSetModel, tasteSetWeb } from "../../platform/filmLibrary";
-import type { JobProgress, TasteModelInfo, TastePick, TasteState } from "../../platform/types/film";
+import { tasteAnalyze, tasteFeedbackSet, tasteGet } from "../../platform/filmLibrary";
+import type { JobProgress, TasteFeedback, TasteModelInfo, TastePick, TasteState } from "../../platform/types/film";
 import { log } from "../../platform/log";
+import { Menu } from "../ui/Menu";
 import { Poster } from "./Poster";
-
-const DIM_LABEL: Record<string, string> = {
-  visual: "Visual",
-  story: "Story",
-  intensity: "Intensity",
-  comedy: "Comedy",
-  spectacle: "Spectacle",
-  atmosphere: "Atmosphere",
-  comfort: "Comfort",
-  genre: "Genre",
-  era: "Era",
-  director: "Director",
-  performance: "Performance",
-  image: "Image",
-  motif: "Motif",
-};
 
 const RUN_STEPS = [
   "Reading your log",
   "Scoring candidates",
   "Critiquing the shortlist",
   "Targeted discovery",
-  "Final 12",
+  "Taste profile",
   "Matching posters",
 ];
-
-function formatWhen(iso: string | undefined) {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
 
 function formatElapsed(seconds: number) {
   const m = Math.floor(seconds / 60);
@@ -47,8 +25,81 @@ function pickId(pick: TastePick) {
   return pick.filmId || (pick.tmdbId ? `tmdb:${pick.tmdbId}` : null);
 }
 
-function waitHint(_model: string | undefined) {
-  return "Usually under a minute. If OpenRouter blocks a model, Taste retries without web search, then with Llama 3.3 or DeepSeek V3.";
+function pickKey(pick: TastePick) {
+  if (pick.tmdbId) return `tmdb:${pick.tmdbId}`;
+  if (pick.filmId) return pick.filmId;
+  return `${pick.title}-${pick.year ?? ""}`;
+}
+
+function sectionPicks(report: NonNullable<TasteState["report"]>) {
+  const hasSections = Array.isArray(report.newPicks) || Array.isArray(report.watchlistPicks);
+  if (hasSections) {
+    return {
+      neu: [...(report.newPicks ?? []), ...(report.explorePicks ?? [])],
+      watch: report.watchlistPicks ?? [],
+    };
+  }
+  return { neu: report.picks ?? [], watch: [] as TastePick[] };
+}
+
+function waitHint() {
+  return "Usually under a minute. If OpenRouter blocks a model, Taste retries without web search, then with Gemini 3.7 Flash.";
+}
+
+function likedIds(feedback: TasteFeedback[] | undefined) {
+  return new Set(
+    (feedback ?? []).filter((row) => row.action === "interested").map((row) => row.tmdbId),
+  );
+}
+
+type TasteSort = "match" | "title" | "year";
+type TasteFilter = "all" | "50" | "60" | "70";
+
+const TASTE_SORTS: { id: TasteSort; label: string }[] = [
+  { id: "match", label: "Highest match" },
+  { id: "title", label: "Title A–Z" },
+  { id: "year", label: "Newest" },
+];
+
+const TASTE_FILTERS: { id: TasteFilter; label: string }[] = [
+  { id: "all", label: "Any score" },
+  { id: "70", label: "70%+" },
+  { id: "60", label: "60%+" },
+  { id: "50", label: "50%+" },
+];
+
+function matchValue(pick: TastePick) {
+  return typeof pick.matchScore === "number" && Number.isFinite(pick.matchScore)
+    ? pick.matchScore
+    : -1;
+}
+
+function matchPercent(pick: TastePick) {
+  const score = matchValue(pick);
+  return score >= 0 ? `${Math.round(score)}% match` : "—% match";
+}
+
+function matchTone(pick: TastePick) {
+  const score = matchValue(pick);
+  if (score >= 70) return "is-high";
+  if (score >= 60) return "is-mid";
+  return score >= 0 ? "is-low" : "is-unknown";
+}
+
+function sortTastePicks(picks: TastePick[], sort: TasteSort, filter: TasteFilter) {
+  return picks
+    .filter((pick) => filter === "all" || matchValue(pick) >= Number(filter))
+    .sort((a, b) => {
+      if (sort === "title") return a.title.localeCompare(b.title);
+      if (sort === "year") {
+        return (b.year ?? -Infinity) - (a.year ?? -Infinity);
+      }
+      return matchValue(b) - matchValue(a);
+    });
+}
+
+function listCount(shown: number, total: number) {
+  return shown === total ? String(shown) : `${shown} of ${total}`;
 }
 
 export function RecsView({
@@ -63,12 +114,17 @@ export function RecsView({
   const [running, setRunning] = useState(false);
   const [job, setJob] = useState<JobProgress | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [interested, setInterested] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     void tasteGet()
       .then((next) => {
-        if (!cancelled) setState(next);
+        if (!cancelled) {
+          setState(next);
+          setInterested(likedIds(next.feedback));
+        }
       })
       .catch((err) => {
         log("warn", "taste load failed", err);
@@ -95,18 +151,14 @@ export function RecsView({
         setError(next.label.replace(/^taste failed · /i, "") || "Taste read failed");
         return;
       }
-      if (next.taste) {
-        setState((prev) =>
-          prev
-            ? { ...prev, report: next.taste ?? prev.report }
-            : prev,
-        );
-        setError(null);
-      } else {
-        void tasteGet()
-          .then(setState)
-          .catch((err) => log("warn", "taste refresh failed", err));
-      }
+      void tasteGet()
+        .then((loaded) => {
+          setState(loaded);
+          setInterested(likedIds(loaded.feedback));
+          setHidden(new Set());
+          setError(null);
+        })
+        .catch((err) => log("warn", "taste refresh failed", err));
     }).then((fn) => {
       unlisten = fn;
     });
@@ -125,20 +177,21 @@ export function RecsView({
     return () => window.clearInterval(id);
   }, [running]);
 
-  async function run() {
+  async function run(forceRefresh = false) {
     try {
       setError(null);
       setRunning(true);
+      setHidden(new Set());
       setJob({
         job: "taste",
-        label: "Reading your log…",
+        label: forceRefresh ? "Refreshing metadata…" : "Reading your log…",
         current: 1,
         total: 3,
         posters: 0,
         errors: 0,
         done: false,
       });
-      await tasteAnalyze();
+      await tasteAnalyze(forceRefresh);
     } catch (err) {
       setRunning(false);
       setJob(null);
@@ -148,21 +201,31 @@ export function RecsView({
     }
   }
 
-  async function pickModel(id: string) {
-    try {
-      const key = await tasteSetModel(id);
-      setState((prev) => (prev ? { ...prev, key } : prev));
-    } catch (err) {
-      log("warn", "taste model save failed", err);
+  async function sendFeedback(pick: TastePick, action: "interested" | "rejected" | "seen") {
+    const id = pick.tmdbId;
+    if (!id) {
+      setError("This title is missing a TMDB id, so feedback cannot be saved.");
+      return;
     }
-  }
-
-  async function toggleWeb(enabled: boolean) {
+    const key = pickKey(pick);
+    const prevHidden = new Set(hidden);
+    const prevLiked = new Set(interested);
+    if (action === "interested") {
+      setInterested(new Set(prevLiked).add(id));
+    } else {
+      setHidden(new Set(prevHidden).add(key));
+    }
     try {
-      const key = await tasteSetWeb(enabled);
-      setState((prev) => (prev ? { ...prev, key } : prev));
+      await tasteFeedbackSet(id, action);
+      const next = await tasteGet();
+      setState(next);
+      setInterested(likedIds(next.feedback));
+      setHidden(new Set());
     } catch (err) {
-      log("warn", "taste web save failed", err);
+      setHidden(prevHidden);
+      setInterested(prevLiked);
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
     }
   }
 
@@ -171,7 +234,6 @@ export function RecsView({
   const key = state?.key;
   const keyReady = Boolean(key?.stored && key.valid !== false);
   const enoughRatings = (snapshot?.ratedCount ?? 0) >= 8;
-  const models = key?.models?.length ? key.models : [];
   const step = job?.current ?? 1;
 
   return (
@@ -182,25 +244,42 @@ export function RecsView({
           <p className="muted">
             {snapshot
               ? `${report?.ratedCount ?? snapshot.ratedCount} ratings · ${snapshot.lovedCount} loved · ${snapshot.hatedCount} disliked`
-              : "The agent scores a candidate universe from your full log, then reasons over a shortlist."}
-            {report?.summary ? ` · ${report.summary}` : ""}
+              : "Find new films from your imported history."}
           </p>
         </div>
         {keyReady && enoughRatings ? (
-          <button type="button" className="primary" disabled={running} onClick={() => void run()}>
-            {running ? "Reading…" : report ? "Read again" : "Read my log"}
-          </button>
+          <div className="taste-actions">
+            <button type="button" className="primary" disabled={running} onClick={() => void run()}>
+              {running ? "Reading…" : report ? "Read again" : "Read my log"}
+            </button>
+            {report ? (
+              <button
+                type="button"
+                className="taste-refresh"
+                aria-label="Refresh recommendation metadata"
+                title="Refresh recommendation metadata"
+                disabled={running}
+                onClick={() => void run(true)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 11a8 8 0 1 0 2 5.2" />
+                  <path d="M20 4v7h-7" />
+                </svg>
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </header>
 
       {error ? <p className="taste-error">{error}</p> : null}
 
       {!keyReady && state ? (
-        <section className="solid-card taste-setup">
+        <section className="taste-setup">
           <h2>Pay as you go</h2>
           <p>
-            Taste uses OpenRouter. Llama 3.3 70B is the cheap default from models your key can
-            actually reach. Add a few dollars of credit, paste the key in Settings, then come back.
+            Taste uses OpenRouter. DeepSeek V4 Pro 0813 is the recommended default from models
+            your key can actually reach. Add a few dollars of credit, paste the key in Settings,
+            then come back.
           </p>
           <button type="button" className="primary" onClick={onOpenSettings}>
             Open Settings
@@ -212,33 +291,8 @@ export function RecsView({
         <p className="muted pad">Rate at least 8 films so the agent has likes and dislikes to compare.</p>
       ) : null}
 
-      {keyReady ? (
-        <section className="solid-card taste-controls">
-          <h2>How it reads</h2>
-          <TasteModelList
-            models={models}
-            selected={key?.model ?? "llama"}
-            disabled={running}
-            onPick={(id) => void pickModel(id)}
-          />
-          <div className="taste-web">
-            <button
-              type="button"
-              className={key?.web ? "is-on" : ""}
-              disabled={running}
-              onClick={() => void toggleWeb(!(key?.web ?? true))}
-            >
-              {key?.web ? "Web search on" : "Web search off"}
-            </button>
-            <p className="muted">
-              A few cheap lookups for critic lists. Pennies per run, not dollars. No model swarm.
-            </p>
-          </div>
-        </section>
-      ) : null}
-
       {running ? (
-        <section className="solid-card taste-run" aria-live="polite">
+        <section className="taste-run" aria-live="polite">
           <div className="taste-run-head">
             <strong>{job?.label ?? "Reading your log…"}</strong>
             <span className="muted taste-elapsed">{formatElapsed(elapsed)}</span>
@@ -255,132 +309,254 @@ export function RecsView({
               );
             })}
           </ol>
-          <p className="muted">{waitHint(key?.model)}</p>
+          <p className="muted">{waitHint()}</p>
         </section>
       ) : null}
 
-      {report?.note ? <p className="hint">{report.note}</p> : null}
-
-      {snapshot && (snapshot.genres.length || snapshot.directors.length || snapshot.cinematographers?.length) ? (
-        <div className="taste-stats">
-          {snapshot.genres.slice(0, 6).map((g) => (
-            <span key={`g-${g.label}`} className="taste-chip">
-              {g.label}
-              {g.affinity != null ? ` · ${g.affinity >= 0 ? "+" : ""}${g.affinity.toFixed(2)}` : ` · ${g.avg.toFixed(1)}`}
-            </span>
-          ))}
-          {(snapshot.cinematographers ?? []).slice(0, 4).map((c) => (
-            <span key={`c-${c.label}`} className="taste-chip">
-              {c.label}
-              {c.affinity != null ? ` · ${c.affinity >= 0 ? "+" : ""}${c.affinity.toFixed(2)}` : ""}
-            </span>
-          ))}
-          {snapshot.decades.slice(0, 2).map((d) => (
-            <span key={`d-${d.label}`} className="taste-chip">
-              {d.label}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {report?.affinities.length || report?.aversions.length ? (
-        <div className="taste-split">
-          {report?.affinities.length ? (
-            <section className="solid-card">
-              <h2>You keep returning to</h2>
-              <ul className="taste-notes">
-                {report.affinities.map((item) => (
-                  <li key={item.label}>
-                    <strong>{item.label}</strong>
-                    <span>{item.evidence}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-          {report?.aversions.length ? (
-            <section className="solid-card">
-              <h2>You bounce off</h2>
-              <ul className="taste-notes">
-                {report.aversions.map((item) => (
-                  <li key={item.label}>
-                    <strong>{item.label}</strong>
-                    <span>{item.evidence}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-        </div>
-      ) : null}
-
-      {report?.dimensions.length ? (
-        <section className="taste-dims">
-          {report.dimensions.map((dim) => (
-            <article key={dim.name}>
-              <h3>{DIM_LABEL[dim.name] ?? dim.name}</h3>
-              <p>{dim.take}</p>
-            </article>
-          ))}
-        </section>
-      ) : null}
-
-      {report?.picks.length ? (
-        <section>
-          <div className="shelf-head">
-            <h2>For you</h2>
-            <span className="muted">
-              {report.model}
-              {report.webUsed ? " · web" : ""}
-              {report.generatedAt ? ` · ${formatWhen(report.generatedAt)}` : ""}
-            </span>
-          </div>
-          <ul className="rec-list">
-            {report.picks.map((pick) => {
-              const id = pickId(pick);
-              const body = (
-                <>
-                  <Poster name={pick.title} poster={pick.poster} large />
-                  <div>
-                    <strong>{pick.title}</strong>
-                    <span className="muted">{pick.year ?? ""}</span>
-                    {pick.why ? <p>{pick.why}</p> : null}
-                    {pick.mode ? <p className="muted">{pick.mode}</p> : null}
-                    {pick.reasons?.length ? (
-                      <p className="taste-rhyme">{pick.reasons.join(" · ")}</p>
-                    ) : null}
-                    {pick.evidence?.length ? (
-                      <p className="taste-rhyme">Close to {pick.evidence.join(", ")}</p>
-                    ) : pick.rhymesWith?.length ? (
-                      <p className="taste-rhyme">Close to {pick.rhymesWith.join(", ")}</p>
-                    ) : null}
-                  </div>
-                </>
-              );
-              return (
-                <li key={`${pick.title}-${pick.year ?? ""}`}>
-                  {id ? (
-                    <button type="button" className="taste-pick" onClick={() => onSelectFilm(id)}>
-                      {body}
-                    </button>
-                  ) : (
-                    <div className="taste-pick is-static">{body}</div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+      {report ? (
+        <TasteLists
+          report={report}
+          hidden={hidden}
+          interested={interested}
+          onSelectFilm={onSelectFilm}
+          onFeedback={(pick, action) => void sendFeedback(pick, action)}
+        />
       ) : null}
 
       {keyReady && enoughRatings && !report && !running ? (
         <p className="muted pad">
-          The scorer reads every rating, then separates films you like from films that should pull new recommendations.
-          Rewatches stay in the profile; they do not turn a decade of nostalgia into a hunt target. The model critiques a
-          scored shortlist across taste modes, may run a few targeted searches, and picks 12.
+          The scorer reads every rating, then finds new films and ranks your watchlist separately.
+          Rewatches stay in the profile. The model writes a taste profile after the lists are chosen.
         </p>
       ) : null}
+
+      {report ? <TasteProfileFooter report={report} /> : null}
     </div>
+  );
+}
+
+function TasteLists({
+  report,
+  hidden,
+  interested,
+  onSelectFilm,
+  onFeedback,
+}: {
+  report: NonNullable<TasteState["report"]>;
+  hidden: Set<string>;
+  interested: Set<number>;
+  onSelectFilm: (id: string) => void;
+  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen") => void;
+}) {
+  const { neu, watch } = sectionPicks(report);
+  const visibleNew = neu.filter((p) => !hidden.has(pickKey(p)));
+  const visibleWatch = watch.filter((p) => !hidden.has(pickKey(p)));
+  const [sort, setSort] = useState<TasteSort>("match");
+  const [filter, setFilter] = useState<TasteFilter>("all");
+  const sortedNew = sortTastePicks(visibleNew, sort, filter);
+  const sortedWatch = sortTastePicks(visibleWatch, sort, filter);
+  const controls = neu.length || watch.length ? (
+    <div className="flat-menu-toolbar taste-list-toolbar" role="group" aria-label="Recommendation list controls">
+      <Menu label="Sort" value={sort} options={TASTE_SORTS} onChange={(id) => setSort(id)} />
+      <Menu label="Match" value={filter} options={TASTE_FILTERS} onChange={(id) => setFilter(id)} />
+    </div>
+  ) : null;
+  return (
+    <>
+      {neu.length ? (
+        <section>
+          <div className="shelf-head taste-shelf-head">
+            <div className="taste-list-heading">
+              <h2>New for you</h2>
+              <span className="muted">{listCount(sortedNew.length, visibleNew.length)} picks</span>
+            </div>
+            {controls}
+          </div>
+          {sortedNew.length ? (
+            <ul className="rec-list taste-rec-list">
+              {sortedNew.map((pick) => (
+                <TastePickCard
+                  key={pickKey(pick)}
+                  pick={pick}
+                  interested={Boolean(pick.tmdbId && interested.has(pick.tmdbId))}
+                  onSelectFilm={onSelectFilm}
+                  onFeedback={onFeedback}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="muted pad">
+              {visibleNew.length ? "No new films match this filter." : "All new films are hidden."}
+            </p>
+          )}
+        </section>
+      ) : (
+        <section>
+          <div className="shelf-head taste-shelf-head">
+            <div className="taste-list-heading">
+              <h2>New for you</h2>
+              <span className="muted">0 picks</span>
+            </div>
+            {controls}
+          </div>
+          <p className="muted pad">
+            Nothing new cleared this run.
+            {watch.length
+              ? " Watchlist below is what you already saved."
+              : ""}
+          </p>
+        </section>
+      )}
+      {watch.length ? (
+        <section>
+          <div className="shelf-head">
+            <h2>Already on your watchlist</h2>
+            <span className="muted">{listCount(sortedWatch.length, visibleWatch.length)} picks</span>
+          </div>
+          {sortedWatch.length ? (
+            <ul className="rec-list taste-rec-list">
+              {sortedWatch.map((pick) => (
+                <TastePickCard
+                  key={pickKey(pick)}
+                  pick={pick}
+                  interested={Boolean(pick.tmdbId && interested.has(pick.tmdbId))}
+                  onSelectFilm={onSelectFilm}
+                  onFeedback={onFeedback}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="muted pad">No watchlist films match this filter.</p>
+          )}
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+function TasteProfileFooter({ report }: { report: NonNullable<TasteState["report"]> }) {
+  const summary = report.summary || report.note;
+  const affinities = report.affinities.slice(0, 2).map((item) => item.label);
+  if (!summary && !affinities.length) return null;
+  return (
+    <footer className="taste-profile-footer" aria-label="Taste profile">
+      <span className="taste-profile-label">Taste profile</span>
+      {summary ? <p>{summary}</p> : null}
+      {affinities.length ? <span className="taste-profile-affinities">{affinities.join(" · ")}</span> : null}
+    </footer>
+  );
+}
+
+function TastePickCard({
+  pick,
+  interested,
+  onSelectFilm,
+  onFeedback,
+}: {
+  pick: TastePick;
+  interested: boolean;
+  onSelectFilm: (id: string) => void;
+  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen") => void;
+}) {
+  const id = pickId(pick);
+  const evidenceItems = (pick.evidenceItems ?? [])
+    .flatMap((item) => {
+      const evidenceId = item.filmId || (item.tmdbId != null ? `tmdb:${item.tmdbId}` : null);
+      return evidenceId ? [{ ...item, id: evidenceId }] : [];
+    })
+    .slice(0, 2);
+  const closeTo = pick.evidence?.length
+    ? `Close to ${pick.evidence.slice(0, 2).join(", ")}`
+    : pick.rhymesWith?.length
+      ? `Close to ${pick.rhymesWith.slice(0, 2).join(", ")}`
+      : null;
+  const rationale = evidenceItems.length ? null : pick.why || closeTo;
+  const heading = (
+    <>
+      <Poster name={pick.title} poster={pick.poster} large />
+      <span className="taste-pick-copy">
+        <strong>{pick.title}</strong>
+        <span className="taste-pick-meta muted">
+          <span className={`taste-match ${matchTone(pick)}`}>{matchPercent(pick)}</span>
+          {pick.year != null ? <span>{pick.year}</span> : null}
+        </span>
+        {rationale ? <span className="taste-pick-rationale">{rationale}</span> : null}
+      </span>
+    </>
+  );
+  return (
+    <li>
+      <article className={`taste-pick${interested ? " is-interested" : ""}`}>
+        {id ? (
+          <button type="button" className="taste-pick-open" onClick={() => onSelectFilm(id)}>
+            {heading}
+          </button>
+        ) : (
+          <div className="taste-pick-open is-static">{heading}</div>
+        )}
+        {evidenceItems.length ? (
+          <div
+            className="taste-evidence"
+            role="group"
+            aria-label={`Picked from your interest in ${evidenceItems.map((item) => item.title).join(", ")}`}
+          >
+            {evidenceItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                title={item.title}
+                aria-label={`View ${item.title}`}
+                onClick={() => onSelectFilm(item.id)}
+              >
+                <Poster name={item.title} poster={item.poster} />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="taste-fb" role="group" aria-label={`Feedback for ${pick.title}`}>
+          <button
+            type="button"
+            aria-label="Mark as interested"
+            aria-pressed={interested}
+            title="Interested"
+            className={`taste-fb-interest${interested ? " is-on" : ""}`}
+            onClick={() => onFeedback(pick, "interested")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78Z"
+                style={{ fill: interested ? "currentColor" : "none" }}
+              />
+            </svg>
+            <span>Save</span>
+          </button>
+          <button
+            type="button"
+            className="taste-fb-reject"
+            aria-label="Not for me"
+            title="Not for me"
+            onClick={() => onFeedback(pick, "rejected")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m7 7 10 10M17 7 7 17" />
+            </svg>
+            <span>Pass</span>
+          </button>
+          <button
+            type="button"
+            className="taste-fb-seen"
+            aria-label="Already seen"
+            title="Already seen"
+            onClick={() => onFeedback(pick, "seen")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m5 12.5 4.5 4.5L19 7" />
+            </svg>
+            <span>Seen</span>
+          </button>
+        </div>
+      </article>
+    </li>
   );
 }
 
@@ -403,6 +579,7 @@ export function TasteModelList({
           key={item.id}
           type="button"
           className={selected === item.id ? "is-on" : ""}
+          aria-pressed={selected === item.id}
           disabled={disabled}
           onClick={() => onPick(item.id)}
         >

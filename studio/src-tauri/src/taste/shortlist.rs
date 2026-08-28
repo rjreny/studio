@@ -68,21 +68,40 @@ fn repeat_person_count(cand: &ScoredCandidate, selected: &[ScoredCandidate]) -> 
         .unwrap_or(0)
 }
 
-/// Light MMR: keep cluster-mates. This is not the final 12.
+/// Light MMR: keep cluster-mates. This is not the final list.
+/// New neighbors stay in so the critic sees the same films the board will show.
+pub fn llm_pool(ranked: &[ScoredCandidate]) -> Vec<ScoredCandidate> {
+    ranked
+        .iter()
+        .filter(|c| {
+            c.candidate.watchlist || crate::taste::confidence::occupies_new(c)
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn shortlist(ranked: &[ScoredCandidate]) -> Vec<ScoredCandidate> {
-    if ranked.is_empty() {
+    let target = SHORTLIST_MAX.min(ranked.len()).max(SHORTLIST_MIN.min(ranked.len()));
+    shortlist_n(ranked, target)
+}
+
+pub fn shortlist_n(ranked: &[ScoredCandidate], target: usize) -> Vec<ScoredCandidate> {
+    if ranked.is_empty() || target == 0 {
         return Vec::new();
     }
-    let pool: Vec<&ScoredCandidate> = ranked.iter().take(100).collect();
+    let pool: Vec<&ScoredCandidate> = ranked.iter().collect();
     let mut selected: Vec<ScoredCandidate> = Vec::new();
     let mut remaining: Vec<usize> = (0..pool.len()).collect();
-    let target = SHORTLIST_MAX.min(pool.len()).max(SHORTLIST_MIN.min(pool.len()));
+    let target = target.min(pool.len());
 
     while selected.len() < target && !remaining.is_empty() {
         let mut best_i = 0;
         let mut best_score = f32::NEG_INFINITY;
         for (idx, &pi) in remaining.iter().enumerate() {
-            let rel = (pool[pi].score.total + 1.5) / 3.0;
+            let frozen = (pool[pi].score.total + 1.5) / 3.0;
+            let fit = pool[pi].eligibility.candidate_fit.clamp(0.0, 1.0);
+            let grade = crate::taste::score::evidence_grade(pool[pi]) as f32 / 3.0;
+            let rel = 0.55 * frozen + 0.30 * fit + 0.15 * grade;
             let sim = selected
                 .iter()
                 .map(|s| similarity(pool[pi], s))
@@ -118,10 +137,14 @@ mod tests {
                     kind: RetrievalKind::Related,
                     label: "x".into(),
                     seed_tmdb_id: Some(1),
+                    seed_rating: None,
                 }],
                 directors: vec![director.into()],
                 genres: vec!["Crime".into()],
                 modes: vec![],
+                media_kind: crate::taste::retrieve::MediaKind::Movie,
+                runtime: Some(110),
+                vote_count: Some(400),
             },
             score: CandidateScore {
                 content: total,
@@ -131,6 +154,8 @@ mod tests {
                 watchlist: 0.0,
                 novelty: 0.0,
                 negative_evidence: 0.0,
+                semantic_fit: 0.5,
+                semantic_coverage: false,
                 total,
             },
             reasons: vec!["director".into()],
@@ -139,6 +164,17 @@ mod tests {
             negative_features: vec![],
             contextual_only: false,
             person_keys: vec![],
+            display_reasons: vec![],
+            scoring_reasons: vec![],
+            matched_features: vec![],
+            hidden_features: vec![],
+            eligibility: crate::taste::explain::EligibilityTrace {
+                portable_evidence_required: false,
+                passed: false,
+                passed_because: vec!["fixture".into()],
+                candidate_fit: 1.0,
+                evidence_grade: crate::taste::explain::EvidenceGrade::None,
+            },
         }
     }
 
@@ -170,5 +206,77 @@ mod tests {
             powell < 8,
             "shared person FeatureKey must keep filmography from filling the shortlist, got {powell}"
         );
+    }
+
+    #[test]
+    fn llm_pool_keeps_neighbors_and_craft() {
+        let related = cand("Reservoir Dogs", "Tarantino", 0.9);
+        let mut craft = cand("Killing Them Softly", "Dominik", 0.85);
+        craft.candidate.sources = vec![RetrievalSource {
+            kind: RetrievalKind::Filmography,
+            label: "Greig Fraser".into(),
+            seed_tmdb_id: None,
+            seed_rating: None,
+        }];
+        craft.matched_features = vec![
+            crate::taste::explain::MatchedFeatureView {
+                name: "Greig Fraser".into(),
+                family: "cinematographer".into(),
+                appearances: 4,
+                recommendation_mean: 0.45,
+                scoring_affinity: 0.45,
+                confidence: 0.8,
+                portability: 1.0,
+                citeable: true,
+                cited: true,
+            },
+            crate::taste::explain::MatchedFeatureView {
+                name: "neo-noir".into(),
+                family: "keyword".into(),
+                appearances: 7,
+                recommendation_mean: 0.4,
+                scoring_affinity: 0.4,
+                confidence: 0.8,
+                portability: 1.0,
+                citeable: true,
+                cited: true,
+            },
+        ];
+        craft.eligibility.candidate_fit = 1.0;
+        craft.eligibility.passed = true;
+        craft.eligibility.evidence_grade = crate::taste::explain::EvidenceGrade::Medium;
+        let mut neighbor = cand("Solo: A Star Wars Story", "Howard", 0.8);
+        neighbor.candidate.sources = vec![
+            RetrievalSource {
+                kind: RetrievalKind::RelatedRecommendations,
+                label: "recommended from Rogue One: A Star Wars Story".into(),
+                seed_tmdb_id: Some(330_459),
+                seed_rating: None,
+            },
+            RetrievalSource {
+                kind: RetrievalKind::RelatedRecommendations,
+                label: "recommended from Avatar: Fire and Ash".into(),
+                seed_tmdb_id: Some(835_33),
+                seed_rating: None,
+            },
+        ];
+        neighbor.matched_features = vec![crate::taste::explain::MatchedFeatureView {
+            name: "John Powell".into(),
+            family: "composer".into(),
+            appearances: 9,
+            recommendation_mean: 0.5,
+            scoring_affinity: 0.5,
+            confidence: 0.8,
+            portability: 1.0,
+            citeable: true,
+            cited: true,
+        }];
+        neighbor.eligibility.candidate_fit = 1.0;
+        neighbor.eligibility.passed = true;
+        neighbor.eligibility.evidence_grade = crate::taste::explain::EvidenceGrade::Medium;
+        let pool = llm_pool(&[related, craft, neighbor]);
+        assert!(pool.iter().all(|c| c.candidate.title != "Reservoir Dogs"));
+        assert!(pool.iter().any(|c| c.candidate.title == "Killing Them Softly"));
+        assert!(pool.iter().any(|c| c.candidate.title == "Solo: A Star Wars Story"));
     }
 }

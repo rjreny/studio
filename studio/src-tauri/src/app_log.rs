@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -26,4 +26,12 @@ pub fn write_to(path: &Path, line: &str) {
         .append(true)
         .open(path)
         .and_then(|mut f| writeln!(f, "{formatted}"));
+}
+
+pub fn write_json(app: &AppHandle, folder: &str, filename: &str, body: &str) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?.join(folder);
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(filename);
+    fs::write(&path, body).ok()?;
+    Some(path)
 }

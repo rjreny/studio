@@ -247,6 +247,7 @@ export default function App() {
             <NavTabs items={NAV} active={route} onGo={go} />
             <input
               className="nav-search glass"
+              aria-label="Search your log"
               value={libraryQuery}
               onChange={(e) => onNavSearch(e.target.value)}
               placeholder="Search your log"

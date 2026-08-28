@@ -162,6 +162,8 @@ pub fn derive(films: &[ModeFilm<'_>]) -> (Vec<TasteDimensionView>, Vec<TasteMode
                         .map(|k| k.name.clone())
                         .collect(),
                     genres: f.genres.to_vec(),
+                    year: None,
+                    runtime: None,
                 })
             })
             .take(6)
@@ -195,6 +197,7 @@ pub fn derive(films: &[ModeFilm<'_>]) -> (Vec<TasteDimensionView>, Vec<TasteMode
         b.strength
             .partial_cmp(&a.strength)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.dimension.cmp(&b.dimension))
     });
 
     let mut mode_shifts = Vec::new();

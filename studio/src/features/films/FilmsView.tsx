@@ -80,17 +80,17 @@ export function FilmsView({
 
   return (
     <div className="films page-pad">
-      <header className="page-head">
+      <header className="page-head films-page-head">
         <div>
           <h1>Films</h1>
           <p className="muted">{busy ? "Updating…" : `${total} in this view`}</p>
         </div>
+        <div className="flat-menu-toolbar films-toolbar" role="group" aria-label="Film list controls">
+          <Menu label="Sort" value={sort} options={[...SORTS]} onChange={(id) => setSort(id)} />
+          <Menu label="Show" value={filter} options={[...FILTERS]} onChange={(id) => setFilter(id)} />
+          <Menu label="Decade" value={decade} options={decadeOptions} onChange={setDecade} />
+        </div>
       </header>
-      <div className="filter-bar glass">
-        <Menu label="Sort" value={sort} options={[...SORTS]} onChange={(id) => setSort(id)} />
-        <Menu label="Show" value={filter} options={[...FILTERS]} onChange={(id) => setFilter(id)} />
-        <Menu label="Decade" value={decade} options={decadeOptions} onChange={setDecade} />
-      </div>
       <div className="film-grid">
         {items.map((film) => (
           <FilmCard key={film.id} film={film} onSelect={onSelectFilm} />

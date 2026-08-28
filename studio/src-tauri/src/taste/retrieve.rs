@@ -4,7 +4,7 @@ use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::LibraryItem;
 use crate::storage::db::Database;
 use crate::taste::features::{
-    family_for_job, Credit, FeatureFamily, FeatureKey, FeatureProfile, Keyword,
+    family_for_job, Credit, FeatureFamily, FeatureProfile, Keyword,
 };
 use crate::taste::preference::{
     interaction_signal, rating_profile, years_since, InteractionSignal, RatingProfile,
@@ -28,23 +28,56 @@ pub struct FilmRecord {
     pub genres: Vec<String>,
     pub credits: Vec<Credit>,
     pub keywords: Vec<Keyword>,
+    pub recommendations: Vec<LibraryItem>,
     pub similar: Vec<LibraryItem>,
     pub runtime: Option<i32>,
     pub poster: Option<String>,
     pub vote_count: Option<i64>,
+    /// Optional personal Letterboxd review, distinct from TMDB review data.
+    pub review: Option<String>,
     pub signal: Option<InteractionSignal>,
     pub age_years: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    #[default]
+    Movie,
+    TvSeries,
+    TvEpisode,
+    TvSpecial,
+    Short,
+    Other,
+    Ambiguous,
+}
+
+impl MediaKind {
+    pub fn is_movie(self) -> bool {
+        matches!(self, MediaKind::Movie)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RetrievalKind {
     Related,
+    RelatedRecommendations,
+    RelatedSimilar,
     Filmography,
     Friend,
     Watchlist,
     Exploration,
     Discovery,
+}
+
+impl RetrievalKind {
+    pub fn is_related(self) -> bool {
+        matches!(
+            self,
+            Self::Related | Self::RelatedRecommendations | Self::RelatedSimilar
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +86,56 @@ pub struct RetrievalSource {
     pub kind: RetrievalKind,
     pub label: String,
     pub seed_tmdb_id: Option<i64>,
+    #[serde(default)]
+    pub seed_rating: Option<f32>,
 }
+
+impl RetrievalSource {
+    pub fn new(
+        kind: RetrievalKind,
+        label: impl Into<String>,
+        seed_tmdb_id: Option<i64>,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            seed_tmdb_id,
+            seed_rating: None,
+        }
+    }
+
+    pub fn with_rating(mut self, rating: Option<f32>) -> Self {
+        self.seed_rating = rating;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedCoverage {
+    pub eligible_seeds: usize,
+    pub seeds_with_usable_related: usize,
+    pub seeds_refreshed: usize,
+    pub seeds_with_catalog: usize,
+    pub candidates_with_catalog: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RetrievalResult {
+    pub candidates: Vec<Candidate>,
+    pub coverage: SeedCoverage,
+}
+
+const POOL_CAP: usize = 1000;
+const PER_SEED_GUARANTEE: usize = 2;
+const PER_PERSON_GUARANTEE: usize = 2;
+const RECS_PER_SEED: usize = 8;
+const SIMILAR_PER_SEED: usize = 3;
+const SIMILAR_SEED_CAP: usize = 40;
+const FILMOGRAPHY_PER_PERSON: usize = 12;
+const ACTOR_FILMOGRAPHY_CAP: usize = 4;
+const COMPOSER_FILMOGRAPHY_CAP: usize = 4;
+const SEED_HYDRATE_CAP: usize = 40;
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -70,6 +152,7 @@ pub struct Candidate {
     pub sources: Vec<RetrievalSource>,
     pub friend_affinity: f32,
     pub tmdb_related: f32,
+    pub media_kind: MediaKind,
 }
 
 pub fn identity_key(tmdb_id: Option<i64>, title: &str, year: Option<i32>) -> String {
@@ -119,7 +202,8 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
               m.similar_json,
               m.runtime,
               COALESCE(m.poster_path, smr.cached_poster_url),
-              m.vote_count
+              m.vote_count,
+              smr.raw_identity
             FROM source_movie_records smr
             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             LEFT JOIN movies m ON m.id = ml.movie_id
@@ -128,6 +212,7 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
                OR ums.watched = 1
                OR ums.watchlist = 1
                OR smr.on_watchlist = 1
+               OR json_extract(smr.raw_identity, '$.review') IS NOT NULL
             "#,
         )
         .map_err(|e| e.to_string())?;
@@ -136,6 +221,17 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
             let credits_json: Option<String> = row.get(11)?;
             let cast_json: Option<String> = row.get(12)?;
             let crew_json: Option<String> = row.get(13)?;
+            let (recommendations, similar) = parse_related_lists(row.get::<_, Option<String>>(15)?);
+            let review = row
+                .get::<_, Option<String>>(19)?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|identity| {
+                    identity
+                        .get("review")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .filter(|review| !review.trim().is_empty());
             Ok(FilmRecord {
                 key: row.get(0)?,
                 title: display_title(&row.get::<_, String>(1)?),
@@ -150,10 +246,12 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
                 genres: json_vec(row.get::<_, Option<String>>(10)?),
                 credits: parse_credits(credits_json.as_deref(), cast_json.as_deref(), crew_json.as_deref()),
                 keywords: parse_keywords(row.get::<_, Option<String>>(14)?),
-                similar: parse_similar(row.get::<_, Option<String>>(15)?),
+                recommendations,
+                similar,
                 runtime: row.get(16)?,
                 poster: poster_url(row.get(17)?),
                 vote_count: row.get(18)?,
+                review,
                 signal: None,
                 age_years: None,
             })
@@ -185,6 +283,47 @@ pub fn attach_signals(films: &mut [FilmRecord]) {
     }
 }
 
+fn needs_related_hydrate(film: &FilmRecord) -> bool {
+    film.tmdb_id.is_some() && eligible_positive_like(film) && !has_usable_related(film)
+}
+
+pub fn enrich_eligible_seeds(
+    db: &Database,
+    films: &mut [FilmRecord],
+    cap: usize,
+    force: bool,
+) -> usize {
+    let cap = if cap == 0 { SEED_HYDRATE_CAP } else { cap };
+    let mut idxs: Vec<usize> = films
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| eligible_positive_like(f) && f.tmdb_id.is_some())
+        .filter(|(_, f)| force || needs_related_hydrate(f) || needs_catalog_hydrate(f))
+        .map(|(i, _)| i)
+        .collect();
+    idxs.sort_by(|&a, &b| {
+        let missing = |f: &FilmRecord| if needs_related_hydrate(f) { 0 } else { 1 };
+        missing(&films[a])
+            .cmp(&missing(&films[b]))
+            .then_with(|| {
+                seed_priority(&films[b])
+                    .partial_cmp(&seed_priority(&films[a]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| films[a].tmdb_id.cmp(&films[b].tmdb_id))
+            .then_with(|| films[a].title.cmp(&films[b].title))
+    });
+    let mut n = 0;
+    for i in idxs.into_iter().take(cap) {
+        let Some(tid) = films[i].tmdb_id else { continue };
+        if tmdb::refresh_movie_catalog(db, tid, force).is_ok() {
+            n += 1;
+            let _ = reload_catalog_fields(db, &mut films[i]);
+        }
+    }
+    n
+}
+
 fn needs_catalog_hydrate(film: &FilmRecord) -> bool {
     if film.tmdb_id.is_none() || film.rating.is_none() {
         return false;
@@ -196,11 +335,16 @@ fn needs_catalog_hydrate(film: &FilmRecord) -> bool {
     !has_crew_ids || film.keywords.is_empty()
 }
 
-pub fn enrich_rated_library(db: &Database, films: &mut [FilmRecord], cap: usize) -> usize {
+pub fn enrich_rated_library(
+    db: &Database,
+    films: &mut [FilmRecord],
+    cap: usize,
+    force: bool,
+) -> usize {
     let mut idxs: Vec<usize> = films
         .iter()
         .enumerate()
-        .filter(|(_, f)| needs_catalog_hydrate(f))
+        .filter(|(_, f)| force || needs_catalog_hydrate(f))
         .map(|(i, _)| i)
         .collect();
     idxs.sort_by(|&a, &b| {
@@ -215,11 +359,13 @@ pub fn enrich_rated_library(db: &Database, films: &mut [FilmRecord], cap: usize)
         score(&films[b])
             .partial_cmp(&score(&films[a]))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| films[a].tmdb_id.cmp(&films[b].tmdb_id))
+            .then_with(|| films[a].title.cmp(&films[b].title))
     });
     let mut n = 0;
     for i in idxs.into_iter().take(cap) {
         let Some(tid) = films[i].tmdb_id else { continue };
-        if tmdb::refresh_movie_catalog(db, tid, false).is_ok() {
+        if tmdb::refresh_movie_catalog(db, tid, force).is_ok() {
             n += 1;
             let _ = reload_catalog_fields(db, &mut films[i]);
         }
@@ -255,7 +401,9 @@ fn reload_catalog_fields(db: &Database, film: &mut FilmRecord) -> Result<(), Str
     film.genres = json_vec(genres);
     film.credits = parse_credits(credits.as_deref(), cast.as_deref(), crew.as_deref());
     film.keywords = parse_keywords(keywords);
-    film.similar = parse_similar(similar);
+    let (recommendations, similar_list) = parse_related_lists(similar);
+    film.recommendations = recommendations;
+    film.similar = similar_list;
     if film.runtime.is_none() {
         film.runtime = runtime;
     }
@@ -278,53 +426,62 @@ pub fn retrieve(
     films: &[FilmRecord],
     profile: &FeatureProfile,
     seen: &HashSet<String>,
+    force_refresh: bool,
 ) -> Result<Vec<Candidate>, String> {
-    let mut by_key: HashMap<String, Candidate> = HashMap::new();
-    let mut used = HashSet::new();
+    Ok(retrieve_with_coverage(db, films, profile, seen, force_refresh)?.candidates)
+}
 
+pub fn retrieve_with_coverage(
+    db: &Database,
+    films: &[FilmRecord],
+    profile: &FeatureProfile,
+    seen: &HashSet<String>,
+    force_refresh: bool,
+) -> Result<RetrievalResult, String> {
+    let mut by_key: HashMap<String, Candidate> = HashMap::new();
     let mut seeds: Vec<&FilmRecord> = films
         .iter()
-        .filter(|f| f.signal.is_some() && f.rating.is_some())
+        .filter(|f| eligible_positive_like(f))
         .collect();
     seeds.sort_by(|a, b| {
-        let sa = a.signal.as_ref().unwrap();
-        let sb = b.signal.as_ref().unwrap();
-        (sb.preference.absolute * sb.recommendation_weight)
-            .partial_cmp(&(sa.preference.absolute * sa.recommendation_weight))
+        seed_priority(b)
+            .partial_cmp(&seed_priority(a))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.tmdb_id.unwrap_or(i64::MAX).cmp(&b.tmdb_id.unwrap_or(i64::MAX)))
+            .then_with(|| a.title.cmp(&b.title))
     });
 
-    for seed in seeds.iter().take(40) {
-        if !seed_expands_related(seed, profile) {
+    let eligible_seeds = seeds.len();
+    let seeds_with_usable_related = seeds
+        .iter()
+        .filter(|s| has_usable_related(s))
+        .count();
+
+    for seed in &seeds {
+        for item in seed.recommendations.iter().take(RECS_PER_SEED) {
+            push_related(
+                &mut by_key,
+                seen,
+                seed,
+                item,
+                RetrievalKind::RelatedRecommendations,
+                format!("recommended from {}", seed.title),
+            );
+        }
+    }
+    for seed in seeds.iter().take(SIMILAR_SEED_CAP) {
+        let allow_similar = seed_allows_similar(seed, profile);
+        if !allow_similar {
             continue;
         }
-        for item in seed.similar.iter().take(8) {
-            let tmdb_id = tmdb_id_from_item(item);
-            let key = identity_key(tmdb_id, &item.title, item.year);
-            if seen.contains(&key) || !used.insert(key.clone()) {
-                continue;
-            }
-            upsert_candidate(
+        for item in seed.similar.iter().take(SIMILAR_PER_SEED) {
+            push_related(
                 &mut by_key,
-                Candidate {
-                    tmdb_id,
-                    title: item.title.clone(),
-                    year: item.year,
-                    poster: item.poster.clone(),
-                    genres: Vec::new(),
-                    credits: Vec::new(),
-                    keywords: Vec::new(),
-                    runtime: None,
-                    vote_count: None,
-                    watchlist: false,
-                    sources: vec![RetrievalSource {
-                        kind: RetrievalKind::Related,
-                        label: format!("similar to {}", seed.title),
-                        seed_tmdb_id: seed.tmdb_id,
-                    }],
-                    friend_affinity: 0.0,
-                    tmdb_related: 1.0,
-                },
+                seen,
+                seed,
+                item,
+                RetrievalKind::RelatedSimilar,
+                format!("similar to {}", seed.title),
             );
         }
     }
@@ -332,23 +489,18 @@ pub fn retrieve(
     let people: Vec<_> = profile
         .affinities
         .iter()
-        .filter(|a| {
-            matches!(
-                a.key.family,
-                FeatureFamily::Director
-                    | FeatureFamily::Writer
-                    | FeatureFamily::Cinematographer
-                    | FeatureFamily::Composer
-            ) && a.key.id.is_some()
-                && a.appearances >= 2
-                && a.recommendation_mean > 0.15
-        })
-        .take(8)
+        .filter(|a| filmography_person_allowed(a))
         .collect();
     for person in people {
         let Some(pid) = person.key.id else { continue };
-        let credits = tmdb::person_movie_credits(db, pid).unwrap_or_default();
-        for credit in credits.into_iter().take(20) {
+        let credits = tmdb::person_movie_credits_with_force(db, pid, force_refresh)
+            .unwrap_or_default();
+        let take = filmography_credit_cap(person.key.family);
+        for credit in credits
+            .into_iter()
+            .filter(|c| keep_person_credit(&c.job, person.key.family))
+            .take(take)
+        {
             let key = identity_key(Some(credit.tmdb_id), &credit.title, credit.year);
             if seen.contains(&key) {
                 continue;
@@ -364,19 +516,20 @@ pub fn retrieve(
                     credits: vec![Credit {
                         id: Some(pid),
                         name: person.key.name.clone(),
-                        job: job_for_family(person.key.family),
+                        job: credit.job,
                     }],
                     keywords: Vec::new(),
                     runtime: None,
                     vote_count: None,
                     watchlist: false,
-                    sources: vec![RetrievalSource {
-                        kind: RetrievalKind::Filmography,
-                        label: person.key.name.clone(),
-                        seed_tmdb_id: None,
-                    }],
+                    sources: vec![RetrievalSource::new(
+                        RetrievalKind::Filmography,
+                        person.key.name.clone(),
+                        None,
+                    )],
                     friend_affinity: 0.0,
                     tmdb_related: 0.0,
+                    media_kind: MediaKind::Movie,
                 },
             );
         }
@@ -404,9 +557,11 @@ pub fn retrieve(
                     kind: RetrievalKind::Watchlist,
                     label: "watchlist".into(),
                     seed_tmdb_id: None,
+                    seed_rating: None,
                 }],
                 friend_affinity: 0.0,
                 tmdb_related: 0.0,
+                media_kind: MediaKind::Movie,
             },
         );
     }
@@ -416,75 +571,275 @@ pub fn retrieve(
         upsert_candidate(&mut by_key, c);
     }
 
-    for aff in profile
-        .affinities
-        .iter()
-        .filter(|a| a.confidence > 0.5 && a.appearances <= 4 && a.recommendation_mean > 0.25)
-        .take(6)
-    {
-        if aff.key.family != FeatureFamily::Keyword && aff.key.family != FeatureFamily::Genre {
-            continue;
-        }
-        let _ = aff;
-        // Exploration is represented by keeping sparse-affinity filmography/related
-        // candidates; no extra network hop.
-    }
-
-    let mut out: Vec<Candidate> = by_key.into_values().collect();
+    let mut out = select_fair_pool(by_key, POOL_CAP);
     hydrate_local_metadata(db, &mut out)?;
-    if out.len() > 1000 {
-        out.truncate(1000);
-    }
-    Ok(out)
-}
-
-/// Related expansion is for films that carry a repeatable person signal.
-/// Singleton 5-stars (Twilight, Curious George) must not flood the pool.
-fn seed_expands_related(seed: &FilmRecord, profile: &FeatureProfile) -> bool {
-    let familiar = seed
-        .signal
-        .as_ref()
-        .map(|s| s.familiarity_strength >= 0.6)
-        .unwrap_or(false);
-    if familiar {
-        return false;
-    }
-    seed.credits.iter().any(|c| {
-        let Some(family) = family_for_job(&c.job) else {
-            return false;
-        };
-        let key = FeatureKey::new(family, c.id, &c.name);
-        profile.affinities.iter().any(|a| {
-            a.citeable()
-                && matches!(
-                    a.key.family,
-                    FeatureFamily::Director
-                        | FeatureFamily::Writer
-                        | FeatureFamily::Cinematographer
-                        | FeatureFamily::Composer
-                        | FeatureFamily::Actor
-                )
-                && a.key.storage_key() == key.storage_key()
-        })
+    let seeds_with_catalog = seeds.iter().filter(|s| film_has_catalog(s)).count();
+    let candidates_with_catalog = out.iter().filter(|c| candidate_has_catalog(c)).count();
+    Ok(RetrievalResult {
+        candidates: out,
+        coverage: SeedCoverage {
+            eligible_seeds,
+            seeds_with_usable_related,
+            seeds_refreshed: 0,
+            seeds_with_catalog,
+            candidates_with_catalog,
+        },
     })
 }
 
-fn job_for_family(family: FeatureFamily) -> String {
-    match family {
-        FeatureFamily::Director => "Director".into(),
-        FeatureFamily::Writer => "Writer".into(),
-        FeatureFamily::Cinematographer => "Director of Photography".into(),
-        FeatureFamily::Composer => "Original Music Composer".into(),
-        FeatureFamily::Actor => "Actor".into(),
-        _ => "Crew".into(),
+fn push_related(
+    by_key: &mut HashMap<String, Candidate>,
+    seen: &HashSet<String>,
+    seed: &FilmRecord,
+    item: &LibraryItem,
+    kind: RetrievalKind,
+    label: String,
+) {
+    let tmdb_id = tmdb_id_from_item(item);
+    let key = identity_key(tmdb_id, &item.title, item.year);
+    if seen.contains(&key) {
+        return;
+    }
+    upsert_candidate(
+        by_key,
+        Candidate {
+            tmdb_id,
+            title: item.title.clone(),
+            year: item.year,
+            poster: item.poster.clone(),
+            genres: Vec::new(),
+            credits: Vec::new(),
+            keywords: Vec::new(),
+            runtime: None,
+            vote_count: None,
+            watchlist: false,
+            sources: vec![RetrievalSource::new(
+                kind,
+                label,
+                seed.tmdb_id,
+            )
+            .with_rating(seed.rating)],
+            friend_affinity: 0.0,
+            tmdb_related: 1.0,
+            media_kind: MediaKind::Movie,
+        },
+    );
+}
+
+fn seed_priority(seed: &FilmRecord) -> f32 {
+    seed.signal
+        .as_ref()
+        .map(|s| s.preference.affinity_preference * s.recommendation_weight)
+        .unwrap_or(0.0)
+}
+
+fn has_usable_related(seed: &FilmRecord) -> bool {
+    !seed.recommendations.is_empty() || !seed.similar.is_empty()
+}
+
+pub fn eligible_positive_like(seed: &FilmRecord) -> bool {
+    let Some(signal) = seed.signal.as_ref() else {
+        return false;
+    };
+    if seed.rating.is_none() {
+        return false;
+    }
+    if signal.preference.affinity_preference <= 0.0 || signal.preference.absolute <= 0.0 {
+        return false;
+    }
+    if signal.familiarity_strength >= 0.6 {
+        return false;
+    }
+    if seed.genres.iter().any(|g| g.eq_ignore_ascii_case("tv movie")) {
+        return false;
+    }
+    true
+}
+
+/// Related expansion is for every eligible positive-like film. The source
+/// provenance and later evidence grade decide whether a result is displayed.
+fn seed_expands_related(seed: &FilmRecord, _profile: &FeatureProfile) -> bool {
+    eligible_positive_like(seed)
+}
+
+fn seed_allows_similar(seed: &FilmRecord, _profile: &FeatureProfile) -> bool {
+    eligible_positive_like(seed)
+}
+
+fn filmography_person_allowed(a: &crate::taste::features::FeatureAffinity) -> bool {
+    if a.key.id.is_none() || !a.citeable() {
+        return false;
+    }
+    match a.key.family {
+        FeatureFamily::Director | FeatureFamily::Writer | FeatureFamily::Cinematographer => {
+            a.recommendation_mean > 0.15
+        }
+        FeatureFamily::Actor => {
+            a.appearances >= 3 && a.recommendation_mean >= crate::taste::features::PORTABLE_CONTEXTUAL
+        }
+        FeatureFamily::Composer => a.appearances >= 4 && a.recommendation_mean > 0.22,
+        _ => false,
     }
 }
 
+fn filmography_credit_cap(family: FeatureFamily) -> usize {
+    match family {
+        FeatureFamily::Actor => ACTOR_FILMOGRAPHY_CAP,
+        FeatureFamily::Composer => COMPOSER_FILMOGRAPHY_CAP,
+        _ => FILMOGRAPHY_PER_PERSON,
+    }
+}
+
+fn film_has_catalog(film: &FilmRecord) -> bool {
+    !film.genres.is_empty()
+        && film.credits.iter().any(|c| c.id.is_some())
+        && !film.keywords.is_empty()
+        && (!film.recommendations.is_empty() || !film.similar.is_empty())
+}
+
+fn candidate_has_catalog(c: &Candidate) -> bool {
+    !c.genres.is_empty()
+        && c.credits.iter().any(|cr| cr.id.is_some())
+        && (!c.keywords.is_empty() || c.runtime.is_some())
+}
+
+fn candidate_priority(c: &Candidate) -> i32 {
+    if c.watchlist {
+        return 500;
+    }
+    let mut p = 0;
+    for s in &c.sources {
+        p += match s.kind {
+            RetrievalKind::Friend => 40,
+            RetrievalKind::RelatedRecommendations | RetrievalKind::Related => 10,
+            RetrievalKind::RelatedSimilar => 3,
+            RetrievalKind::Filmography => 1,
+            RetrievalKind::Watchlist => 50,
+            RetrievalKind::Discovery | RetrievalKind::Exploration => 2,
+        };
+    }
+    p + (c.sources.len() as i32)
+}
+
+fn pool_order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    candidate_priority(a)
+        .cmp(&candidate_priority(b))
+        .then(a.sources.len().cmp(&b.sources.len()))
+        .then(a.tmdb_id.unwrap_or(0).cmp(&b.tmdb_id.unwrap_or(0)))
+        .then(a.title.cmp(&b.title))
+}
+
+fn select_fair_pool(map: HashMap<String, Candidate>, cap: usize) -> Vec<Candidate> {
+    if map.len() <= cap {
+        let mut out: Vec<_> = map.into_values().collect();
+        out.sort_by(|a, b| pool_order(b, a));
+        return out;
+    }
+
+    let mut by_seed: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut by_person: HashMap<String, Vec<String>> = HashMap::new();
+    let mut must: Vec<String> = Vec::new();
+    for (key, c) in &map {
+        if c.watchlist
+            || c.sources
+                .iter()
+                .any(|s| s.kind == RetrievalKind::Friend)
+        {
+            must.push(key.clone());
+        }
+        for s in &c.sources {
+            if s.kind.is_related() {
+                if let Some(seed) = s.seed_tmdb_id {
+                    by_seed.entry(seed).or_default().push(key.clone());
+                }
+            }
+            if s.kind == RetrievalKind::Filmography {
+                by_person.entry(s.label.clone()).or_default().push(key.clone());
+            }
+        }
+    }
+    for keys in by_seed.values_mut() {
+        keys.sort();
+        keys.dedup();
+        keys.sort_by(|a, b| pool_order(&map[b], &map[a]));
+    }
+    for keys in by_person.values_mut() {
+        keys.sort();
+        keys.dedup();
+        keys.sort_by(|a, b| pool_order(&map[b], &map[a]));
+    }
+
+    let mut selected: Vec<String> = Vec::new();
+    let mut seen_sel = HashSet::new();
+    let mut push_key = |key: String, selected: &mut Vec<String>| {
+        if selected.len() >= cap {
+            return;
+        }
+        if seen_sel.insert(key.clone()) {
+            selected.push(key);
+        }
+    };
+
+    must.sort();
+    for key in must {
+        push_key(key, &mut selected);
+    }
+
+    let mut seed_ids: Vec<i64> = by_seed.keys().copied().collect();
+    seed_ids.sort();
+    for pass in 0..PER_SEED_GUARANTEE {
+        for sid in &seed_ids {
+            if let Some(keys) = by_seed.get(sid) {
+                if let Some(key) = keys.get(pass) {
+                    push_key(key.clone(), &mut selected);
+                }
+            }
+        }
+    }
+    let mut people: Vec<String> = by_person.keys().cloned().collect();
+    people.sort();
+    for pass in 0..PER_PERSON_GUARANTEE {
+        for name in &people {
+            if let Some(keys) = by_person.get(name) {
+                if let Some(key) = keys.get(pass) {
+                    push_key(key.clone(), &mut selected);
+                }
+            }
+        }
+    }
+
+    let mut rest: Vec<String> = map.keys().cloned().collect();
+    rest.sort_by(|a, b| pool_order(&map[b], &map[a]).then(a.cmp(b)));
+    for key in rest {
+        push_key(key, &mut selected);
+    }
+
+    selected
+        .into_iter()
+        .filter_map(|k| map.get(&k).cloned())
+        .collect()
+}
+
+pub(crate) fn keep_person_credit(job: &str, family: FeatureFamily) -> bool {
+    family_for_job(job) == Some(family)
+}
+
 fn upsert_candidate(map: &mut HashMap<String, Candidate>, incoming: Candidate) {
+    if !incoming.media_kind.is_movie() {
+        return;
+    }
     let key = identity_key(incoming.tmdb_id, &incoming.title, incoming.year);
     map.entry(key)
         .and_modify(|existing| {
-            existing.sources.extend(incoming.sources.clone());
+            for src in incoming.sources.clone() {
+                if !existing.sources.iter().any(|s| {
+                    s.kind == src.kind
+                        && s.seed_tmdb_id == src.seed_tmdb_id
+                        && s.label == src.label
+                }) {
+                    existing.sources.push(src);
+                }
+            }
             existing.tmdb_related = existing.tmdb_related.max(incoming.tmdb_related);
             existing.friend_affinity += incoming.friend_affinity;
             existing.watchlist |= incoming.watchlist;
@@ -643,12 +998,28 @@ fn friend_candidates(
                     contribs.len()
                 ),
                 seed_tmdb_id: None,
+                seed_rating: None,
             }],
             friend_affinity,
             tmdb_related: 0.0,
+        media_kind: MediaKind::Movie,
         });
     }
     Ok(out)
+}
+
+pub fn friend_identity_keys(db: &Database) -> Vec<String> {
+    let mut stmt = match db
+        .conn()
+        .prepare("SELECT source_record_key FROM friend_activity")
+    {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
 }
 
 fn friend_similarity(pairs: &[(f32, f32)], _ratings: &[f32]) -> f32 {
@@ -687,9 +1058,6 @@ fn tmdb_id_from_raw(raw: &str) -> Option<i64> {
 
 fn hydrate_local_metadata(db: &Database, candidates: &mut [Candidate]) -> Result<(), String> {
     for c in candidates.iter_mut() {
-        if !c.genres.is_empty() && !c.credits.is_empty() {
-            continue;
-        }
         let Some(tid) = c.tmdb_id else { continue };
         let row = db.conn().query_row(
             "SELECT genres_json, credits_json, cast_json, crew_json, keywords_json, runtime, vote_count, poster_path, canonical_title, release_year
@@ -716,8 +1084,9 @@ fn hydrate_local_metadata(db: &Database, candidates: &mut [Candidate]) -> Result
             if c.genres.is_empty() {
                 c.genres = json_vec(genres);
             }
-            if c.credits.is_empty() {
-                c.credits = parse_credits(credits.as_deref(), cast.as_deref(), crew.as_deref());
+            let parsed = parse_credits(credits.as_deref(), cast.as_deref(), crew.as_deref());
+            if !parsed.is_empty() {
+                c.credits = parsed;
             }
             if c.keywords.is_empty() {
                 c.keywords = parse_keywords(keywords);
@@ -744,17 +1113,39 @@ fn hydrate_local_metadata(db: &Database, candidates: &mut [Candidate]) -> Result
     Ok(())
 }
 
-pub fn enrich_missing(db: &Database, candidates: &mut [Candidate], cap: usize) -> usize {
+pub fn enrich_missing(
+    db: &Database,
+    candidates: &mut [Candidate],
+    cap: usize,
+    force: bool,
+) -> usize {
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by(|&a, &b| {
+        let rank = |c: &Candidate| {
+            let recs = c
+                .sources
+                .iter()
+                .any(|s| s.kind == RetrievalKind::RelatedRecommendations);
+            let needs = c.genres.is_empty() || c.credits.len() <= 1 || c.keywords.is_empty();
+            // Explicit watchlist intent must get metadata before the much
+            // larger related/recommendation pool. Otherwise a small hydrate
+            // budget can silently leave saved titles without the credits or
+            // keywords needed by the watchlist bridge.
+            (!c.watchlist, !recs, !needs)
+        };
+        rank(&candidates[a]).cmp(&rank(&candidates[b]))
+    });
     let mut n = 0;
-    for c in candidates.iter_mut() {
+    for i in order {
         if n >= cap {
             break;
         }
+        let c = &mut candidates[i];
         let Some(tid) = c.tmdb_id else { continue };
-        if !c.credits.is_empty() && !c.genres.is_empty() {
+        if !force && !c.genres.is_empty() && c.credits.len() > 1 && !c.keywords.is_empty() {
             continue;
         }
-        if tmdb::refresh_movie_catalog(db, tid, false).is_ok() {
+        if tmdb::refresh_movie_catalog(db, tid, force).is_ok() {
             n += 1;
         }
     }
@@ -857,19 +1248,50 @@ fn parse_credits(credits: Option<&str>, cast: Option<&str>, crew: Option<&str>) 
     out
 }
 
-fn parse_similar(raw: Option<String>) -> Vec<LibraryItem> {
+fn parse_related_lists(raw: Option<String>) -> (Vec<LibraryItem>, Vec<LibraryItem>) {
     let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return (Vec::new(), Vec::new());
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if let Some(obj) = v.as_object() {
+            if obj.contains_key("recommendations") || obj.contains_key("similar") {
+                return (
+                    parse_item_list(obj.get("recommendations")),
+                    parse_item_list(obj.get("similar")),
+                );
+            }
+        }
+        if v.as_array().is_some() {
+            let items = parse_item_list(Some(&v));
+            return (items, Vec::new());
+        }
+    }
+    (Vec::new(), Vec::new())
+}
+
+fn parse_item_list(v: Option<&serde_json::Value>) -> Vec<LibraryItem> {
+    let Some(v) = v else {
         return Vec::new();
     };
-    if let Ok(items) = serde_json::from_str::<Vec<LibraryItem>>(&raw) {
+    if let Ok(items) = serde_json::from_value::<Vec<LibraryItem>>(v.clone()) {
         if items.iter().any(|item| !item.title.is_empty()) {
             return items;
         }
     }
-    serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-        .ok()
-        .map(|vals| vals.iter().filter_map(tmdb::library_item_from_tmdb_value).collect())
+    v.as_array()
+        .map(|vals| {
+            vals.iter()
+                .filter_map(tmdb::library_item_from_movie_value)
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+fn parse_similar(raw: Option<String>) -> Vec<LibraryItem> {
+    let (recs, similar) = parse_related_lists(raw);
+    let mut out = recs;
+    out.extend(similar);
+    out
 }
 
 #[cfg(test)]
@@ -883,6 +1305,21 @@ mod tests {
             .map(|i| (3.0 + (i % 3) as f32 * 0.5, 3.0 + (i % 3) as f32 * 0.5))
             .collect();
         assert!(friend_similarity(&pairs, &[]).abs() > 0.3);
+    }
+
+    #[test]
+    fn parse_related_lists_keeps_provenance() {
+        let tagged = serde_json::json!({
+            "recommendations": [{"id":"tmdb:1","title":"Rec","year":2020}],
+            "similar": [{"id":"tmdb:2","title":"Sim","year":2019}]
+        });
+        let (recs, similar) = parse_related_lists(Some(tagged.to_string()));
+        assert_eq!(recs[0].title, "Rec");
+        assert_eq!(similar[0].title, "Sim");
+        let legacy = serde_json::json!([{"id":"tmdb:3","title":"Old","year":2010}]);
+        let (recs, similar) = parse_related_lists(Some(legacy.to_string()));
+        assert_eq!(recs[0].title, "Old");
+        assert!(similar.is_empty());
     }
 
     #[test]
@@ -924,7 +1361,7 @@ mod tests {
             genres: vec!["Drama".into()],
             credits,
             keywords: vec![],
-            similar: vec![LibraryItem::catalog(
+            recommendations: vec![LibraryItem::catalog(
                 "tmdb:99".into(),
                 "Dirty".into(),
                 Some(2005),
@@ -932,16 +1369,18 @@ mod tests {
                 None,
                 None,
             )],
+            similar: vec![],
             runtime: None,
             poster: None,
             vote_count: None,
+            review: None,
             signal: Some(interaction_signal(5.0, &p, Some(0.4), viewings, false)),
             age_years: Some(0.4),
         }
     }
 
     #[test]
-    fn twilight_singleton_does_not_expand_related() {
+    fn twilight_positive_like_expands_without_citeable_director() {
         use crate::taste::features::{build_profile, observations_from_film};
         use crate::taste::preference::{interaction_signal, rating_profile};
         let p = rating_profile(&[4.0; 8]).unwrap();
@@ -965,8 +1404,8 @@ mod tests {
         let profile = build_profile(&obs);
         let seed = test_seed("Twilight", 1, vec![condon]);
         assert!(
-            !seed_expands_related(&seed, &profile),
-            "n=1 director must not generate related candidates"
+            seed_expands_related(&seed, &profile),
+            "an eligible positive-like film expands even when its director is not citeable"
         );
     }
 
@@ -1007,10 +1446,457 @@ mod tests {
         let profile = build_profile(&obs);
         let seed = test_seed("The Batman", 1, vec![dp.clone()]);
         assert!(seed_expands_related(&seed, &profile));
-        let rewatch = test_seed("The Batman", 7, vec![dp]);
+        let rewatch = test_seed("The Batman", 7, vec![dp.clone()]);
         assert!(
             !seed_expands_related(&rewatch, &profile),
             "familiar films must not flood related"
         );
+        let mut family = test_seed("Teen Beach 2", 1, vec![dp]);
+        family.tmdb_id = Some(3);
+        family.genres = vec!["Family".into(), "Comedy".into()];
+        assert!(
+            seed_expands_related(&family, &profile),
+            "family/kids seeds may expand; display still requires Medium evidence"
+        );
+    }
+
+    #[test]
+    fn writer_only_seed_does_not_expand_related() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let writer = Credit {
+            id: Some(44),
+            name: "Jonathan Aibel".into(),
+            job: "Writer".into(),
+        };
+        let mut obs = observations_from_film(
+            "Kung Fu Panda",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(0.4), 1, false),
+            Some(0.4),
+            &["Animation".into(), "Family".into()],
+            &[writer.clone()],
+            &[],
+            Some(2008),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Kung Fu Panda 2",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.3), 1, false),
+            Some(0.3),
+            &["Animation".into(), "Family".into()],
+            &[writer.clone()],
+            &[],
+            Some(2011),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let seed = test_seed("Kung Fu Panda", 1, vec![writer]);
+        let mut seed = seed;
+        seed.genres = vec!["Animation".into(), "Family".into()];
+        assert!(
+            seed_expands_related(&seed, &profile),
+            "animation seeds may expand; weak similar-to still stays off New"
+        );
+    }
+
+    #[test]
+    fn composer_only_seed_expands_bounded_recommendations_and_similar() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let composer = Credit {
+            id: Some(12),
+            name: "Michael Giacchino".into(),
+            job: "Original Music Composer".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[composer.clone()],
+            &[],
+            Some(2022),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Up",
+            5.0,
+            Some(2),
+            &interaction_signal(5.0, &p, Some(0.4), 1, false),
+            Some(0.4),
+            &["Animation".into(), "Family".into()],
+            &[composer.clone()],
+            &[],
+            Some(2009),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let seed = test_seed("The Batman", 1, vec![composer]);
+        assert!(
+            seed_expands_related(&seed, &profile),
+            "composer-led positive-like films still expand recommendations"
+        );
+        assert!(
+            seed_allows_similar(&seed, &profile),
+            "eligible seeds may use bounded similar-to retrieval"
+        );
+    }
+
+    #[test]
+    fn upsert_drops_non_movies() {
+        let mut map = HashMap::new();
+        upsert_candidate(
+            &mut map,
+            Candidate {
+                tmdb_id: Some(1),
+                title: "A Show".into(),
+                year: Some(2020),
+                poster: None,
+                genres: vec![],
+                credits: vec![],
+                keywords: vec![],
+                runtime: None,
+                vote_count: None,
+                watchlist: false,
+                sources: vec![],
+                friend_affinity: 0.0,
+                tmdb_related: 0.0,
+                media_kind: MediaKind::TvSeries,
+            },
+        );
+        upsert_candidate(
+            &mut map,
+            Candidate {
+                tmdb_id: Some(2),
+                title: "A Movie".into(),
+                year: Some(2020),
+                poster: None,
+                genres: vec![],
+                credits: vec![],
+                keywords: vec![],
+                runtime: None,
+                vote_count: None,
+                watchlist: false,
+                sources: vec![],
+                friend_affinity: 0.0,
+                tmdb_related: 0.0,
+                media_kind: MediaKind::Movie,
+            },
+        );
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.values().next().unwrap().title, "A Movie");
+    }
+
+    #[test]
+    fn retrieve_membership_follows_current_seeds_not_a_union() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::storage::db::Database;
+        let db = Database::in_memory().unwrap();
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let dp = Credit {
+            id: Some(77),
+            name: "Greig Fraser".into(),
+            job: "Director of Photography".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            4.5,
+            Some(1),
+            &interaction_signal(4.5, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[dp.clone()],
+            &[],
+            Some(2022),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Dune",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.2), 1, false),
+            Some(0.2),
+            &["Science Fiction".into()],
+            &[dp.clone()],
+            &[],
+            Some(2021),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let extra_from_dune = crate::models::LibraryItem::catalog(
+            "tmdb:909".into(),
+            "Only From Dune".into(),
+            Some(2000),
+            None,
+            None,
+            None,
+        );
+        let extra_from_batman = crate::models::LibraryItem::catalog(
+            "tmdb:808".into(),
+            "Only From Batman".into(),
+            Some(2001),
+            None,
+            None,
+            None,
+        );
+        let mut batman = test_seed("The Batman", 1, vec![dp.clone()]);
+        batman.tmdb_id = Some(1);
+        batman.recommendations = vec![extra_from_batman];
+        let mut dune = test_seed("Dune", 1, vec![dp]);
+        dune.tmdb_id = Some(2);
+        dune.recommendations = vec![extra_from_dune];
+        let seen = HashSet::new();
+        let both = retrieve(&db, &[batman.clone(), dune.clone()], &profile, &seen, false).unwrap();
+        assert!(both.iter().any(|c| c.tmdb_id == Some(909)));
+        assert!(both.iter().any(|c| c.tmdb_id == Some(808)));
+        let without_dune = retrieve(&db, &[batman], &profile, &seen, false).unwrap();
+        assert!(
+            without_dune.iter().all(|c| c.tmdb_id != Some(909)),
+            "removed seed must not leave a candidate union, got {:?}",
+            without_dune.iter().map(|c| &c.title).collect::<Vec<_>>()
+        );
+    }
+
+    fn neighbor(id: i64, title: &str) -> LibraryItem {
+        LibraryItem::catalog(
+            format!("tmdb:{id}"),
+            title.into(),
+            Some(2000),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn upsert_merges_sources_from_every_seed() {
+        let mut map = HashMap::new();
+        let item = neighbor(50, "Shared");
+        for seed_id in [1, 2, 3, 4, 5] {
+            push_related(
+                &mut map,
+                &HashSet::new(),
+                &{
+                    let mut s = test_seed("Seed", 1, vec![]);
+                    s.tmdb_id = Some(seed_id);
+                    s
+                },
+                &item,
+                RetrievalKind::RelatedRecommendations,
+                format!("recommended from {seed_id}"),
+            );
+        }
+        assert_eq!(map.len(), 1);
+        let c = map.values().next().unwrap();
+        assert_eq!(c.sources.len(), 5, "got {:?}", c.sources);
+    }
+
+    #[test]
+    fn held_out_liked_neighbor_is_retrieved() {
+        use crate::taste::features::build_profile;
+        use crate::storage::db::Database;
+        let db = Database::in_memory().unwrap();
+        let profile = build_profile(&[]);
+        let mut seed = test_seed("The Batman", 1, vec![]);
+        seed.tmdb_id = Some(1);
+        seed.recommendations = vec![neighbor(414_906, "Dune analog")];
+        let mut seen = HashSet::new();
+        seen.insert(identity_key(Some(1), "The Batman", Some(2011)));
+        let out = retrieve(&db, &[seed], &profile, &seen, false).unwrap();
+        assert!(
+            out.iter().any(|c| c.tmdb_id == Some(414_906)),
+            "a held-out liked neighbor of an eligible seed must re-enter the pool"
+        );
+        let mix = crate::taste::eval::source_mix(
+            &out
+                .iter()
+                .map(|c| crate::taste::score::score_candidate(&profile, c))
+                .collect::<Vec<_>>(),
+        );
+        assert!(mix.related_recommendations >= 1);
+    }
+
+    #[test]
+    fn fifty_first_eligible_seed_still_expands() {
+        use crate::taste::features::build_profile;
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::storage::db::Database;
+        let db = Database::in_memory().unwrap();
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let profile = build_profile(&[]);
+        let mut films = Vec::new();
+        for i in 0..51 {
+            let mut seed = test_seed(&format!("Liked {i}"), 1, vec![]);
+            seed.tmdb_id = Some(1000 + i);
+            seed.rating = Some(4.5);
+            seed.signal = Some(interaction_signal(4.5, &p, Some(0.4), 1, false));
+            seed.recommendations = vec![neighbor(5000 + i, &format!("N{i}"))];
+            films.push(seed);
+        }
+        let seen = HashSet::new();
+        let out = retrieve(&db, &films, &profile, &seen, false).unwrap();
+        assert!(
+            out.iter().any(|c| c.tmdb_id == Some(5050)),
+            "51st eligible seed must still contribute a neighbor"
+        );
+    }
+
+    #[test]
+    fn disliked_seed_does_not_expand() {
+        use crate::taste::features::build_profile;
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::storage::db::Database;
+        let db = Database::in_memory().unwrap();
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let profile = build_profile(&[]);
+        let mut seed = test_seed("Hated", 1, vec![]);
+        seed.rating = Some(1.0);
+        seed.signal = Some(interaction_signal(1.0, &p, Some(0.4), 1, false));
+        seed.recommendations = vec![neighbor(77, "From hated")];
+        let out = retrieve(&db, &[seed], &profile, &HashSet::new(), false).unwrap();
+        assert!(
+            out.iter().all(|c| c.tmdb_id != Some(77)),
+            "disliked films must not seed neighbors"
+        );
+    }
+
+    #[test]
+    fn composer_seed_uses_recommendations_and_bounded_similar() {
+        use crate::taste::features::{build_profile, observations_from_film};
+        use crate::taste::preference::{interaction_signal, rating_profile};
+        use crate::storage::db::Database;
+        let db = Database::in_memory().unwrap();
+        let p = rating_profile(&[4.0; 8]).unwrap();
+        let composer = Credit {
+            id: Some(12),
+            name: "Michael Giacchino".into(),
+            job: "Original Music Composer".into(),
+        };
+        let mut obs = observations_from_film(
+            "The Batman",
+            5.0,
+            Some(1),
+            &interaction_signal(5.0, &p, Some(0.5), 1, false),
+            Some(0.5),
+            &["Crime".into()],
+            &[composer.clone()],
+            &[],
+            Some(2022),
+            None,
+        );
+        obs.extend(observations_from_film(
+            "Jurassic World",
+            4.5,
+            Some(2),
+            &interaction_signal(4.5, &p, Some(0.4), 1, false),
+            Some(0.4),
+            &["Science Fiction".into()],
+            &[composer.clone()],
+            &[],
+            Some(2015),
+            None,
+        ));
+        let profile = build_profile(&obs);
+        let mut seed = test_seed("The Batman", 1, vec![composer]);
+        seed.recommendations = vec![neighbor(11, "From recs")];
+        seed.similar = vec![neighbor(22, "From similar")];
+        let out = retrieve(&db, &[seed], &profile, &HashSet::new(), false).unwrap();
+        assert!(out.iter().any(|c| c.tmdb_id == Some(11)));
+        assert!(out.iter().any(|c| c.tmdb_id == Some(22)));
+    }
+
+    #[test]
+    fn related_recommendations_count_as_related_only() {
+        use crate::taste::score::score_candidate;
+        use crate::taste::features::build_profile;
+        let profile = build_profile(&[]);
+        let c = Candidate {
+            tmdb_id: Some(1),
+            title: "Rec".into(),
+            year: Some(2020),
+            poster: None,
+            genres: vec!["Drama".into()],
+            credits: vec![],
+            keywords: vec![],
+            runtime: Some(100),
+            vote_count: Some(10),
+            watchlist: false,
+            sources: vec![RetrievalSource {
+                kind: RetrievalKind::RelatedRecommendations,
+                label: "recommended from X".into(),
+                seed_tmdb_id: Some(9),
+                seed_rating: None,
+            }],
+            friend_affinity: 0.0,
+            tmdb_related: 1.0,
+            media_kind: MediaKind::Movie,
+        };
+        let scored = score_candidate(&profile, &c);
+        assert!(crate::taste::confidence::related_only(&scored));
+    }
+
+    #[test]
+    fn fair_pool_keeps_a_neighbor_per_seed() {
+        let mut map = HashMap::new();
+        for i in 0..80i64 {
+            let mut seed = test_seed("S", 1, vec![]);
+            seed.tmdb_id = Some(i);
+            push_related(
+                &mut map,
+                &HashSet::new(),
+                &seed,
+                &neighbor(10_000 + i, &format!("only-{i}")),
+                RetrievalKind::RelatedRecommendations,
+                format!("recommended from {i}"),
+            );
+            for extra in 0..20 {
+                push_related(
+                    &mut map,
+                    &HashSet::new(),
+                    &seed,
+                    &neighbor(20_000 + i * 20 + extra, &format!("pad-{i}-{extra}")),
+                    RetrievalKind::RelatedRecommendations,
+                    format!("recommended from {i}"),
+                );
+            }
+        }
+        let selected = select_fair_pool(map, 100);
+        let mut seeds_kept = HashSet::new();
+        for c in &selected {
+            for s in &c.sources {
+                if let Some(id) = s.seed_tmdb_id {
+                    seeds_kept.insert(id);
+                }
+            }
+        }
+        assert_eq!(
+            seeds_kept.len(),
+            80,
+            "fair cap must keep at least one neighbor per seed, kept {}",
+            seeds_kept.len()
+        );
+    }
+
+    #[test]
+    fn filmography_keeps_only_the_affinity_job() {
+        use crate::taste::features::FeatureFamily;
+        assert!(keep_person_credit("Director", FeatureFamily::Director));
+        assert!(!keep_person_credit("Producer", FeatureFamily::Director));
+        assert!(!keep_person_credit("Writer", FeatureFamily::Director));
+        assert!(keep_person_credit(
+            "Director of Photography",
+            FeatureFamily::Cinematographer
+        ));
+        assert!(!keep_person_credit("Director", FeatureFamily::Cinematographer));
+        assert!(!keep_person_credit("Actor", FeatureFamily::Cinematographer));
     }
 }

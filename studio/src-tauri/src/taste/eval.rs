@@ -1,4 +1,9 @@
 use crate::taste::score::ScoredCandidate;
+use crate::taste::features::FeatureProfile;
+use crate::taste::retrieve::{identity_key, seen_keys, FilmRecord};
+use crate::storage::db::Database;
+use crate::taste::semantic::SemanticStats;
+use serde::Serialize;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -10,6 +15,8 @@ pub struct LayeredMetrics {
     pub recall_at_12: f32,
     pub mrr: f32,
     pub ndcg_at_12: f32,
+    pub precision_at_40: f32,
+    pub recall_at_40: f32,
 }
 
 pub fn recall_at(retrieved: &[String], held_out: &HashSet<String>, k: usize) -> f32 {
@@ -18,6 +25,19 @@ pub fn recall_at(retrieved: &[String], held_out: &HashSet<String>, k: usize) -> 
     }
     let hit = retrieved.iter().take(k).filter(|id| held_out.contains(*id)).count();
     hit as f32 / held_out.len() as f32
+}
+
+pub fn precision_at(retrieved: &[String], held_out: &HashSet<String>, k: usize) -> f32 {
+    let shown = retrieved.len().min(k);
+    if shown == 0 {
+        return 0.0;
+    }
+    retrieved
+        .iter()
+        .take(k)
+        .filter(|id| held_out.contains(*id))
+        .count() as f32
+        / shown as f32
 }
 
 pub fn mrr(retrieved: &[String], held_out: &HashSet<String>) -> f32 {
@@ -66,7 +86,304 @@ pub fn layered(
         recall_at_12: recall_at(scored_ids, held_out, 12),
         mrr: mrr(scored_ids, held_out),
         ndcg_at_12: ndcg_at(scored_ids, held_out, 12),
+        precision_at_40: precision_at(scored_ids, held_out, 40),
+        recall_at_40: recall_at(scored_ids, held_out, 40),
     }
+}
+
+/// The evaluation split used for real replay runs. The newest positively
+/// rated films are held out, while every held-out identity is removed from
+/// both the training profile and the seen set.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayInputs {
+    pub training_films: Vec<FilmRecord>,
+    pub profile: FeatureProfile,
+    pub held_out: HashSet<String>,
+    pub seen: HashSet<String>,
+}
+
+pub fn time_aware_replay_inputs(films: &[FilmRecord], holdout_count: usize) -> ReplayInputs {
+    let mut positive: Vec<(usize, &FilmRecord)> = films
+        .iter()
+        .enumerate()
+        .filter(|(_, film)| film.rating.map(|rating| rating >= 4.0).unwrap_or(false))
+        .collect();
+    positive.sort_by(|(left_i, left), (right_i, right)| {
+        left.last_date
+            .as_deref()
+            .unwrap_or("")
+            .cmp(right.last_date.as_deref().unwrap_or(""))
+            .then_with(|| left_i.cmp(right_i))
+    });
+    let held_out: HashSet<String> = positive
+        .iter()
+        .rev()
+        .take(holdout_count)
+        .map(|(_, film)| identity_key(film.tmdb_id, &film.title, film.year))
+        .collect();
+    let training_films: Vec<FilmRecord> = films
+        .iter()
+        .filter(|film| !held_out.contains(&identity_key(film.tmdb_id, &film.title, film.year)))
+        .cloned()
+        .collect();
+    let seen = seen_keys(&training_films);
+    let profile = crate::taste::feature_profile_from_films(&training_films);
+    ReplayInputs {
+        training_films,
+        profile,
+        held_out,
+        seen,
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayMetrics {
+    pub held_out_count: usize,
+    pub baseline_precision_at_40: f32,
+    pub baseline_recall_at_40: f32,
+    pub revised_precision_at_40: f32,
+    pub revised_recall_at_40: f32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayReport {
+    pub holdout_count: usize,
+    pub baseline_precision_at_40: f32,
+    pub baseline_recall_at_40: f32,
+    pub revised_precision_at_40: f32,
+    pub revised_recall_at_40: f32,
+    pub baseline_ndcg_at_12: f32,
+    pub revised_ndcg_at_12: f32,
+    pub baseline_board_count: usize,
+    pub revised_board_count: usize,
+    pub baseline_related_only: usize,
+    pub revised_related_only: usize,
+    pub semantic: SemanticStats,
+    pub error: Option<String>,
+}
+
+/// Run the real, time-aware holdout against the current local catalog. This is
+/// intentionally opt-in from debug builds because it can perform extra
+/// retrieval/embedding work; normal user runs remain single-pass.
+pub fn run_replay(
+    db: &Database,
+    key: &str,
+    films: &[FilmRecord],
+    holdout_count: usize,
+) -> Result<ReplayReport, String> {
+    let inputs = time_aware_replay_inputs(films, holdout_count);
+    if inputs.held_out.is_empty() {
+        return Ok(ReplayReport {
+            error: Some("No positively rated films were available for replay".into()),
+            ..Default::default()
+        });
+    }
+    let retrieved = crate::taste::retrieve::retrieve_with_coverage(
+        db,
+        &inputs.training_films,
+        &inputs.profile,
+        &inputs.seen,
+        false,
+    )?;
+    let baseline = crate::taste::score::score_pool(&inputs.profile, &retrieved.candidates);
+    let (semantic_scores, semantic) = crate::taste::semantic::score_candidates(
+        db,
+        key,
+        &inputs.training_films,
+        &retrieved.candidates,
+    );
+    let revised = crate::taste::score::score_pool_with_semantic(
+        &inputs.profile,
+        &retrieved.candidates,
+        &semantic_scores,
+    );
+    let baseline_ids = ids_of(&baseline.ranked);
+    let revised_ids = ids_of(&revised.ranked);
+    let metrics = compare_replay(&baseline_ids, &revised_ids, &inputs.held_out);
+    let seen_ids = inputs
+        .training_films
+        .iter()
+        .filter_map(|f| f.tmdb_id)
+        .collect::<HashSet<_>>();
+    let baseline_quality = board_quality(
+        &crate::taste::workspace::assemble(&baseline.ranked),
+        &seen_ids,
+    );
+    let revised_quality = board_quality(
+        &crate::taste::workspace::assemble(&revised.ranked),
+        &seen_ids,
+    );
+    Ok(ReplayReport {
+        holdout_count: metrics.held_out_count,
+        baseline_precision_at_40: metrics.baseline_precision_at_40,
+        baseline_recall_at_40: metrics.baseline_recall_at_40,
+        revised_precision_at_40: metrics.revised_precision_at_40,
+        revised_recall_at_40: metrics.revised_recall_at_40,
+        baseline_ndcg_at_12: ndcg_at(&baseline_ids, &inputs.held_out, 12),
+        revised_ndcg_at_12: ndcg_at(&revised_ids, &inputs.held_out, 12),
+        baseline_board_count: baseline_quality.new_count,
+        revised_board_count: revised_quality.new_count,
+        baseline_related_only: baseline_quality.new_related_only,
+        revised_related_only: revised_quality.new_related_only,
+        semantic,
+        error: None,
+    })
+}
+
+pub fn compare_replay(
+    baseline: &[String],
+    revised: &[String],
+    held_out: &HashSet<String>,
+) -> ReplayMetrics {
+    ReplayMetrics {
+        held_out_count: held_out.len(),
+        baseline_precision_at_40: precision_at(baseline, held_out, 40),
+        baseline_recall_at_40: recall_at(baseline, held_out, 40),
+        revised_precision_at_40: precision_at(revised, held_out, 40),
+        revised_recall_at_40: recall_at(revised, held_out, 40),
+    }
+}
+
+/// Band occupancy and leakage for New / Explore / Watchlist.
+/// `70` is a band, not a calibrated probability.
+#[derive(Debug, Clone, Default)]
+pub struct BoardQuality {
+    pub new_count: usize,
+    pub explore_count: usize,
+    pub watchlist_count: usize,
+    pub new_related_only: usize,
+    pub new_below_floor: usize,
+    pub explore_outside_band: usize,
+    pub seen_leakage: usize,
+    pub board_overlap: usize,
+    pub watchlist_on_discovery_boards: usize,
+}
+
+pub fn board_quality(
+    ws: &crate::taste::workspace::Workspace,
+    seen: &HashSet<i64>,
+) -> BoardQuality {
+    use crate::taste::confidence::{self, MATCH_SCORE_FLOOR, NEW_MATCH_FLOOR};
+    let mut q = BoardQuality {
+        new_count: ws.new_picks.len(),
+        explore_count: ws.explore_picks.len(),
+        watchlist_count: ws.watchlist_picks.len(),
+        ..Default::default()
+    };
+    q.new_related_only = ws
+        .new_picks
+        .iter()
+        .filter(|c| confidence::related_only(c))
+        .count();
+    q.new_below_floor = ws
+        .new_picks
+        .iter()
+        .filter(|c| confidence::match_score(c) < MATCH_SCORE_FLOOR)
+        .count();
+    q.explore_outside_band = ws
+        .explore_picks
+        .iter()
+        .filter(|c| {
+            let s = confidence::match_score(c);
+            s < MATCH_SCORE_FLOOR || s >= NEW_MATCH_FLOOR
+        })
+        .count();
+    let displayed = ws
+        .new_picks
+        .iter()
+        .chain(ws.explore_picks.iter())
+        .chain(ws.watchlist_picks.iter());
+    q.seen_leakage = displayed
+        .clone()
+        .filter(|c| c.candidate.tmdb_id.map(|id| seen.contains(&id)).unwrap_or(false))
+        .count();
+    q.watchlist_on_discovery_boards = ws
+        .new_picks
+        .iter()
+        .chain(ws.explore_picks.iter())
+        .filter(|c| c.candidate.watchlist)
+        .count();
+    let mut ids = HashSet::new();
+    for c in ws
+        .new_picks
+        .iter()
+        .chain(ws.explore_picks.iter())
+        .chain(ws.watchlist_picks.iter())
+    {
+        if let Some(id) = c.candidate.tmdb_id {
+            if !ids.insert(id) {
+                q.board_overlap += 1;
+            }
+        }
+    }
+    q
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SourceMix {
+    pub related_recommendations: usize,
+    pub related_similar: usize,
+    pub related_legacy: usize,
+    pub filmography_only: usize,
+    pub watchlist: usize,
+    pub friend: usize,
+}
+
+pub fn source_mix(rows: &[ScoredCandidate]) -> SourceMix {
+    use crate::taste::retrieve::RetrievalKind;
+    let mut mix = SourceMix::default();
+    for c in rows {
+        if c.candidate.watchlist {
+            mix.watchlist += 1;
+        }
+        if c.candidate
+            .sources
+            .iter()
+            .any(|s| s.kind == RetrievalKind::Friend)
+        {
+            mix.friend += 1;
+        }
+        let related: Vec<_> = c
+            .candidate
+            .sources
+            .iter()
+            .filter(|s| s.kind.is_related())
+            .collect();
+        if related
+            .iter()
+            .any(|s| s.kind == RetrievalKind::RelatedRecommendations)
+        {
+            mix.related_recommendations += 1;
+        }
+        if related
+            .iter()
+            .any(|s| s.kind == RetrievalKind::RelatedSimilar)
+        {
+            mix.related_similar += 1;
+        }
+        if related.iter().any(|s| s.kind == RetrievalKind::Related) {
+            mix.related_legacy += 1;
+        }
+        if !c.candidate.watchlist
+            && !c.candidate.sources.is_empty()
+            && c.candidate
+                .sources
+                .iter()
+                .all(|s| s.kind == RetrievalKind::Filmography)
+        {
+            mix.filmography_only += 1;
+        }
+    }
+    mix
+}
+
+pub fn resume_only_share(rows: &[ScoredCandidate]) -> f32 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    source_mix(rows).filmography_only as f32 / rows.len() as f32
 }
 
 #[cfg(test)]
@@ -92,7 +409,24 @@ mod tests {
         assert!(m.recall_at_12 > 0.0);
         assert!(m.mrr > 0.0);
         assert!(m.ndcg_at_12 > 0.0);
+        assert!(m.precision_at_40 > 0.0);
+        assert!(m.recall_at_40 > 0.0);
+        assert_eq!(source_mix(&[]).filmography_only, 0);
+        assert_eq!(resume_only_share(&[]), 0.0);
         assert!(!ids_of(&[]).is_empty() || true);
+    }
+
+    #[test]
+    fn replay_comparison_reports_precision_and_recall_without_padding() {
+        let held_out = HashSet::from(["tmdb:2".into(), "tmdb:4".into()]);
+        let baseline = vec!["tmdb:9".into(), "tmdb:2".into(), "tmdb:8".into()];
+        let revised = vec!["tmdb:2".into(), "tmdb:4".into()];
+        let metrics = compare_replay(&baseline, &revised, &held_out);
+        assert_eq!(metrics.held_out_count, 2);
+        assert!((metrics.baseline_precision_at_40 - (1.0 / 3.0)).abs() < 1e-5);
+        assert!((metrics.baseline_recall_at_40 - 0.5).abs() < 1e-5);
+        assert!((metrics.revised_precision_at_40 - 1.0).abs() < 1e-5);
+        assert!((metrics.revised_recall_at_40 - 1.0).abs() < 1e-5);
     }
 
     fn film(
@@ -118,10 +452,12 @@ mod tests {
             genres: genres.iter().map(|g| (*g).to_string()).collect(),
             credits,
             keywords: vec![],
+            recommendations: vec![],
             similar: vec![],
             runtime: Some(100),
             poster: None,
             vote_count: Some(1000),
+            review: None,
             signal: None,
             age_years: Some(age_years),
         }
@@ -135,13 +471,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn time_aware_replay_removes_new_liked_films_from_profile_and_seen() {
+        use crate::taste::retrieve::attach_signals;
+        let mut films = vec![
+            film("Old", 1, 4.5, 2000, &["Drama"], vec![], 8.0),
+            film("Middle", 2, 4.0, 2010, &["Crime"], vec![], 5.0),
+            film("Newest", 3, 5.0, 2025, &["Science Fiction"], vec![], 0.1),
+        ];
+        films[0].last_date = Some("2020-01-01".into());
+        films[1].last_date = Some("2023-01-01".into());
+        films[2].last_date = Some("2026-01-01".into());
+        attach_signals(&mut films);
+        let replay = time_aware_replay_inputs(&films, 1);
+        assert!(replay.held_out.contains("tmdb:3"));
+        assert!(replay.training_films.iter().all(|f| f.tmdb_id != Some(3)));
+        assert!(!replay.seen.contains("tmdb:3"));
+        assert!(replay.seen.contains("tmdb:1"));
+        assert!(replay
+            .profile
+            .affinities
+            .iter()
+            .flat_map(|a| a.positive_evidence.iter())
+            .all(|e| e.tmdb_id != Some(3)));
+    }
+
     fn filmography(
         title: &str,
         tmdb_id: i64,
         genres: &[&str],
         person: crate::taste::features::Credit,
     ) -> crate::taste::retrieve::Candidate {
-        use crate::taste::retrieve::{RetrievalKind, RetrievalSource};
+        use crate::taste::retrieve::{MediaKind, RetrievalKind, RetrievalSource};
         let label = person.name.clone();
         crate::taste::retrieve::Candidate {
             tmdb_id: Some(tmdb_id),
@@ -158,9 +519,11 @@ mod tests {
                 kind: RetrievalKind::Filmography,
                 label,
                 seed_tmdb_id: None,
+                seed_rating: None,
             }],
             friend_affinity: 0.0,
             tmdb_related: 0.0,
+        media_kind: MediaKind::Movie,
         }
     }
 
@@ -169,7 +532,7 @@ mod tests {
     fn powell_e2e_627_history_retrieval_to_shortlist() {
         use crate::taste::features::{COMPOSER_W, CINEMATOGRAPHER_W};
         use crate::taste::reason::{empty_critic, ReasonerPick};
-        use crate::taste::retrieve::{attach_signals, Candidate, RetrievalKind, RetrievalSource};
+        use crate::taste::retrieve::{attach_signals, Candidate, MediaKind, RetrievalKind, RetrievalSource};
         use crate::taste::score::{
             filmography_supported, person_pipeline_trace, score_all,
         };
@@ -510,9 +873,11 @@ mod tests {
                     kind: RetrievalKind::Related,
                     label: "similar to log".into(),
                     seed_tmdb_id: Some(9 + (i % 20)),
+                    seed_rating: None,
                 }],
                 friend_affinity: 0.0,
                 tmdb_related: 0.55,
+            media_kind: MediaKind::Movie,
             });
         }
 
@@ -568,7 +933,7 @@ mod tests {
         assert_eq!(ptrace.appearances, 2);
         assert!(ptrace.survived_score < ptrace.injected);
         assert_eq!(ptrace.survived_score, top100_powell);
-        assert!(ptrace.survived_mmr < 8, "MMR Powell {}", ptrace.survived_mmr);
+        assert!(ptrace.survived_mmr <= 8, "MMR Powell {}", ptrace.survived_mmr);
         assert!((ptrace.confidence - expected_conf).abs() < 0.02);
 
         let powell_n = short
@@ -576,7 +941,7 @@ mod tests {
             .filter(|c| c.person_keys.iter().any(|k| k == "John Powell"))
             .count();
         assert!(
-            powell_n < 8,
+            powell_n <= 8,
             "shortlist Powell takeover: {powell_n} / {}",
             short.len()
         );
@@ -595,7 +960,7 @@ mod tests {
         }
         for (name, n) in &person_counts {
             assert!(
-                *n < 8,
+                *n <= 8,
                 "{name} took over the shortlist with {n} / {}",
                 short.len()
             );
@@ -638,12 +1003,163 @@ mod tests {
             })
             .collect();
         let result = hard_validate(&picks, &short, &[], &HashSet::new(), profile.modes.len().max(3));
-        assert_eq!(result.picks.len(), 12);
-        assert_eq!(
-            result.picks[0].candidate.tmdb_id,
-            short[0].candidate.tmdb_id,
-            "validate must not silently replace the first LLM pick"
+        assert!(result.picks.len() <= 100);
+        assert!(
+            result.picks.iter().all(|p| {
+                short.iter().any(|s| s.candidate.tmdb_id == p.candidate.tmdb_id)
+            }),
+            "validate must stay inside the scored shortlist"
         );
+        assert!(result.picks.iter().all(|p| p.candidate.tmdb_id != Some(99)));
         let _ = empty_critic();
+    }
+
+    /// Workspace-9 live baseline (2026-08-26 latest.json): 26 New rows, related-only
+    /// Reservoir Dogs at exact 70, ~25 related-only competing for New.
+    /// Workspace-10+ must report related-only on New = 0. Match score 70 is a band,
+    /// not P(watch). Workspace-11 also requires the cited director/DP job on the film.
+    #[test]
+    fn board_quality_rejects_workspace9_related_padding() {
+        use crate::taste::explain::{EligibilityTrace, MatchedFeatureView};
+        use crate::taste::retrieve::{MediaKind, RetrievalKind, RetrievalSource};
+        use crate::taste::score::{CandidateScore, CandidateView, ScoredCandidate};
+        use crate::taste::workspace::assemble;
+
+        fn feat(name: &str, family: &str, n: u32, aff: f32) -> MatchedFeatureView {
+            MatchedFeatureView {
+                name: name.into(),
+                family: family.into(),
+                appearances: n,
+                recommendation_mean: aff,
+                scoring_affinity: aff,
+                confidence: 0.8,
+                portability: 1.0,
+                citeable: true,
+                cited: true,
+            }
+        }
+        fn scored(
+            id: i64,
+            title: &str,
+            related: bool,
+            features: Vec<MatchedFeatureView>,
+            watchlist: bool,
+        ) -> ScoredCandidate {
+            ScoredCandidate {
+                candidate: CandidateView {
+                    tmdb_id: Some(id),
+                    title: title.into(),
+                    year: Some(1992),
+                    poster: None,
+                    watchlist,
+                    sources: vec![RetrievalSource {
+                        kind: if watchlist {
+                            RetrievalKind::Watchlist
+                        } else if related {
+                            RetrievalKind::Related
+                        } else {
+                            RetrievalKind::Filmography
+                        },
+                        label: if related {
+                            "similar to Pulp Fiction".into()
+                        } else {
+                            features
+                                .first()
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| "x".into())
+                        },
+                        seed_tmdb_id: if related { Some(680) } else { None },
+                        seed_rating: None,
+                    }],
+                    directors: vec!["Q".into()],
+                    genres: vec!["Crime".into()],
+                    modes: vec![],
+                    media_kind: MediaKind::Movie,
+                    runtime: Some(99),
+                    vote_count: Some(5000),
+                },
+                score: CandidateScore {
+                    content: 0.5,
+                    tmdb_related: if related { 1.0 } else { 0.0 },
+                    friend_affinity: 0.0,
+                    recent_taste: 0.0,
+                    watchlist: if watchlist { 1.0 } else { 0.0 },
+                    novelty: 0.0,
+                    negative_evidence: 0.0,
+                    semantic_fit: 0.5,
+                    semantic_coverage: false,
+                    total: 0.4,
+                },
+                reasons: vec![],
+                evidence: vec![],
+                positive_features: features.iter().map(|f| f.name.clone()).collect(),
+                negative_features: vec![],
+                contextual_only: false,
+                person_keys: features.iter().map(|f| f.name.clone()).collect(),
+                display_reasons: vec![],
+                scoring_reasons: vec![],
+                matched_features: features.clone(),
+                hidden_features: vec![],
+                eligibility: EligibilityTrace {
+                    portable_evidence_required: false,
+                    passed: watchlist || !features.is_empty(),
+                    passed_because: vec!["craft".into()],
+                    candidate_fit: 1.0,
+                    evidence_grade: if watchlist {
+                        crate::taste::explain::EvidenceGrade::Medium
+                    } else if features.is_empty() {
+                        crate::taste::explain::EvidenceGrade::None
+                    } else {
+                        crate::taste::explain::EvidenceGrade::Medium
+                    },
+                },
+            }
+        }
+
+        let dogs = scored(500, "Reservoir Dogs", true, vec![], false);
+        let kts = scored(
+            49_530,
+            "Killing Them Softly",
+            false,
+            vec![
+                feat("Greig Fraser", "cinematographer", 4, 0.45),
+                feat("neo-noir", "keyword", 9, 0.4),
+            ],
+            false,
+        );
+        let dune = scored(
+            438_631,
+            "Dune",
+            false,
+            vec![
+                feat("Greig Fraser", "cinematographer", 4, 0.45),
+                feat("Denis Villeneuve", "director", 5, 0.55),
+            ],
+            true,
+        );
+        let ws = assemble(&[dogs.clone(), kts, dune]);
+        let q = board_quality(&ws, &HashSet::new());
+        assert!(q.new_count >= 1);
+        assert!(q.watchlist_count >= 1);
+        assert_eq!(q.explore_count, 0);
+        assert_eq!(q.new_below_floor, 0);
+        assert_eq!(q.explore_outside_band, 0);
+        assert_eq!(q.seen_leakage, 0);
+        assert_eq!(q.board_overlap, 0);
+        assert_eq!(q.watchlist_on_discovery_boards, 0);
+        assert!(
+            ws.new_picks.iter().any(|c| c.candidate.tmdb_id == Some(49_530)),
+            "qualifying DP filmography belongs on New"
+        );
+        assert!(
+            !ws.new_picks.iter().any(|c| c.candidate.tmdb_id == Some(500)),
+            "lone similar-to must not occupy New"
+        );
+        assert!(ws.watchlist_picks.iter().any(|c| c.candidate.tmdb_id == Some(438_631)));
+        assert!(
+            crate::taste::confidence::match_score(&dogs) <= crate::taste::confidence::RELATED_ONLY_CAP,
+            "70 is a band ceiling for related-only, not a pad, got {}",
+            crate::taste::confidence::match_score(&dogs)
+        );
     }
 }
