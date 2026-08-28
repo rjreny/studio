@@ -55,6 +55,23 @@ export default function App() {
   const [job, setJob] = useState<JobProgress | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
   const pendingLaunchEnrich = useRef(false);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const scrollIdleTimer = useRef<number | undefined>(undefined);
+
+  const handleStageScroll = useCallback(() => {
+    stageRef.current?.classList.add("is-scrolling");
+    window.clearTimeout(scrollIdleTimer.current);
+    scrollIdleTimer.current = window.setTimeout(() => {
+      stageRef.current?.classList.remove("is-scrolling");
+    }, 600);
+  }, []);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(scrollIdleTimer.current);
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -242,7 +259,7 @@ export default function App() {
   return (
     <div className="app canvas-surface">
       <TitleBar />
-      <div className="stage">
+      <div ref={stageRef} className="stage" onScroll={handleStageScroll}>
         <header className="cinema-nav">
           <div className="cinema-nav-inner">
             {selectedFilmId ? (
