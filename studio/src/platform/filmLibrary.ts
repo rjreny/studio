@@ -16,12 +16,39 @@ import type {
   TmdbKeyStatus,
 } from "./types/film";
 
+const dataCache = new Map<string, Promise<unknown>>();
+
+function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const existing = dataCache.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const request = load().catch((error) => {
+    if (dataCache.get(key) === request) dataCache.delete(key);
+    throw error;
+  });
+  dataCache.set(key, request);
+  return request;
+}
+
+function libraryKey(query: LibraryQuery) {
+  return [query.search, query.sort, query.filter, query.limit, query.offset].join("\u0000");
+}
+
+export function invalidateDataCache() {
+  dataCache.clear();
+}
+
+export function invalidateTasteCache() {
+  dataCache.delete("taste");
+}
+
 export async function getSession(): Promise<AppSession> {
-  return invoke("get_session");
+  return cached("session", () => invoke<AppSession>("get_session"));
 }
 
 export async function setSelfUsername(username: string): Promise<void> {
-  return invoke("set_self_username", { username });
+  await invoke("set_self_username", { username });
+  dataCache.delete("session");
 }
 
 export async function getInstallInfo(): Promise<InstallInfo> {
@@ -29,7 +56,8 @@ export async function getInstallInfo(): Promise<InstallInfo> {
 }
 
 export async function resetAllData(): Promise<void> {
-  return invoke("reset_all_data");
+  await invoke("reset_all_data");
+  invalidateDataCache();
 }
 
 export async function launchUninstaller(): Promise<void> {
@@ -37,47 +65,59 @@ export async function launchUninstaller(): Promise<void> {
 }
 
 export async function getCoverage(): Promise<LibraryCoverage> {
-  return invoke("get_coverage");
+  return cached("coverage", () => invoke<LibraryCoverage>("get_coverage"));
 }
 
 export async function getLibrary(query: LibraryQuery = {}): Promise<LibraryPage> {
-  return invoke("library_get", { query });
+  return cached(`library:${libraryKey(query)}`, () => invoke<LibraryPage>("library_get", { query }));
 }
 
 export async function getFilm(id: string): Promise<FilmDetail> {
-  return invoke("film_get", { id });
+  return cached(`film:${id}`, () => invoke<FilmDetail>("film_get", { id }));
 }
 
 export async function getHome(): Promise<HomeViewModel> {
-  return invoke("home_get");
+  return cached("home", () => invoke<HomeViewModel>("home_get"));
 }
 
 export async function importExportZip(path: string): Promise<void> {
-  return invoke("import_export_zip", { path });
+  await invoke("import_export_zip", { path });
+  invalidateDataCache();
 }
 
 export async function syncSelf(username: string): Promise<void> {
-  return invoke("sync_self", { username });
+  await invoke("sync_self", { username });
+  invalidateDataCache();
 }
 
 export async function syncFriends(): Promise<void> {
-  return invoke("sync_friends");
+  await invoke("sync_friends");
+  invalidateDataCache();
 }
 
 export async function syncFeeds(force = false): Promise<boolean> {
-  return invoke("sync_feeds", { force });
+  const started = await invoke<boolean>("sync_feeds", { force });
+  if (started) invalidateDataCache();
+  return started;
 }
 
 export async function importFriendUsernames(text: string): Promise<number> {
-  return invoke("import_friend_usernames", { text });
+  const added = await invoke<number>("import_friend_usernames", { text });
+  invalidateDataCache();
+  return added;
 }
 
 export async function removeFriend(id: string): Promise<string> {
-  return invoke("remove_friend", { id });
+  const username = await invoke<string>("remove_friend", { id });
+  invalidateDataCache();
+  return username;
 }
 
 export async function setRating(id: string, rating: number): Promise<FilmDetail> {
-  return invoke("film_set_rating", { input: { id, rating } });
+  const film = await invoke<FilmDetail>("film_set_rating", { input: { id, rating } });
+  invalidateDataCache();
+  dataCache.set(`film:${id}`, Promise.resolve(film));
+  return film;
 }
 
 export async function importGetDiagnostics() {
@@ -94,7 +134,14 @@ export async function migrateFromLegacy(legacy: {
   validationResult: string;
   coverage: LibraryCoverage;
 }> {
-  return invoke("migrate_from_legacy", { legacy });
+  const result = await invoke<{
+    status: string;
+    migrationVersion: number;
+    validationResult: string;
+    coverage: LibraryCoverage;
+  }>("migrate_from_legacy", { legacy });
+  invalidateDataCache();
+  return result;
 }
 
 export async function tmdbSetKey(key: string): Promise<TmdbKeyStatus> {
@@ -114,7 +161,8 @@ export async function tmdbKeyStatus(): Promise<TmdbKeyStatus> {
 }
 
 export async function tmdbEnrich(): Promise<void> {
-  return invoke("tmdb_enrich");
+  await invoke("tmdb_enrich");
+  invalidateDataCache();
 }
 
 export async function tasteKeyStatus(): Promise<TasteKeyStatus> {
@@ -122,27 +170,36 @@ export async function tasteKeyStatus(): Promise<TasteKeyStatus> {
 }
 
 export async function tasteSetKey(key: string): Promise<TasteKeyStatus> {
-  return invoke("taste_set_key", { key });
+  const status = await invoke<TasteKeyStatus>("taste_set_key", { key });
+  invalidateTasteCache();
+  return status;
 }
 
 export async function tasteClearKey(): Promise<TasteKeyStatus> {
-  return invoke("taste_clear_key");
+  const status = await invoke<TasteKeyStatus>("taste_clear_key");
+  invalidateTasteCache();
+  return status;
 }
 
 export async function tasteSetModel(model: string): Promise<TasteKeyStatus> {
-  return invoke("taste_set_model", { model });
+  const status = await invoke<TasteKeyStatus>("taste_set_model", { model });
+  invalidateTasteCache();
+  return status;
 }
 
 export async function tasteSetWeb(enabled: boolean): Promise<TasteKeyStatus> {
-  return invoke("taste_set_web", { enabled });
+  const status = await invoke<TasteKeyStatus>("taste_set_web", { enabled });
+  invalidateTasteCache();
+  return status;
 }
 
 export async function tasteGet(): Promise<TasteState> {
-  return invoke("taste_get");
+  return cached("taste", () => invoke<TasteState>("taste_get"));
 }
 
 export async function tasteAnalyze(forceRefresh = false): Promise<void> {
-  return invoke("taste_analyze", { forceRefresh });
+  await invoke("taste_analyze", { forceRefresh });
+  invalidateTasteCache();
 }
 
 export async function tasteFeedbackSet(
@@ -150,11 +207,14 @@ export async function tasteFeedbackSet(
   action: "interested" | "rejected" | "seen",
   reason?: string | null,
 ): Promise<TasteFeedback> {
-  return invoke("taste_feedback_set", { tmdbId, action, reason: reason ?? null });
+  const feedback = await invoke<TasteFeedback>("taste_feedback_set", { tmdbId, action, reason: reason ?? null });
+  invalidateTasteCache();
+  return feedback;
 }
 
 export async function tasteFeedbackClear(tmdbId: number): Promise<void> {
-  return invoke("taste_feedback_clear", { tmdbId });
+  await invoke("taste_feedback_clear", { tmdbId });
+  invalidateTasteCache();
 }
 
 export function formatEnrich(r: EnrichReport): string {
@@ -178,13 +238,15 @@ export function formatImport(r: ImportResult): string {
 }
 
 export async function listFriends(): Promise<FriendRow[]> {
-  const rows = await invoke<[string, string, string | null, string | null][]>("list_friends");
-  return rows.map(([id, username, lastSyncAt, lastSyncError]) => ({
-    id,
-    username,
-    lastSyncAt,
-    lastSyncError,
-  }));
+  return cached("friends", async () => {
+    const rows = await invoke<[string, string, string | null, string | null][]>("list_friends");
+    return rows.map(([id, username, lastSyncAt, lastSyncError]) => ({
+      id,
+      username,
+      lastSyncAt,
+      lastSyncError,
+    }));
+  });
 }
 
 export function formatBytes(bytes: number): string {

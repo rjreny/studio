@@ -324,7 +324,7 @@ export function SettingsView({
           </div>
           <div className="field-row">
             <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
-              {busy ? "Working…" : "Import ZIP"}
+              {busy ? "Working…" : "Import full export"}
             </button>
             <button
               type="button"
@@ -340,7 +340,9 @@ export function SettingsView({
           </div>
           <p className="hint">
             Studio refreshes your public Letterboxd diary RSS about once an hour while the app is
-            open, and when you launch it. Same official feeds RSS readers use — no site scraping.
+            open, and when you launch it. Import a fresh Letterboxd export ZIP whenever you want to
+            add ratings and reviews that were not diary logs. Same official feeds RSS readers use —
+            no site scraping.
             Last refresh: {formatRssSyncAt(lastRssSyncAt)}.
           </p>
           {rssPausedUntil ? (

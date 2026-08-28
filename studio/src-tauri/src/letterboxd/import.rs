@@ -591,9 +591,15 @@ mod tests {
     }
 
     #[test]
-    fn reviews_are_stored_as_source_metadata() {
+    fn standalone_ratings_and_reviews_are_imported_without_diary_logs() {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("ratings.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Name,Year,Rating,Letterboxd URI\nInception,2010,4.5,/film/inception/\n",
+        )
+        .unwrap();
         zip.start_file("reviews.csv", options).unwrap();
         std::io::Write::write_all(
             &mut zip,
@@ -602,15 +608,24 @@ mod tests {
         .unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         let mut db = Database::in_memory().unwrap();
-        import_zip_discovery(&mut db, &discover_zip_bytes(&bytes).unwrap()).unwrap();
-        let review: String = db
+        let result = import_zip_discovery(&mut db, &discover_zip_bytes(&bytes).unwrap()).unwrap();
+        assert_eq!(result.viewings, 0);
+        assert_eq!(result.ratings, 1);
+
+        let (viewings, movies, ratings) = count_events(&db).unwrap();
+        assert_eq!((viewings, movies, ratings), (0, 1, 1));
+
+        let (rating, review): (f64, String) = db
             .conn()
             .query_row(
-                "SELECT json_extract(raw_identity, '$.review') FROM source_movie_records",
+                "SELECT re.rating, json_extract(smr.raw_identity, '$.review')
+                 FROM rating_events re
+                 JOIN source_movie_records smr ON smr.id = re.source_movie_record_id",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        assert_eq!(rating, 4.5);
         assert_eq!(review, "Beautifully shot and tightly paced");
     }
 }

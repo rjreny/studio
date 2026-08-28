@@ -16,6 +16,8 @@ import { appVersion } from "./platform/app";
 import {
   getHome,
   getSession,
+  invalidateDataCache,
+  invalidateTasteCache,
   migrateFromLegacy,
   setSelfUsername,
   syncFeeds,
@@ -56,6 +58,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
+      invalidateDataCache();
       const [s, h] = await Promise.all([getSession(), getHome()]);
       setSession(s);
       setCoverage(s.coverage);
@@ -155,8 +158,12 @@ export default function App() {
       const next = event.payload;
       setJob(next.done ? null : next);
       setStatus(next.label);
-      if (next.done || (next.current > 0 && next.current % 20 === 0)) {
-        void refresh();
+      if (next.done) {
+        if (next.job === "taste") {
+          invalidateTasteCache();
+        } else {
+          void refresh();
+        }
       }
       if (next.done && next.job === "feeds") {
         const added = next.feeds?.entriesAdded ?? 0;
@@ -180,7 +187,6 @@ export default function App() {
   useEffect(() => {
     function onFocus() {
       void syncFeeds(false).catch((err) => log("warn", "diary rss sync skipped", err));
-      void refresh();
     }
     window.addEventListener("focus", onFocus);
     const timer = window.setInterval(() => void refresh(), 60 * 60 * 1000);

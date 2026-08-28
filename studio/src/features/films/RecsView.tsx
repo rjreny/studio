@@ -408,7 +408,7 @@ function TasteLists({
         </section>
       )}
       {watch.length ? (
-        <section>
+        <section className="taste-watchlist-section">
           <div className="shelf-head">
             <h2>Already on your watchlist</h2>
             <span className="muted">{listCount(sortedWatch.length, visibleWatch.length)} picks</span>

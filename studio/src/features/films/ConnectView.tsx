@@ -83,7 +83,8 @@ export function ConnectView({
       <p className="hint">
         Full history: Letterboxd Settings, Import & Export, download ZIP. After you connect, Studio
         keeps your public diary RSS up to date on its own — same feed Letterboxd publishes for RSS
-        readers, about once an hour. Ratings without a diary log are not in that feed.
+        readers, about once an hour. Re-import a fresh export ZIP to include ratings and reviews
+        that were added without a diary log.
       </p>
     </div>
   );

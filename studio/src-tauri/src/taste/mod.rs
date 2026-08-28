@@ -1269,28 +1269,7 @@ fn send_chat(
     web: bool,
 ) -> Result<String, String> {
     let timeout = request_timeout(model);
-    let mut body = json!({
-        "model": openrouter_model_id(model),
-        "temperature": 0.35,
-        "max_tokens": 6000,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": payload.to_string() }
-        ]
-    });
-    if web {
-        body["tools"] = json!([{
-            "type": "openrouter:web_search",
-            "parameters": {
-                "max_results": 4,
-                "max_total_results": 8,
-                "max_uses": 3,
-                "search_context_size": "low"
-            }
-        }]);
-    } else {
-        body["response_format"] = json!({ "type": "json_object" });
-    }
+    let body = chat_body(model, system, payload, web);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(20))
         .timeout_read(timeout)
@@ -1324,6 +1303,35 @@ fn send_chat(
         .and_then(choice_text)
         .ok_or_else(|| "OpenRouter response had no text".to_string())?;
     Ok(content)
+}
+
+fn chat_body(model: &str, system: &str, payload: &Value, web: bool) -> Value {
+    let mut body = json!({
+        "model": openrouter_model_id(model),
+        "temperature": 0.35,
+        "max_tokens": 6000,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": payload.to_string() }
+        ]
+    });
+    if model == MODEL_DEEPSEEK {
+        body["reasoning"] = json!({ "effort": "low", "exclude": true });
+    }
+    if web {
+        body["tools"] = json!([{
+            "type": "openrouter:web_search",
+            "parameters": {
+                "max_results": 4,
+                "max_total_results": 8,
+                "max_uses": 3,
+                "search_context_size": "low"
+            }
+        }]);
+    } else {
+        body["response_format"] = json!({ "type": "json_object" });
+    }
+    body
 }
 
 fn choice_text(choice: &Value) -> Option<String> {
@@ -1670,6 +1678,14 @@ mod tests {
         assert_eq!(normalize_model("Qwen3.8 2.4T A95B"), MODEL_QWEN_MAX);
         assert_eq!(openrouter_model_id(MODEL_DEEPSEEK), "deepseek/deepseek-v4-pro-0813");
         assert_eq!(model_catalog().len(), 4);
+    }
+
+    #[test]
+    fn deepseek_request_reserves_output_for_json() {
+        let body = chat_body(MODEL_DEEPSEEK, "system", &json!({ "films": [] }), false);
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["exclude"], true);
+        assert_eq!(body["response_format"]["type"], "json_object");
     }
 
     #[test]
