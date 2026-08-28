@@ -44,44 +44,46 @@ pub fn import_zip_discovery(
     )
     .map_err(|e| e.to_string())?;
 
-    for file in &discovery.files {
-        let records = parse_csv(&file.text);
-        for record in records {
-            match file.kind {
-                CsvKind::Diary | CsvKind::Watched => {
-                    if ingest_viewing(
-                        &tx,
-                        &import_id,
-                        &file.relative_path,
-                        &record,
-                        file.kind,
-                        &now,
-                        &mut stats,
-                    )? {
-                        // added
+    for kind in [
+        CsvKind::Diary,
+        CsvKind::Watched,
+        CsvKind::Ratings,
+        CsvKind::Watchlist,
+        CsvKind::Reviews,
+    ] {
+        for file in discovery.files.iter().filter(|file| file.kind == kind) {
+            let records = parse_csv(&file.text);
+            for record in records {
+                match file.kind {
+                    CsvKind::Diary | CsvKind::Watched => {
+                        if ingest_viewing(
+                            &tx,
+                            &import_id,
+                            &file.relative_path,
+                            &record,
+                            file.kind,
+                            &now,
+                            &mut stats,
+                        )? {
+                            // added
+                        }
                     }
-                }
-                CsvKind::Ratings => {
-                    ingest_rating(
-                        &tx,
-                        &import_id,
-                        &file.relative_path,
-                        &record,
-                        &now,
-                        &mut stats,
-                    )?;
-                }
-                CsvKind::Watchlist => {
-                    ingest_watchlist_flag(&tx, &import_id, &file.relative_path, &record)?;
-                }
-                CsvKind::Reviews => {
-                    ingest_review(
-                        &tx,
-                        &import_id,
-                        &file.relative_path,
-                        &record,
-                        &mut stats,
-                    )?;
+                    CsvKind::Ratings => {
+                        ingest_rating(
+                            &tx,
+                            &import_id,
+                            &file.relative_path,
+                            &record,
+                            &now,
+                            &mut stats,
+                        )?;
+                    }
+                    CsvKind::Watchlist => {
+                        ingest_watchlist_flag(&tx, &import_id, &file.relative_path, &record)?;
+                    }
+                    CsvKind::Reviews => {
+                        ingest_review(&tx, &import_id, &file.relative_path, &record, &mut stats)?;
+                    }
                 }
             }
         }
@@ -139,6 +141,18 @@ fn ingest_viewing(
     let rewatch = record
         .get(&["Rewatch", "rewatch"])
         .eq_ignore_ascii_case("yes");
+
+    if kind == CsvKind::Watched
+        && (has_export_viewing(tx, &name, year)?
+            || has_rss_viewing(tx, &name, year, &watched_date)?)
+    {
+        stats.skipped += 1;
+        return Ok(false);
+    }
+    if kind == CsvKind::Diary && has_rss_viewing(tx, &name, year, &watched_date)? {
+        stats.skipped += 1;
+        return Ok(false);
+    }
 
     let fp = row_fingerprint(&[
         ("name", &name),
@@ -200,7 +214,7 @@ fn ingest_viewing(
             import_id,
             uri,
             rewatch as i32,
-            format!("{{\"name\":\"{name}\",\"year\":{year:?}}}")
+            serde_json::json!({ "title": name, "year": year, "kind": kind.as_str() }).to_string()
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -259,6 +273,51 @@ fn ingest_viewing(
 
     stats.viewings_added += 1;
     Ok(true)
+}
+
+fn has_export_viewing(
+    tx: &Transaction<'_>,
+    title: &str,
+    year: Option<i32>,
+) -> Result<bool, String> {
+    tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1
+           FROM viewings v
+           JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+           WHERE v.source_type = 'letterboxd_export'
+             AND smr.normalized_title = ?1 AND smr.release_year IS ?2
+         )",
+        params![normalize_title(title), year],
+        |row| row.get::<_, i32>(0),
+    )
+    .map(|n| n != 0)
+    .map_err(|e| e.to_string())
+}
+
+fn has_rss_viewing(
+    tx: &Transaction<'_>,
+    title: &str,
+    year: Option<i32>,
+    watched_date: &str,
+) -> Result<bool, String> {
+    if watched_date.is_empty() {
+        return Ok(false);
+    }
+    tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1
+           FROM viewings v
+           JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+           WHERE v.source_type = 'letterboxd_rss'
+             AND smr.normalized_title = ?1 AND smr.release_year IS ?2
+             AND v.occurred_at = ?3
+         )",
+        params![normalize_title(title), year, watched_date],
+        |row| row.get::<_, i32>(0),
+    )
+    .map(|n| n != 0)
+    .map_err(|e| e.to_string())
 }
 
 fn ingest_rating(
@@ -552,6 +611,24 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
+    fn diary_and_watched_csv() -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("watched.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Date,Name,Year,Letterboxd URI\n2025-01-01,Tuner,2025,/film/tuner/\n",
+        )
+        .unwrap();
+        zip.start_file("diary.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Name,Year,Watched Date,Letterboxd URI,Rating,Rewatch\nTuner,2025,2025-01-01,/film/tuner/,4.5,No\n",
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn identical_zip_no_duplicate_events() {
         let bytes = diary_csv("Inception,2010,2020-01-01,/film/inception/,4.5,No");
@@ -578,6 +655,18 @@ mod tests {
         assert_eq!(result.viewings, 1);
         let (viewings, _, _) = count_events(&db).unwrap();
         assert_eq!(viewings, 2);
+    }
+
+    #[test]
+    fn watched_summary_does_not_duplicate_diary_history() {
+        let mut db = Database::in_memory().unwrap();
+        let result = import_zip_discovery(
+            &mut db,
+            &discover_zip_bytes(&diary_and_watched_csv()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.viewings, 1);
+        assert_eq!(count_events(&db).unwrap().0, 1);
     }
 
     #[test]

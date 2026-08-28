@@ -1,6 +1,7 @@
 use crate::letterboxd::normalize::{normalize_title, parse_year};
 use crate::letterboxd::posters::{
-    backfill_letterboxd_posters, backdrop_url, cache_poster_for_siblings, full_poster_url, poster_url,
+    backdrop_url, backfill_letterboxd_posters, cache_poster_for_siblings, full_poster_url,
+    poster_url,
 };
 use crate::models::{EnrichReport, JobProgress, LibraryItem, TmdbKeyStatus};
 use crate::storage::db::Database;
@@ -84,13 +85,15 @@ fn probe_key(key: &str) -> Result<TmdbKeyStatus, String> {
             last_error: None,
         }),
         Err(err) => {
-            let invalid = err.contains("401") || err.contains("403") || err.contains("Unauthorized");
+            let invalid =
+                err.contains("401") || err.contains("403") || err.contains("Unauthorized");
             Ok(TmdbKeyStatus {
                 stored: false,
                 valid: if invalid { Some(false) } else { None },
                 kind: Some(kind.into()),
                 last_error: Some(if invalid {
-                    "TMDB rejected this key. Use the API Key (v3) from themoviedb.org/settings/api.".into()
+                    "TMDB rejected this key. Use the API Key (v3) from themoviedb.org/settings/api."
+                        .into()
                 } else {
                     format!("Could not reach TMDB: {err}")
                 }),
@@ -137,7 +140,11 @@ fn tmdb_get(key: &str, path_and_query: &str) -> Result<String, String> {
     let url = if is_bearer_token(key) {
         format!("{TMDB_BASE}{path_and_query}")
     } else {
-        let sep = if path_and_query.contains('?') { '&' } else { '?' };
+        let sep = if path_and_query.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
         format!("{TMDB_BASE}{path_and_query}{sep}api_key={key}")
     };
     let mut req = ureq::get(&url)
@@ -183,16 +190,7 @@ pub fn lookup_movie(title: &str, year: Option<i32>) -> Result<Option<MovieLookup
     if pick_search_match(&parsed.results, &normalized, year).is_none() && year.is_some() {
         parsed = search_movies(&api_key, title, None)?;
     }
-    let hit = pick_search_match(&parsed.results, &normalized, year).or_else(|| {
-        parsed
-            .results
-            .iter()
-            .find(|r| match year {
-                Some(y) => release_year(r) == Some(y),
-                None => true,
-            })
-            .or_else(|| parsed.results.first())
-    });
+    let hit = pick_search_match(&parsed.results, &normalized, year);
     Ok(hit.map(|r| MovieLookup {
         tmdb_id: r.id,
         title: r.title.clone(),
@@ -341,9 +339,7 @@ pub(crate) fn match_progress_label(current: u32, total: u32) -> String {
     format!("Matching TMDB · {current}/{total}")
 }
 
-fn list_unmatched(
-    db: &Database,
-) -> Result<Vec<(String, String, String, Option<i32>)>, String> {
+fn list_unmatched(db: &Database) -> Result<Vec<(String, String, String, Option<i32>)>, String> {
     let mut stmt = db
         .conn()
         .prepare(
@@ -354,7 +350,9 @@ fn list_unmatched(
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -549,10 +547,6 @@ fn pick_search_match<'a>(
         }
     }
 
-    if results.len() == 1 {
-        return Some(&results[0]);
-    }
-
     None
 }
 
@@ -634,7 +628,10 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
         .and_then(|d| d.get(0..4))
         .and_then(parse_year);
     let poster = v["poster_path"].as_str().unwrap_or("").to_string();
-    let tagline = v["tagline"].as_str().map(str::to_string).filter(|s| !s.is_empty());
+    let tagline = v["tagline"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     let (collection_name, collection_items) = collection_from_movie(&api_key, &v);
     let (recommendations, similar) = related_lists(&v);
     let existing_id: Option<String> = db
@@ -647,7 +644,9 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
         .optional()
         .map_err(|e| e.to_string())?;
 
-    let id = existing_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let id = existing_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let poster_store = if poster.is_empty() {
         None::<String>
     } else {
@@ -667,8 +666,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     }))
     .unwrap_or_else(|_| r#"{"recommendations":[],"similar":[]}"#.into());
     let reviews = serde_json::to_string(&review_authors(&v)).unwrap_or_else(|_| "[]".into());
-    let collection_json =
-        serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
+    let collection_json = serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
     let keywords_json = serde_json::to_string(&keyword_entries(&v)).unwrap_or_else(|_| "[]".into());
     let credits_blob = serde_json::to_string(&credit_entries(&v)).unwrap_or_else(|_| "{}".into());
 
@@ -1030,7 +1028,9 @@ pub fn classify_tmdb_value(
         }
         return Err(MediaKind::Ambiguous);
     };
-    let year = release.and_then(|d| d.get(0..4)).and_then(|y| y.parse().ok());
+    let year = release
+        .and_then(|d| d.get(0..4))
+        .and_then(|y| y.parse().ok());
     Ok((
         MediaKind::Movie,
         LibraryItem::catalog(
@@ -1084,17 +1084,26 @@ fn related_list(v: &serde_json::Value, key: &str, take: usize) -> Vec<LibraryIte
 }
 
 fn related_lists(v: &serde_json::Value) -> (Vec<LibraryItem>, Vec<LibraryItem>) {
-    (related_list(v, "recommendations", 12), related_list(v, "similar", 12))
+    (
+        related_list(v, "recommendations", 12),
+        related_list(v, "similar", 12),
+    )
 }
 
-fn collection_from_movie(api_key: &str, v: &serde_json::Value) -> (Option<String>, Vec<LibraryItem>) {
+fn collection_from_movie(
+    api_key: &str,
+    v: &serde_json::Value,
+) -> (Option<String>, Vec<LibraryItem>) {
     let Some(col) = v.get("belongs_to_collection") else {
         return (None, Vec::new());
     };
     if col.is_null() {
         return (None, Vec::new());
     }
-    let name = col["name"].as_str().map(str::to_string).filter(|s| !s.is_empty());
+    let name = col["name"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     let Some(collection_id) = col["id"].as_i64() else {
         return (name, Vec::new());
     };
@@ -1106,7 +1115,11 @@ fn collection_from_movie(api_key: &str, v: &serde_json::Value) -> (Option<String
     };
     let parts = parsed["parts"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(library_item_from_movie_value).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(library_item_from_movie_value)
+                .collect()
+        })
         .unwrap_or_default();
     (name, parts)
 }
@@ -1189,6 +1202,17 @@ mod tests {
             classify_tmdb_value(&row),
             Err(crate::taste::retrieve::MediaKind::Ambiguous)
         ));
+    }
+
+    #[test]
+    fn search_does_not_match_a_different_single_result() {
+        let results = vec![TmdbSearchResult {
+            id: 1571662,
+            title: "The Piano Tuner".into(),
+            release_date: Some("2025-01-01".into()),
+            poster_path: None,
+        }];
+        assert!(pick_search_match(&results, "tuner", Some(2025)).is_none());
     }
 
     #[test]

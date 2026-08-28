@@ -3,9 +3,7 @@ use crate::letterboxd::posters::poster_url;
 use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::LibraryItem;
 use crate::storage::db::Database;
-use crate::taste::features::{
-    family_for_job, Credit, FeatureFamily, FeatureProfile, Keyword,
-};
+use crate::taste::features::{family_for_job, Credit, FeatureFamily, FeatureProfile, Keyword};
 use crate::taste::preference::{
     interaction_signal, rating_profile, years_since, InteractionSignal, RatingProfile,
 };
@@ -91,11 +89,7 @@ pub struct RetrievalSource {
 }
 
 impl RetrievalSource {
-    pub fn new(
-        kind: RetrievalKind,
-        label: impl Into<String>,
-        seed_tmdb_id: Option<i64>,
-    ) -> Self {
+    pub fn new(kind: RetrievalKind, label: impl Into<String>, seed_tmdb_id: Option<i64>) -> Self {
         Self {
             kind,
             label: label.into(),
@@ -244,7 +238,11 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
                 viewings: row.get::<_, i64>(8)? as u32,
                 last_date: row.get(9)?,
                 genres: json_vec(row.get::<_, Option<String>>(10)?),
-                credits: parse_credits(credits_json.as_deref(), cast_json.as_deref(), crew_json.as_deref()),
+                credits: parse_credits(
+                    credits_json.as_deref(),
+                    cast_json.as_deref(),
+                    crew_json.as_deref(),
+                ),
                 keywords: parse_keywords(row.get::<_, Option<String>>(14)?),
                 recommendations,
                 similar,
@@ -257,7 +255,7 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
             })
         })
         .map_err(|e| e.to_string())?;
-    let mut films: Vec<FilmRecord> = rows.filter_map(|r| r.ok()).collect();
+    let mut films = consolidate_films(rows.filter_map(|r| r.ok()).collect());
     let now = chrono::Utc::now();
     for film in &mut films {
         if let Some(date) = film.last_date.as_deref() {
@@ -265,6 +263,37 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
         }
     }
     Ok(films)
+}
+
+fn consolidate_films(films: Vec<FilmRecord>) -> Vec<FilmRecord> {
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut consolidated: Vec<FilmRecord> = Vec::new();
+
+    for film in films {
+        if let Some(&position) = positions.get(&film.key) {
+            let current = &mut consolidated[position];
+            let is_newer = film.last_date > current.last_date;
+            current.watched |= film.watched;
+            current.watchlist |= film.watchlist;
+            current.liked |= film.liked;
+            current.viewings += film.viewings;
+            if is_newer {
+                current.last_date = film.last_date;
+                if film.rating.is_some() {
+                    current.rating = film.rating;
+                }
+            } else if current.rating.is_none() {
+                current.rating = film.rating;
+            }
+            if current.review.is_none() {
+                current.review = film.review;
+            }
+        } else {
+            positions.insert(film.key.clone(), consolidated.len());
+            consolidated.push(film);
+        }
+    }
+    consolidated
 }
 
 pub fn attach_signals(films: &mut [FilmRecord]) {
@@ -315,7 +344,9 @@ pub fn enrich_eligible_seeds(
     });
     let mut n = 0;
     for i in idxs.into_iter().take(cap) {
-        let Some(tid) = films[i].tmdb_id else { continue };
+        let Some(tid) = films[i].tmdb_id else {
+            continue;
+        };
         if tmdb::refresh_movie_catalog(db, tid, force).is_ok() {
             n += 1;
             let _ = reload_catalog_fields(db, &mut films[i]);
@@ -364,7 +395,9 @@ pub fn enrich_rated_library(
     });
     let mut n = 0;
     for i in idxs.into_iter().take(cap) {
-        let Some(tid) = films[i].tmdb_id else { continue };
+        let Some(tid) = films[i].tmdb_id else {
+            continue;
+        };
         if tmdb::refresh_movie_catalog(db, tid, force).is_ok() {
             n += 1;
             let _ = reload_catalog_fields(db, &mut films[i]);
@@ -395,7 +428,8 @@ fn reload_catalog_fields(db: &Database, film: &mut FilmRecord) -> Result<(), Str
             ))
         },
     );
-    let Ok((genres, credits, cast, crew, keywords, similar, runtime, vote_count, poster)) = row else {
+    let Ok((genres, credits, cast, crew, keywords, similar, runtime, vote_count, poster)) = row
+    else {
         return Ok(());
     };
     film.genres = json_vec(genres);
@@ -439,23 +473,21 @@ pub fn retrieve_with_coverage(
     force_refresh: bool,
 ) -> Result<RetrievalResult, String> {
     let mut by_key: HashMap<String, Candidate> = HashMap::new();
-    let mut seeds: Vec<&FilmRecord> = films
-        .iter()
-        .filter(|f| eligible_positive_like(f))
-        .collect();
+    let mut seeds: Vec<&FilmRecord> = films.iter().filter(|f| eligible_positive_like(f)).collect();
     seeds.sort_by(|a, b| {
         seed_priority(b)
             .partial_cmp(&seed_priority(a))
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.tmdb_id.unwrap_or(i64::MAX).cmp(&b.tmdb_id.unwrap_or(i64::MAX)))
+            .then_with(|| {
+                a.tmdb_id
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.tmdb_id.unwrap_or(i64::MAX))
+            })
             .then_with(|| a.title.cmp(&b.title))
     });
 
     let eligible_seeds = seeds.len();
-    let seeds_with_usable_related = seeds
-        .iter()
-        .filter(|s| has_usable_related(s))
-        .count();
+    let seeds_with_usable_related = seeds.iter().filter(|s| has_usable_related(s)).count();
 
     for seed in &seeds {
         for item in seed.recommendations.iter().take(RECS_PER_SEED) {
@@ -493,8 +525,8 @@ pub fn retrieve_with_coverage(
         .collect();
     for person in people {
         let Some(pid) = person.key.id else { continue };
-        let credits = tmdb::person_movie_credits_with_force(db, pid, force_refresh)
-            .unwrap_or_default();
+        let credits =
+            tmdb::person_movie_credits_with_force(db, pid, force_refresh).unwrap_or_default();
         let take = filmography_credit_cap(person.key.family);
         for credit in credits
             .into_iter()
@@ -613,12 +645,7 @@ fn push_related(
             runtime: None,
             vote_count: None,
             watchlist: false,
-            sources: vec![RetrievalSource::new(
-                kind,
-                label,
-                seed.tmdb_id,
-            )
-            .with_rating(seed.rating)],
+            sources: vec![RetrievalSource::new(kind, label, seed.tmdb_id).with_rating(seed.rating)],
             friend_affinity: 0.0,
             tmdb_related: 1.0,
             media_kind: MediaKind::Movie,
@@ -650,7 +677,11 @@ pub fn eligible_positive_like(seed: &FilmRecord) -> bool {
     if signal.familiarity_strength >= 0.6 {
         return false;
     }
-    if seed.genres.iter().any(|g| g.eq_ignore_ascii_case("tv movie")) {
+    if seed
+        .genres
+        .iter()
+        .any(|g| g.eq_ignore_ascii_case("tv movie"))
+    {
         return false;
     }
     true
@@ -675,7 +706,8 @@ fn filmography_person_allowed(a: &crate::taste::features::FeatureAffinity) -> bo
             a.recommendation_mean > 0.15
         }
         FeatureFamily::Actor => {
-            a.appearances >= 3 && a.recommendation_mean >= crate::taste::features::PORTABLE_CONTEXTUAL
+            a.appearances >= 3
+                && a.recommendation_mean >= crate::taste::features::PORTABLE_CONTEXTUAL
         }
         FeatureFamily::Composer => a.appearances >= 4 && a.recommendation_mean > 0.22,
         _ => false,
@@ -740,11 +772,7 @@ fn select_fair_pool(map: HashMap<String, Candidate>, cap: usize) -> Vec<Candidat
     let mut by_person: HashMap<String, Vec<String>> = HashMap::new();
     let mut must: Vec<String> = Vec::new();
     for (key, c) in &map {
-        if c.watchlist
-            || c.sources
-                .iter()
-                .any(|s| s.kind == RetrievalKind::Friend)
-        {
+        if c.watchlist || c.sources.iter().any(|s| s.kind == RetrievalKind::Friend) {
             must.push(key.clone());
         }
         for s in &c.sources {
@@ -754,7 +782,10 @@ fn select_fair_pool(map: HashMap<String, Candidate>, cap: usize) -> Vec<Candidat
                 }
             }
             if s.kind == RetrievalKind::Filmography {
-                by_person.entry(s.label.clone()).or_default().push(key.clone());
+                by_person
+                    .entry(s.label.clone())
+                    .or_default()
+                    .push(key.clone());
             }
         }
     }
@@ -833,9 +864,7 @@ fn upsert_candidate(map: &mut HashMap<String, Candidate>, incoming: Candidate) {
         .and_modify(|existing| {
             for src in incoming.sources.clone() {
                 if !existing.sources.iter().any(|s| {
-                    s.kind == src.kind
-                        && s.seed_tmdb_id == src.seed_tmdb_id
-                        && s.label == src.label
+                    s.kind == src.kind && s.seed_tmdb_id == src.seed_tmdb_id && s.label == src.label
                 }) {
                     existing.sources.push(src);
                 }
@@ -993,16 +1022,13 @@ fn friend_candidates(
             watchlist: false,
             sources: vec![RetrievalSource {
                 kind: RetrievalKind::Friend,
-                label: format!(
-                    "loved by {} friend(s)",
-                    contribs.len()
-                ),
+                label: format!("loved by {} friend(s)", contribs.len()),
                 seed_tmdb_id: None,
                 seed_rating: None,
             }],
             friend_affinity,
             tmdb_related: 0.0,
-        media_kind: MediaKind::Movie,
+            media_kind: MediaKind::Movie,
         });
     }
     Ok(out)
@@ -1078,8 +1104,18 @@ fn hydrate_local_metadata(db: &Database, candidates: &mut [Candidate]) -> Result
                 ))
             },
         );
-        if let Ok((genres, credits, cast, crew, keywords, runtime, vote_count, poster, title, year)) =
-            row
+        if let Ok((
+            genres,
+            credits,
+            cast,
+            crew,
+            keywords,
+            runtime,
+            vote_count,
+            poster,
+            title,
+            year,
+        )) = row
         {
             if c.genres.is_empty() {
                 c.genres = json_vec(genres);
@@ -1300,7 +1336,10 @@ mod tests {
 
     #[test]
     fn friend_overlap_gate() {
-        assert_eq!(friend_similarity(&[(5.0, 5.0), (4.0, 4.0)], &[5.0, 4.0]), 0.0);
+        assert_eq!(
+            friend_similarity(&[(5.0, 5.0), (4.0, 4.0)], &[5.0, 4.0]),
+            0.0
+        );
         let pairs: Vec<(f32, f32)> = (0..20)
             .map(|i| (3.0 + (i % 3) as f32 * 0.5, 3.0 + (i % 3) as f32 * 0.5))
             .collect();
@@ -1329,6 +1368,37 @@ mod tests {
     }
 
     #[test]
+    fn consolidates_duplicate_source_records() {
+        let record = |viewings, rating| FilmRecord {
+            key: "tmdb:1571662".into(),
+            title: "Tuner".into(),
+            year: Some(2025),
+            tmdb_id: Some(1571662),
+            rating,
+            liked: false,
+            watched: true,
+            watchlist: false,
+            viewings,
+            last_date: Some("2025-01-01".into()),
+            genres: vec![],
+            credits: vec![],
+            keywords: vec![],
+            recommendations: vec![],
+            similar: vec![],
+            runtime: None,
+            poster: None,
+            vote_count: None,
+            review: None,
+            signal: None,
+            age_years: None,
+        };
+        let films = consolidate_films(vec![record(1, None), record(0, Some(4.5))]);
+        assert_eq!(films.len(), 1);
+        assert_eq!(films[0].viewings, 1);
+        assert_eq!(films[0].rating, Some(4.5));
+    }
+
+    #[test]
     fn seed_rank_ignores_rewatch_boost() {
         use crate::taste::preference::{interaction_signal, rating_profile};
         let p = rating_profile(&[4.0; 8]).unwrap();
@@ -1340,11 +1410,7 @@ mod tests {
         assert!(many.preference_weight > once.preference_weight);
     }
 
-    fn test_seed(
-        title: &str,
-        viewings: u32,
-        credits: Vec<Credit>,
-    ) -> FilmRecord {
+    fn test_seed(title: &str, viewings: u32, credits: Vec<Credit>) -> FilmRecord {
         use crate::taste::preference::{interaction_signal, rating_profile};
         let p = rating_profile(&[4.0; 8]).unwrap();
         FilmRecord {
@@ -1597,9 +1663,9 @@ mod tests {
 
     #[test]
     fn retrieve_membership_follows_current_seeds_not_a_union() {
+        use crate::storage::db::Database;
         use crate::taste::features::{build_profile, observations_from_film};
         use crate::taste::preference::{interaction_signal, rating_profile};
-        use crate::storage::db::Database;
         let db = Database::in_memory().unwrap();
         let p = rating_profile(&[4.0; 8]).unwrap();
         let dp = Credit {
@@ -1702,8 +1768,8 @@ mod tests {
 
     #[test]
     fn held_out_liked_neighbor_is_retrieved() {
-        use crate::taste::features::build_profile;
         use crate::storage::db::Database;
+        use crate::taste::features::build_profile;
         let db = Database::in_memory().unwrap();
         let profile = build_profile(&[]);
         let mut seed = test_seed("The Batman", 1, vec![]);
@@ -1717,8 +1783,7 @@ mod tests {
             "a held-out liked neighbor of an eligible seed must re-enter the pool"
         );
         let mix = crate::taste::eval::source_mix(
-            &out
-                .iter()
+            &out.iter()
                 .map(|c| crate::taste::score::score_candidate(&profile, c))
                 .collect::<Vec<_>>(),
         );
@@ -1727,9 +1792,9 @@ mod tests {
 
     #[test]
     fn fifty_first_eligible_seed_still_expands() {
+        use crate::storage::db::Database;
         use crate::taste::features::build_profile;
         use crate::taste::preference::{interaction_signal, rating_profile};
-        use crate::storage::db::Database;
         let db = Database::in_memory().unwrap();
         let p = rating_profile(&[4.0; 8]).unwrap();
         let profile = build_profile(&[]);
@@ -1752,9 +1817,9 @@ mod tests {
 
     #[test]
     fn disliked_seed_does_not_expand() {
+        use crate::storage::db::Database;
         use crate::taste::features::build_profile;
         use crate::taste::preference::{interaction_signal, rating_profile};
-        use crate::storage::db::Database;
         let db = Database::in_memory().unwrap();
         let p = rating_profile(&[4.0; 8]).unwrap();
         let profile = build_profile(&[]);
@@ -1771,9 +1836,9 @@ mod tests {
 
     #[test]
     fn composer_seed_uses_recommendations_and_bounded_similar() {
+        use crate::storage::db::Database;
         use crate::taste::features::{build_profile, observations_from_film};
         use crate::taste::preference::{interaction_signal, rating_profile};
-        use crate::storage::db::Database;
         let db = Database::in_memory().unwrap();
         let p = rating_profile(&[4.0; 8]).unwrap();
         let composer = Credit {
@@ -1816,8 +1881,8 @@ mod tests {
 
     #[test]
     fn related_recommendations_count_as_related_only() {
-        use crate::taste::score::score_candidate;
         use crate::taste::features::build_profile;
+        use crate::taste::score::score_candidate;
         let profile = build_profile(&[]);
         let c = Candidate {
             tmdb_id: Some(1),
@@ -1896,7 +1961,10 @@ mod tests {
             "Director of Photography",
             FeatureFamily::Cinematographer
         ));
-        assert!(!keep_person_credit("Director", FeatureFamily::Cinematographer));
+        assert!(!keep_person_credit(
+            "Director",
+            FeatureFamily::Cinematographer
+        ));
         assert!(!keep_person_credit("Actor", FeatureFamily::Cinematographer));
     }
 }

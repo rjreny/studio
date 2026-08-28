@@ -67,13 +67,14 @@ impl Database {
                 "ALTER TABLE source_movie_records ADD COLUMN poster_fetch_failed INTEGER NOT NULL DEFAULT 0",
                 [],
             );
-            let _ = self.conn.execute(
-                "ALTER TABLE friend_activity ADD COLUMN poster_url TEXT",
-                [],
-            );
+            let _ = self
+                .conn
+                .execute("ALTER TABLE friend_activity ADD COLUMN poster_url TEXT", []);
         }
         if version < 3 {
-            let _ = self.conn.execute("ALTER TABLE movies ADD COLUMN tagline TEXT", []);
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN tagline TEXT", []);
             let _ = self
                 .conn
                 .execute("ALTER TABLE movies ADD COLUMN collection_name TEXT", []);
@@ -147,7 +148,108 @@ impl Database {
                 [],
             );
         }
+        if version < 9 {
+            self.reconcile_duplicate_history()?;
+        }
         Ok(())
+    }
+
+    fn reconcile_duplicate_history(&self) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            r#"
+            DELETE FROM viewings
+            WHERE id IN (
+              SELECT id FROM (
+                SELECT
+                  v.id,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY
+                      smr.normalized_title,
+                      smr.release_year,
+                      COALESCE(NULLIF(v.occurred_at, ''), NULLIF(v.published_at, ''))
+                    ORDER BY
+                      CASE v.source_type
+                        WHEN 'letterboxd_export' THEN 0
+                        WHEN 'legacy_json' THEN 1
+                        ELSE 2
+                      END,
+                      v.observed_at,
+                      v.id
+                  ) AS duplicate_rank
+                FROM viewings v
+                JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+                WHERE COALESCE(NULLIF(v.occurred_at, ''), NULLIF(v.published_at, '')) IS NOT NULL
+              )
+              WHERE duplicate_rank > 1
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            r#"
+            DELETE FROM viewings
+            WHERE id IN (
+              SELECT summary.id
+              FROM viewings summary
+              JOIN source_movie_records smr ON smr.id = summary.source_movie_record_id
+              WHERE summary.source_type = 'letterboxd_export'
+                AND summary.diary_entry_id LIKE 'https://boxd.it/%'
+                AND LENGTH(SUBSTR(summary.diary_entry_id, LENGTH('https://boxd.it/') + 1)) = 4
+                AND EXISTS (
+                  SELECT 1
+                  FROM viewings other
+                  JOIN source_movie_records other_smr ON other_smr.id = other.source_movie_record_id
+                  WHERE other.id != summary.id
+                    AND other_smr.normalized_title = smr.normalized_title
+                    AND other_smr.release_year IS smr.release_year
+                    AND DATE(other.occurred_at) BETWEEN DATE(summary.occurred_at, '-1 day')
+                                                     AND DATE(summary.occurred_at, '+1 day')
+                )
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            r#"
+            UPDATE source_movie_records
+            SET cached_poster_url = NULL, poster_fetch_failed = 0
+            WHERE id IN (
+              SELECT smr.id
+              FROM source_movie_records smr
+              JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+              JOIN movies m ON m.id = ml.movie_id
+              WHERE ml.match_method IN ('tmdb_search', 'propagated')
+                AND smr.normalized_title != LOWER(TRIM(m.canonical_title))
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            r#"
+            UPDATE movie_links
+            SET movie_id = NULL, match_state = 'unmatched', match_method = NULL,
+                confidence = NULL, confirmed_at = NULL
+            WHERE match_method IN ('tmdb_search', 'propagated')
+              AND EXISTS (
+                SELECT 1
+                FROM source_movie_records smr
+                JOIN movies m ON m.id = movie_links.movie_id
+                WHERE smr.id = movie_links.source_movie_record_id
+                  AND smr.normalized_title != LOWER(TRIM(m.canonical_title))
+              )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Self::rebuild_projections(&tx)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn conn(&self) -> &Connection {
@@ -428,9 +530,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconciliation_keeps_one_viewing_and_unlinks_wrong_search_results() {
+        let db = Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, release_year, tmdb_id) VALUES ('wrong', 'The Piano Tuner', 2025, 1571662)",
+                [],
+            )
+            .unwrap();
+        for (id, source, method, occurred_at, diary_entry_id) in [
+            (
+                "diary",
+                "letterboxd_export",
+                "tmdb_search",
+                "2025-01-01",
+                "https://boxd.it/fMUQ7R",
+            ),
+            (
+                "rss",
+                "letterboxd_rss",
+                "propagated",
+                "2025-01-01",
+                "letterboxd-review-1446480335",
+            ),
+            (
+                "summary",
+                "letterboxd_export",
+                "propagated",
+                "2025-01-02",
+                "https://boxd.it/icFU",
+            ),
+        ] {
+            db.conn()
+                .execute(
+                    "INSERT INTO source_movie_records(
+                       id, source_type, source_record_key, normalized_title, release_year,
+                       raw_identity, cached_poster_url, created_at
+                     ) VALUES (?1, ?2, ?1, 'tuner', 2025, '{\"title\":\"Tuner\"}', 'wrong-poster', '2025-01-01T00:00:00Z')",
+                    params![id, source],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state, match_method)
+                     VALUES (?1, 'wrong', 'confirmed', ?2)",
+                    params![id, method],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO viewings(
+                       id, source_movie_record_id, source_record_key, occurred_at, observed_at,
+                       source_type, diary_entry_id
+                     ) VALUES (?1, ?1, ?1, ?2, '2025-01-01T00:00:00Z', ?3, ?4)",
+                    params![id, occurred_at, source, diary_entry_id],
+                )
+                .unwrap();
+        }
+
+        db.reconcile_duplicate_history().unwrap();
+
+        assert_eq!(db.count_table("viewings").unwrap(), 1);
+        let unmatched: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM movie_links WHERE movie_id IS NULL AND match_state = 'unmatched'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unmatched, 3);
+        let stale_posters: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM source_movie_records WHERE cached_poster_url IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_posters, 0);
+    }
+    #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("7".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("9".into()));
     }
 
     #[test]
@@ -487,20 +670,19 @@ mod tests {
             .unwrap();
         let leftover_friend: String = db
             .conn()
-            .query_row("SELECT friend_id FROM friend_activity", [], |row| row.get(0))
+            .query_row("SELECT friend_id FROM friend_activity", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(activity, 1);
         assert_eq!(leftover_friend, "f2");
-        assert_eq!(
-            db.remove_friend("missing").unwrap_err(),
-            "Friend not found"
-        );
+        assert_eq!(db.remove_friend("missing").unwrap_err(), "Friend not found");
     }
 
     #[test]
-    fn schema_v7_has_feedback_snapshot_and_embedding_tables() {
+    fn schema_v9_has_feedback_snapshot_and_embedding_tables() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("7".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("9".into()));
         let feedback: i64 = db
             .conn()
             .query_row(

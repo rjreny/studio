@@ -1,6 +1,6 @@
 use super::fingerprint::{row_fingerprint, source_record_key};
 use super::import::upsert_source_movie;
-use super::normalize::parse_year;
+use super::normalize::{normalize_title, parse_year};
 use super::posters::{poster_from_rss_body, tmdb_id_from_rss_body, SourceMovieMeta};
 use crate::models::SyncResult;
 use crate::storage::db::Database;
@@ -45,6 +45,23 @@ pub fn sync_rss(db: &mut Database, username: &str, xml: &str) -> Result<SyncResu
             .map_err(|e| e.to_string())?;
 
         if let Some(smr_id) = existing_smr {
+            if let Some(rating) = item.rating {
+                if upsert_rating(
+                    &tx,
+                    &smr_id,
+                    &rating_key,
+                    rating,
+                    item.watched_date.as_deref(),
+                    &item.published,
+                    &now,
+                )? {
+                    changed = true;
+                }
+            }
+            continue;
+        }
+
+        if let Some(smr_id) = matching_export_viewing(&tx, &item)? {
             if let Some(rating) = item.rating {
                 if upsert_rating(
                     &tx,
@@ -134,6 +151,25 @@ pub fn sync_rss(db: &mut Database, username: &str, xml: &str) -> Result<SyncResu
     })
 }
 
+fn matching_export_viewing(tx: &Transaction<'_>, item: &RssItem) -> Result<Option<String>, String> {
+    let Some(watched_date) = item.watched_date.as_deref().filter(|date| !date.is_empty()) else {
+        return Ok(None);
+    };
+    tx.query_row(
+        "SELECT v.source_movie_record_id
+         FROM viewings v
+         JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+         WHERE v.source_type = 'letterboxd_export'
+           AND smr.normalized_title = ?1 AND smr.release_year IS ?2
+           AND v.occurred_at = ?3
+         LIMIT 1",
+        params![normalize_title(&item.film_title), item.year, watched_date],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
 pub fn sync_friend_rss(
     db: &mut Database,
     friend_id: &str,
@@ -145,9 +181,10 @@ pub fn sync_friend_rss(
     let mut added = 0u32;
 
     for item in parse_items(xml) {
-        let guid = item.guid.clone().unwrap_or_else(|| {
-            row_fingerprint(&[("link", &item.link), ("title", &item.title)])
-        });
+        let guid = item
+            .guid
+            .clone()
+            .unwrap_or_else(|| row_fingerprint(&[("link", &item.link), ("title", &item.title)]));
         let event_fp = row_fingerprint(&[("guid", &guid), ("feed", &feed_url)]);
         let activity_key = source_record_key("letterboxd_rss", &feed_url, &event_fp);
         let existing: Option<String> = tx
@@ -519,7 +556,9 @@ mod tests {
         assert_eq!(result.entries_added, 0);
         let rating: f64 = db
             .conn()
-            .query_row("SELECT rating FROM rating_events LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT rating FROM rating_events LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(rating, 5.0);
     }
