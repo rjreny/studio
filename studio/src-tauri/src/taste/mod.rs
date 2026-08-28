@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod confidence;
 pub mod dimensions;
+pub mod diagnostics;
 pub mod discover;
 pub mod eval;
 pub mod explain;
@@ -41,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
+use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "studio";
 const KEYRING_USER: &str = "openrouter_api_key";
@@ -145,6 +147,8 @@ pub struct TastePick {
     pub semantic_fit: f32,
     #[serde(default)]
     pub semantic_coverage: bool,
+    #[serde(default)]
+    pub attribution: Option<crate::taste::feedback::TasteAttribution>,
 }
 
 fn default_semantic_fit() -> f32 {
@@ -200,6 +204,10 @@ pub struct TasteReport {
     pub note: Option<String>,
     #[serde(default)]
     pub run_log_path: Option<String>,
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub diagnostics: crate::taste::diagnostics::TasteDiagnostics,
 }
 
 impl TasteReport {
@@ -225,6 +233,8 @@ pub struct TasteState {
     pub report: Option<TasteReport>,
     #[serde(default)]
     pub feedback: Vec<crate::taste::feedback::TasteFeedback>,
+    #[serde(default)]
+    pub observation: crate::taste::feedback::TasteObservationSummary,
 }
 
 pub fn default_model() -> String {
@@ -571,13 +581,13 @@ pub(crate) fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile
                 continue;
             };
             let strength = observation.affinity_preference.abs().clamp(0.35, 1.0);
-            observation.affinity_preference = polarity * strength;
+            let supplemental = strength * 0.20;
+            observation.affinity_preference =
+                (observation.affinity_preference + polarity * supplemental).clamp(-1.0, 1.0);
             if polarity > 0.0 {
-                observation.positive = strength;
-                observation.negative = 0.0;
+                observation.positive += supplemental;
             } else {
-                observation.positive = 0.0;
-                observation.negative = strength;
+                observation.negative += supplemental;
             }
         }
         obs.extend(film_observations);
@@ -607,18 +617,22 @@ pub(crate) fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile
 pub fn load_state(db: &Database) -> Result<TasteState, String> {
     let mut films = load_films(db)?;
     attach_signals(&mut films);
-    let profile = feature_profile_from_films(&films);
+    let mut profile = feature_profile_from_films(&films);
+    let feedback_adjustments = crate::taste::feedback::active_feedback_adjustments(db)?;
+    crate::taste::feedback::apply_feedback_adjustments(&mut profile, &feedback_adjustments);
     let feedback = crate::taste::feedback::list_feedback(db).unwrap_or_default();
     let hide = crate::taste::feedback::hide_ids(&feedback);
     let report = db
         .get_meta(META_REPORT)?
         .and_then(|raw| serde_json::from_str::<TasteReport>(&raw).ok())
-        .map(|r| filter_report(r.normalize(), &hide));
+        .map(|r| filter_report_with_mood(r.normalize(), &hide, db))
+        .transpose()?;
     Ok(TasteState {
         key: stored_status(db)?,
         snapshot: snapshot_of(&films, Some(&profile)),
         report,
         feedback,
+        observation: crate::taste::feedback::observation_summary(db).unwrap_or_default(),
     })
 }
 
@@ -634,6 +648,37 @@ fn filter_report(mut report: TasteReport, hide: &std::collections::HashSet<i64>)
         .chain(report.watchlist_picks.iter().cloned())
         .collect();
     report
+}
+
+fn filter_report_with_mood(
+    mut report: TasteReport,
+    hide: &std::collections::HashSet<i64>,
+    db: &Database,
+) -> Result<TasteReport, String> {
+    report = filter_report(report, hide);
+    let keep = |pick: &TastePick| {
+        pick
+            .attribution
+            .as_ref()
+            .map(|attribution| {
+                !crate::taste::feedback::mood_signature_is_suppressed(
+                    db,
+                    &attribution.mood_signature,
+                )
+                .unwrap_or(false)
+            })
+            .unwrap_or(true)
+    };
+    report.new_picks.retain(keep);
+    report.explore_picks.retain(keep);
+    report.watchlist_picks.retain(keep);
+    report.picks = report
+        .new_picks
+        .iter()
+        .cloned()
+        .chain(report.watchlist_picks.iter().cloned())
+        .collect();
+    Ok(report)
 }
 
 pub fn analyze(
@@ -685,7 +730,9 @@ pub fn analyze_with_run_log(
     })?;
     let seeds_refreshed =
         retrieve::enrich_eligible_seeds(db, &mut films, 40, force_refresh);
-    let profile = feature_profile_from_films(&films);
+    let mut profile = feature_profile_from_films(&films);
+    let feedback_adjustments = crate::taste::feedback::active_feedback_adjustments(db)?;
+    crate::taste::feedback::apply_feedback_adjustments(&mut profile, &feedback_adjustments);
     let seen = seen_keys(&films);
     progress(JobProgress {
         job: "taste".into(),
@@ -711,11 +758,12 @@ pub fn analyze_with_run_log(
     });
     let (semantic_scores, semantic_stats) =
         semantic::score_candidates(db, &key, &films, &candidates);
-    let pool = crate::taste::score::score_pool_with_semantic(
+    let mut pool = crate::taste::score::score_pool_with_semantic(
         &profile,
         &candidates,
         &semantic_scores,
     );
+    crate::taste::feedback::filter_mood_suppressed_candidates(db, &mut pool.ranked)?;
     let replay = if cfg!(debug_assertions) && std::env::var_os("STUDIO_TASTE_REPLAY").is_some() {
         Some(match eval::run_replay(db, &key, &films, 20) {
             Ok(report) => report,
@@ -854,12 +902,14 @@ pub fn analyze_with_run_log(
         total: 6,
         ..Default::default()
     });
+    let report_run_id = Uuid::new_v4().to_string();
     let display_ws = crate::taste::cache::workspace_from_pool(
         db,
         &validated.workspace.pre_feedback_pool,
     )?;
     let new_picks = to_taste_picks(
         db,
+        &report_run_id,
         &reasoner.picks,
         &display_ws.new_picks,
         &critic,
@@ -867,6 +917,7 @@ pub fn analyze_with_run_log(
     )?;
     let watch_picks = to_taste_picks(
         db,
+        &report_run_id,
         &reasoner.picks,
         &display_ws.watchlist_picks,
         &critic,
@@ -874,6 +925,7 @@ pub fn analyze_with_run_log(
     )?;
     let explore_picks = to_taste_picks(
         db,
+        &report_run_id,
         &reasoner.picks,
         &display_ws.explore_picks,
         &critic,
@@ -957,6 +1009,7 @@ pub fn analyze_with_run_log(
             narrative: narrative.clone(),
         },
     );
+    let diagnostics = crate::taste::diagnostics::derive(&films, &profile);
     let report = TasteReport {
         title: narrative.title,
         summary: narrative.summary,
@@ -973,6 +1026,8 @@ pub fn analyze_with_run_log(
         web_used: used_web,
         note,
         run_log_path,
+        run_id: report_run_id,
+        diagnostics,
     };
     db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
     Ok(report)
@@ -987,10 +1042,14 @@ fn finish_from_snapshot(
     note: Option<String>,
 ) -> Result<TasteReport, String> {
     let ws = crate::taste::cache::workspace_from_pool(db, &snap.scored_pool)?;
+    let report_run_id = Uuid::new_v4().to_string();
+    let mut films = load_films(db)?;
+    attach_signals(&mut films);
+    let diagnostics = crate::taste::diagnostics::derive(&films, &feature_profile_from_films(&films));
     let empty_critic = empty_critic();
-    let new_picks = to_taste_picks(db, &[], &ws.new_picks, &empty_critic, &[])?;
-    let explore_picks = to_taste_picks(db, &[], &ws.explore_picks, &empty_critic, &[])?;
-    let watch_picks = to_taste_picks(db, &[], &ws.watchlist_picks, &empty_critic, &[])?;
+    let new_picks = to_taste_picks(db, &report_run_id, &[], &ws.new_picks, &empty_critic, &[])?;
+    let explore_picks = to_taste_picks(db, &report_run_id, &[], &ws.explore_picks, &empty_critic, &[])?;
+    let watch_picks = to_taste_picks(db, &report_run_id, &[], &ws.watchlist_picks, &empty_critic, &[])?;
     let new_list = new_picks.0;
     let explore_list = explore_picks.0;
     let watch_list = watch_picks.0;
@@ -1010,6 +1069,8 @@ fn finish_from_snapshot(
         web_used: web,
         note,
         run_log_path: None,
+        run_id: report_run_id,
+        diagnostics,
     };
     db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
     Ok(report)
@@ -1043,6 +1104,7 @@ fn run_reasoner(key: &str, model: &str, payload: &Value) -> Result<reason::Reaso
 
 fn to_taste_picks(
     db: &Database,
+    run_id: &str,
     reasoner_picks: &[ReasonerPick],
     validated: &[ScoredCandidate],
     critic: &CriticReport,
@@ -1129,6 +1191,45 @@ fn to_taste_picks(
             crate::taste::score::filter_close_to_evidence(&scored.evidence, &allow)
         };
         let evidence_items = evidence_items_for(&scored.candidate.sources, &evidence, &films);
+        let attribution = scored.candidate.tmdb_id.map(|tmdb_id| {
+            let cited_positive = scored
+                .matched_features
+                .iter()
+                .filter(|feature| feature.cited && feature.recommendation_mean > 0.0)
+                .cloned()
+                .collect();
+            let cited_negative = scored
+                .hidden_features
+                .iter()
+                .filter(|feature| {
+                    scored
+                        .negative_features
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&feature.name))
+                })
+                .cloned()
+                .collect();
+            crate::taste::feedback::record_exposure(
+                db,
+                crate::taste::feedback::TasteAttribution {
+                    exposure_id: Uuid::new_v4().to_string(),
+                    run_id: run_id.into(),
+                    tmdb_id,
+                    title: scored.candidate.title.clone(),
+                    evidence_grade: format!("{:?}", scored.eligibility.evidence_grade).to_ascii_lowercase(),
+                    cited_positive,
+                    cited_negative,
+                    seed_films: scored.evidence.clone(),
+                    semantic_fit: scored.score.semantic_fit,
+                    diversity_adjustment: 0.0,
+                    retrieval_source: retrieval_kind.clone(),
+                    ranking_rationale: scored.display_reasons.clone(),
+                    mood_signature: crate::taste::feedback::mood_signature_for_candidate(scored),
+                    prior_candidate_exposures: 0,
+                    prior_feature_exposures: Vec::new(),
+                },
+            )
+        }).transpose()?;
         out.push(TastePick {
             title: scored.candidate.title.clone(),
             year: scored.candidate.year,
@@ -1161,6 +1262,7 @@ fn to_taste_picks(
             thin_evidence: crate::taste::confidence::thin_evidence(scored),
             semantic_fit: scored.score.semantic_fit,
             semantic_coverage: scored.score.semantic_coverage,
+            attribution,
         });
     }
     Ok((out, traces))

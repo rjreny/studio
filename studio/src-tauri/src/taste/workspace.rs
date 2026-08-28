@@ -272,6 +272,7 @@ mod tests {
         affinity: f32,
     ) -> MatchedFeatureView {
         MatchedFeatureView {
+            feature_key: String::new(),
             name: name.into(),
             family: family.into(),
             appearances,

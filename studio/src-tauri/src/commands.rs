@@ -887,10 +887,23 @@ pub fn taste_feedback_set(
     tmdb_id: i64,
     action: String,
     reason: Option<String>,
+    exposure_id: Option<String>,
+    target_feature_key: Option<String>,
+    mood_scope: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<crate::taste::feedback::TasteFeedback, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    crate::taste::feedback::set_feedback(&db, tmdb_id, &action, reason)
+    crate::taste::feedback::set_feedback_with_exposure(
+        &db,
+        crate::taste::feedback::TasteFeedbackRequest {
+            tmdb_id,
+            action,
+            reason,
+            exposure_id,
+            target_feature_key,
+            mood_scope,
+        },
+    )
 }
 
 #[tauri::command]

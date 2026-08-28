@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchedFeatureView {
+    #[serde(default)]
+    pub feature_key: String,
     pub name: String,
     pub family: String,
     pub appearances: u32,
@@ -21,6 +23,7 @@ pub struct MatchedFeatureView {
 impl MatchedFeatureView {
     pub fn from_affinity(aff: &FeatureAffinity, cited: bool) -> Self {
         Self {
+            feature_key: aff.key.storage_key(),
             name: aff.key.name.clone(),
             family: family_label(aff.key.family).into(),
             appearances: aff.appearances,
@@ -664,6 +667,7 @@ mod tests {
     #[test]
     fn generated_why_cannot_mention_hidden_or_genre_features() {
         let hidden = vec![MatchedFeatureView {
+            feature_key: String::new(),
             name: "mystery".into(),
             family: "genre".into(),
             appearances: 22,

@@ -436,6 +436,7 @@ mod tests {
 
     fn feat(family: &str, appearances: u32, affinity: f32) -> MatchedFeatureView {
         MatchedFeatureView {
+            feature_key: String::new(),
             name: format!("{family}-{appearances}"),
             family: family.into(),
             appearances,
@@ -450,6 +451,7 @@ mod tests {
 
     fn neo_noir() -> MatchedFeatureView {
         MatchedFeatureView {
+            feature_key: String::new(),
             name: "neo-noir".into(),
             family: "keyword".into(),
             appearances: 7,

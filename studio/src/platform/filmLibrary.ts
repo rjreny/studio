@@ -205,9 +205,21 @@ export async function tasteAnalyze(forceRefresh = false): Promise<void> {
 export async function tasteFeedbackSet(
   tmdbId: number,
   action: "interested" | "rejected" | "seen",
-  reason?: string | null,
+  options: {
+    reason?: string | null;
+    exposureId?: string | null;
+    targetFeatureKey?: string | null;
+    moodScope?: "this_movie_only" | "this_kind_right_now" | null;
+  },
 ): Promise<TasteFeedback> {
-  const feedback = await invoke<TasteFeedback>("taste_feedback_set", { tmdbId, action, reason: reason ?? null });
+  const feedback = await invoke<TasteFeedback>("taste_feedback_set", {
+    tmdbId,
+    action,
+    reason: options.reason ?? null,
+    exposureId: options.exposureId ?? null,
+    targetFeatureKey: options.targetFeatureKey ?? null,
+    moodScope: options.moodScope ?? null,
+  });
   invalidateTasteCache();
   return feedback;
 }

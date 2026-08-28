@@ -180,6 +180,7 @@ mod tests {
             scoring_reasons: vec![],
             matched_features: vec![
                 crate::taste::explain::MatchedFeatureView {
+                    feature_key: String::new(),
                     name: director.into(),
                     family: "director".into(),
                     appearances: 8,
@@ -191,6 +192,7 @@ mod tests {
                     cited: true,
                 },
                 crate::taste::explain::MatchedFeatureView {
+                    feature_key: String::new(),
                     name: "neo-noir".into(),
                     family: "keyword".into(),
                     appearances: 7,
@@ -298,6 +300,7 @@ mod tests {
         c.positive_features = vec!["Christopher Nolan".into(), "Wally Pfister".into()];
         c.matched_features = vec![
             crate::taste::explain::MatchedFeatureView {
+                feature_key: String::new(),
                 name: "Christopher Nolan".into(),
                 family: "director".into(),
                 appearances: 4,
@@ -309,6 +312,7 @@ mod tests {
                 cited: true,
             },
             crate::taste::explain::MatchedFeatureView {
+                feature_key: String::new(),
                 name: "Wally Pfister".into(),
                 family: "cinematographer".into(),
                 appearances: 3,

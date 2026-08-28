@@ -54,6 +54,11 @@ function likedIds(feedback: TasteFeedback[] | undefined) {
 
 type TasteSort = "match" | "title" | "year";
 type TasteFilter = "all" | "50" | "60" | "70";
+type TasteFeedbackOptions = {
+  reason?: "already_seen_disliked" | "not_this_kind" | "wrong_connection" | "not_in_the_mood";
+  targetFeatureKey?: string;
+  moodScope?: "this_movie_only" | "this_kind_right_now";
+};
 
 const TASTE_SORTS: { id: TasteSort; label: string }[] = [
   { id: "match", label: "Highest match" },
@@ -201,10 +206,18 @@ export function RecsView({
     }
   }
 
-  async function sendFeedback(pick: TastePick, action: "interested" | "rejected" | "seen") {
+  async function sendFeedback(
+    pick: TastePick,
+    action: "interested" | "rejected" | "seen",
+    options: TasteFeedbackOptions = {},
+  ) {
     const id = pick.tmdbId;
     if (!id) {
       setError("This title is missing a TMDB id, so feedback cannot be saved.");
+      return;
+    }
+    if (!pick.attribution?.exposureId) {
+      setError("This recommendation was created before attribution was available. Refresh Taste, then try again.");
       return;
     }
     const key = pickKey(pick);
@@ -216,7 +229,10 @@ export function RecsView({
       setHidden(new Set(prevHidden).add(key));
     }
     try {
-      await tasteFeedbackSet(id, action);
+      await tasteFeedbackSet(id, action, {
+        ...options,
+        exposureId: pick.attribution.exposureId,
+      });
       const next = await tasteGet();
       setState(next);
       setInterested(likedIds(next.feedback));
@@ -330,7 +346,7 @@ export function RecsView({
         </p>
       ) : null}
 
-      {report ? <TasteProfileFooter report={report} /> : null}
+      {report ? <TasteProfileFooter report={report} observation={state?.observation} /> : null}
     </div>
   );
 }
@@ -346,7 +362,7 @@ function TasteLists({
   hidden: Set<string>;
   interested: Set<number>;
   onSelectFilm: (id: string) => void;
-  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen") => void;
+  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen", options?: TasteFeedbackOptions) => void;
 }) {
   const { neu, watch } = sectionPicks(report);
   const visibleNew = neu.filter((p) => !hidden.has(pickKey(p)));
@@ -434,16 +450,40 @@ function TasteLists({
   );
 }
 
-function TasteProfileFooter({ report }: { report: NonNullable<TasteState["report"]> }) {
+function TasteProfileFooter({
+  report,
+  observation,
+}: {
+  report: NonNullable<TasteState["report"]>;
+  observation?: TasteState["observation"];
+}) {
   const summary = report.summary || report.note;
   const affinities = report.affinities.slice(0, 2).map((item) => item.label);
-  if (!summary && !affinities.length) return null;
+  const exceptions = report.diagnostics?.exceptions ?? [];
+  if (!summary && !affinities.length && !exceptions.length) return null;
   return (
     <footer className="taste-profile-footer" aria-label="Taste profile">
       <span className="taste-profile-label">Taste profile</span>
-      {summary ? <p>{summary}</p> : null}
-      {affinities.length ? <span className="taste-profile-affinities">{affinities.join(" · ")}</span> : null}
-    </footer>
+        {summary ? <p>{summary}</p> : null}
+        {affinities.length ? <span className="taste-profile-affinities">{affinities.join(" · ")}</span> : null}
+        {exceptions.length ? (
+          <div className="taste-diagnostics">
+            <strong>Exceptions worth checking</strong>
+            <ul>
+              {exceptions.slice(0, 8).map((exception) => (
+                <li key={`${exception.title}:${exception.tmdbId ?? ""}`}>
+                  {exception.title} · {exception.residual > 0 ? "more positive" : "more negative"} than its {exception.matchingFeatures.slice(0, 3).join(", ")} evidence predicted
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {observation ? (
+          <span className="taste-observation">
+            Observation gate: {observation.feedbackEvents}/100 feedback · {observation.laterOutcomes}/30 outcomes · {observation.feedbackReasons}/3 reasons
+          </span>
+        ) : null}
+      </footer>
   );
 }
 
@@ -456,9 +496,17 @@ function TastePickCard({
   pick: TastePick;
   interested: boolean;
   onSelectFilm: (id: string) => void;
-  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen") => void;
+  onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen", options?: TasteFeedbackOptions) => void;
 }) {
   const id = pickId(pick);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const citedBridges = (pick.attribution?.citedPositive ?? pick.matchedFeatures ?? [])
+    .filter((feature) => feature.citeable && feature.cited && feature.featureKey)
+    .slice(0, 4);
+  const moodSignatureCount = new Set([
+    ...(pick.attribution?.moodSignature.modes ?? []).map((mode) => `mode:${mode.toLowerCase()}`),
+    ...(pick.attribution?.moodSignature.thematicKeywords ?? []).map((keyword) => `keyword:${keyword.toLowerCase()}`),
+  ]).size;
   const evidenceItems = (pick.evidenceItems ?? [])
     .flatMap((item) => {
       const evidenceId = item.filmId || (item.tmdbId != null ? `tmdb:${item.tmdbId}` : null);
@@ -513,6 +561,7 @@ function TastePickCard({
             ))}
           </div>
         ) : null}
+        {pick.attribution ? <TasteAttributionPanel pick={pick} /> : null}
         <div className="taste-fb" role="group" aria-label={`Feedback for ${pick.title}`}>
           <button
             type="button"
@@ -533,9 +582,10 @@ function TastePickCard({
           <button
             type="button"
             className="taste-fb-reject"
-            aria-label="Not for me"
-            title="Not for me"
-            onClick={() => onFeedback(pick, "rejected")}
+            aria-label="Give recommendation feedback"
+            title="Tell Taste why this missed"
+            aria-expanded={feedbackOpen}
+            onClick={() => setFeedbackOpen((open) => !open)}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="m7 7 10 10M17 7 7 17" />
@@ -555,8 +605,98 @@ function TastePickCard({
             <span>Seen</span>
           </button>
         </div>
+        {feedbackOpen ? (
+          <div className="taste-feedback-sheet" aria-label={`Why ${pick.title} missed`}>
+            <strong>What missed?</strong>
+            {citedBridges.length ? (
+              <div className="taste-feedback-bridges">
+                {citedBridges.map((feature) => (
+                  <div key={feature.featureKey}>
+                    <span>{feature.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFeedbackOpen(false);
+                        onFeedback(pick, "rejected", { reason: "wrong_connection", targetFeatureKey: feature.featureKey });
+                      }}
+                    >
+                      Wrong connection
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFeedbackOpen(false);
+                        onFeedback(pick, "rejected", { reason: "not_this_kind", targetFeatureKey: feature.featureKey });
+                      }}
+                    >
+                      Not this kind
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="taste-feedback-options">
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackOpen(false);
+                  onFeedback(pick, "rejected", { reason: "already_seen_disliked" });
+                }}
+              >
+                Already seen and disliked
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackOpen(false);
+                  onFeedback(pick, "rejected", { reason: "not_in_the_mood", moodScope: "this_movie_only" });
+                }}
+              >
+                Not in the mood — just this movie
+              </button>
+              <button
+                type="button"
+                disabled={moodSignatureCount < 2}
+                title={moodSignatureCount < 2 ? "This card has too little verified mood evidence, so Taste will only hide this movie." : undefined}
+                onClick={() => {
+                  setFeedbackOpen(false);
+                  onFeedback(pick, "rejected", { reason: "not_in_the_mood", moodScope: "this_kind_right_now" });
+                }}
+              >
+                Not in the mood — this kind right now
+              </button>
+            </div>
+          </div>
+        ) : null}
       </article>
     </li>
+  );
+}
+
+function TasteAttributionPanel({ pick }: { pick: TastePick }) {
+  const attribution = pick.attribution;
+  if (!attribution) return null;
+  const evidence = attribution.citedPositive.slice(0, 4);
+  return (
+    <details className="taste-attribution">
+      <summary>Why it ranked here</summary>
+      <div>
+        <p>
+          <strong>{attribution.evidenceGrade}</strong> evidence · semantic fit {Math.round(attribution.semanticFit * 100)}%
+        </p>
+        {evidence.length ? (
+          <ul>
+            {evidence.map((feature) => (
+              <li key={feature.featureKey ?? `${feature.family}:${feature.name}`}>
+                {feature.name} · {feature.appearances} films · confidence {Math.round(feature.confidence * 100)}%
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {attribution.seedFilms.length ? <p>Seeds: {attribution.seedFilms.slice(0, 3).join(" · ")}</p> : null}
+        {attribution.rankingRationale.length ? <p>{attribution.rankingRationale.slice(0, 2).join(" · ")}</p> : null}
+      </div>
+    </details>
   );
 }
 

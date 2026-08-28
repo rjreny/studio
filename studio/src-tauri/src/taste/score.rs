@@ -476,16 +476,36 @@ pub fn compute_evidence_grade_with_semantic(
     semantic: &SemanticScore,
 ) -> EvidenceGrade {
     let deterministic = compute_legacy_evidence_grade(candidate, cited, movie_fit);
-    if deterministic.displayable() {
+    let grade = if deterministic.displayable() {
         // Semantic fit is an additional ranking signal. A neutral embedding
         // margin must not erase evidence already proven by recommendation
         // neighbors, candidate metadata, or a portable creator bridge.
-        return deterministic;
+        deterministic
+    } else if semantic.coverage {
+        compute_semantic_evidence_grade(candidate, cited, movie_fit, semantic.fit)
+    } else {
+        deterministic
+    };
+    confidence_ceiling(grade, cited)
+}
+
+/// Evidence grades remain eligibility decisions. This ceiling only downgrades a
+/// Strong result when none of its already-cited bridges has stable support.
+fn confidence_ceiling(grade: EvidenceGrade, cited: &[&FeatureAffinity]) -> EvidenceGrade {
+    if grade != EvidenceGrade::Strong {
+        return grade;
     }
-    if semantic.coverage {
-        return compute_semantic_evidence_grade(candidate, cited, movie_fit, semantic.fit);
+    let qualified = cited.iter().any(|affinity| {
+        affinity.citeable()
+            && affinity.appearances >= 3
+            && affinity.confidence >= 0.50
+            && !affinity.polarizing()
+    });
+    if qualified {
+        EvidenceGrade::Strong
+    } else {
+        EvidenceGrade::Medium
     }
-    deterministic
 }
 
 fn compute_legacy_evidence_grade(
@@ -4896,7 +4916,7 @@ mod tests {
     }
 
     #[test]
-    fn neutral_semantic_fit_does_not_erase_deterministic_evidence() {
+    fn neutral_semantic_fit_keeps_displayable_evidence_but_respects_ceiling() {
         let profile = noir_profile();
         let scored = score_candidate_with_semantic(
             &profile,
@@ -4916,7 +4936,7 @@ mod tests {
             ),
             &covered_semantic_fit(0.52),
         );
-        assert_eq!(scored.eligibility.evidence_grade, EvidenceGrade::Strong);
+        assert_eq!(scored.eligibility.evidence_grade, EvidenceGrade::Medium);
         assert!(!scored.contextual_only);
         assert!(scored.eligibility.passed);
     }
@@ -4976,7 +4996,7 @@ mod tests {
     }
 
     #[test]
-    fn two_loved_recs_with_keyword_fit_are_strong() {
+    fn two_loved_recs_with_two_film_keyword_fit_are_capped_to_medium() {
         let profile = noir_profile();
         let kw = Keyword {
             id: Some(99),
@@ -4996,7 +5016,7 @@ mod tests {
                 ],
             ),
         );
-        assert_eq!(scored.eligibility.evidence_grade, EvidenceGrade::Strong);
+        assert_eq!(scored.eligibility.evidence_grade, EvidenceGrade::Medium);
         assert!(!scored.contextual_only);
         assert!(scored.eligibility.passed);
     }

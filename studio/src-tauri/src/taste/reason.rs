@@ -1128,6 +1128,7 @@ mod tests {
             confidence: 0.9,
             feature_strength: rec.abs(),
             portability: 1.0,
+            feedback_adjustment: 0.0,
             positive_evidence: vec![],
             negative_evidence: vec![],
             evidence_cluster: Default::default(),
@@ -1186,6 +1187,7 @@ mod tests {
             confidence: 0.9,
             feature_strength: rec.abs(),
             portability: 1.0,
+            feedback_adjustment: 0.0,
             positive_evidence: vec![EvidenceFilm {
                 title: film.into(),
                 rating: 5.0,

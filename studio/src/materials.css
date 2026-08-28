@@ -1551,6 +1551,113 @@ html[data-theme="light"] .ghost {
   stroke-width: 1.8;
 }
 
+.taste-attribution {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  max-width: min(360px, 58%);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.taste-attribution summary {
+  cursor: pointer;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+.taste-attribution[open] {
+  z-index: 2;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.taste-attribution p,
+.taste-attribution ul {
+  margin: 7px 0 0;
+}
+
+.taste-attribution ul {
+  padding-left: 16px;
+}
+
+.taste-feedback-sheet {
+  position: absolute;
+  z-index: 3;
+  left: calc(var(--taste-poster-w) + var(--taste-poster-gap));
+  bottom: 42px;
+  width: min(430px, calc(100% - var(--taste-poster-w) - var(--taste-poster-gap)));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgb(0 0 0 / .18);
+}
+
+.taste-feedback-sheet > strong,
+.taste-feedback-bridges > div > span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.taste-feedback-bridges,
+.taste-feedback-options {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.taste-feedback-bridges > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.taste-feedback-bridges > div > span {
+  flex-basis: 100%;
+}
+
+.taste-feedback-sheet button {
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.taste-feedback-sheet button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.taste-feedback-sheet button:disabled {
+  cursor: not-allowed;
+  opacity: .52;
+}
+
+.taste-diagnostics {
+  margin-top: 12px;
+}
+
+.taste-diagnostics ul {
+  margin: 6px 0 0;
+  padding-left: 17px;
+}
+
+.taste-observation {
+  display: block;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .recs .shelf-head {
   display: flex;
   justify-content: space-between;

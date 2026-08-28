@@ -516,6 +516,7 @@ mod tests {
             scoring_reasons: vec![],
             matched_features: vec![
                 MatchedFeatureView {
+                    feature_key: String::new(),
                     name: "Nolan".into(),
                     family: "director".into(),
                     appearances: 8,
@@ -527,6 +528,7 @@ mod tests {
                     cited: true,
                 },
                 MatchedFeatureView {
+                    feature_key: String::new(),
                     name: "neo-noir".into(),
                     family: "keyword".into(),
                     appearances: 7,

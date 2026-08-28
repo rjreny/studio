@@ -151,6 +151,51 @@ impl Database {
         if version < 9 {
             self.reconcile_duplicate_history()?;
         }
+        if version < 10 {
+            let _ = self.conn.execute(
+                "ALTER TABLE taste_feedback ADD COLUMN suppressed_until TEXT",
+                [],
+            );
+            self.conn
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS taste_recommendation_exposures (
+                      id TEXT PRIMARY KEY,
+                      run_id TEXT NOT NULL,
+                      tmdb_id INTEGER NOT NULL,
+                      title TEXT NOT NULL,
+                      snapshot_json TEXT NOT NULL,
+                      prior_candidate_exposures INTEGER NOT NULL DEFAULT 0,
+                      created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS taste_exposure_features (
+                      exposure_id TEXT NOT NULL REFERENCES taste_recommendation_exposures(id),
+                      feature_key TEXT NOT NULL,
+                      PRIMARY KEY (exposure_id, feature_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS taste_feedback_events (
+                      id TEXT PRIMARY KEY,
+                      exposure_id TEXT NOT NULL REFERENCES taste_recommendation_exposures(id),
+                      tmdb_id INTEGER NOT NULL,
+                      action TEXT NOT NULL,
+                      reason TEXT,
+                      target_feature_key TEXT,
+                      mood_scope TEXT,
+                      mood_fallback INTEGER NOT NULL DEFAULT 0,
+                      requested_adjustments_json TEXT NOT NULL DEFAULT '[]',
+                      applied_adjustments_json TEXT NOT NULL DEFAULT '[]',
+                      feature_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                      feedback_signal_version TEXT NOT NULL,
+                      expires_at TEXT,
+                      created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_taste_exposures_tmdb ON taste_recommendation_exposures(tmdb_id);
+                    CREATE INDEX IF NOT EXISTS idx_taste_exposure_features_key ON taste_exposure_features(feature_key);
+                    CREATE INDEX IF NOT EXISTS idx_taste_feedback_events_exposure ON taste_feedback_events(exposure_id);
+                    "#,
+                )
+                .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -504,6 +549,9 @@ impl Database {
                 r#"
                 DELETE FROM taste_run_snapshot;
                 DELETE FROM taste_embeddings;
+                DELETE FROM taste_feedback_events;
+                DELETE FROM taste_exposure_features;
+                DELETE FROM taste_recommendation_exposures;
                 DELETE FROM taste_feedback;
                 DELETE FROM person_credits;
                 DELETE FROM friend_activity;
@@ -613,7 +661,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("9".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("10".into()));
     }
 
     #[test]
@@ -680,9 +728,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v9_has_feedback_snapshot_and_embedding_tables() {
+    fn schema_v10_has_feedback_snapshot_embedding_and_observation_tables() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("9".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("10".into()));
         let feedback: i64 = db
             .conn()
             .query_row(
@@ -707,9 +755,27 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let exposures: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'taste_recommendation_exposures'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let events: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'taste_feedback_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(feedback, 1);
         assert_eq!(snap, 1);
         assert_eq!(embeddings, 1);
+        assert_eq!(exposures, 1);
+        assert_eq!(events, 1);
         db.reset_all_data().unwrap();
         let leftover: i64 = db
             .conn()

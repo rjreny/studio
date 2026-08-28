@@ -205,15 +205,48 @@ export type TasteDimension = {
 };
 
 export type TasteMatchedFeature = {
+  featureKey?: string;
   name: string;
   family: string;
   appearances: number;
   recommendationMean: number;
   scoringAffinity: number;
+  positiveWeight?: number;
+  negativeWeight?: number;
+  feedbackAdjustment?: number;
+  polarizing?: boolean;
   confidence: number;
   portability: number;
   citeable: boolean;
   cited: boolean;
+};
+
+export type TasteMoodSignature = {
+  modes: string[];
+  thematicKeywords: string[];
+};
+
+export type TasteFeatureExposureCount = {
+  featureKey: string;
+  exposures: number;
+};
+
+export type TasteAttribution = {
+  exposureId: string;
+  runId: string;
+  tmdbId: number;
+  title: string;
+  evidenceGrade: "none" | "medium" | "strong" | string;
+  citedPositive: TasteMatchedFeature[];
+  citedNegative: TasteMatchedFeature[];
+  seedFilms: string[];
+  semanticFit: number;
+  diversityAdjustment: number;
+  retrievalSource: string;
+  rankingRationale: string[];
+  moodSignature: TasteMoodSignature;
+  priorCandidateExposures: number;
+  priorFeatureExposures: TasteFeatureExposureCount[];
 };
 
 export type TasteEligibility = {
@@ -255,6 +288,7 @@ export type TastePick = {
   thinEvidence?: boolean;
   semanticFit?: number;
   semanticCoverage?: boolean;
+  attribution?: TasteAttribution | null;
 };
 
 export type TasteFeedback = {
@@ -263,8 +297,52 @@ export type TasteFeedback = {
   mediaKind: string;
   action: "interested" | "rejected" | "seen" | string;
   reason?: string | null;
+  suppressedUntil?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type TasteException = {
+  title: string;
+  tmdbId?: number | null;
+  rating: number;
+  observedPreference: number;
+  expectedPreference: number;
+  residual: number;
+  matchingFeatures: string[];
+  evidenceDomains: string[];
+  supportingFilms: string[];
+  opposingFilms: string[];
+};
+
+export type TasteEvidenceCombination = {
+  firstFeature: string;
+  secondFeature: string;
+  firstFamily: string;
+  secondFamily: string;
+  supportingFilms: string[];
+};
+
+export type TasteDiagnostics = {
+  exceptions: TasteException[];
+  evidenceCombinations: TasteEvidenceCombination[];
+};
+
+export type TasteFeatureExposureMetric = {
+  featureKey: string;
+  exposures: number;
+  feedbackEvents: number;
+};
+
+export type TasteObservationSummary = {
+  feedbackEvents: number;
+  laterOutcomes: number;
+  feedbackReasons: number;
+  exposureCount: number;
+  moodSignatureEligible: number;
+  moodFallbacks: number;
+  phaseTwoUnlocked: boolean;
+  featureExposure: TasteFeatureExposureMetric[];
 };
 
 export type TasteStat = {
@@ -301,6 +379,8 @@ export type TasteReport = {
   webUsed?: boolean;
   note?: string | null;
   runLogPath?: string | null;
+  runId?: string;
+  diagnostics?: TasteDiagnostics;
 };
 
 export type TasteState = {
@@ -308,4 +388,5 @@ export type TasteState = {
   snapshot: TasteSnapshot;
   report: TasteReport | null;
   feedback?: TasteFeedback[];
+  observation?: TasteObservationSummary;
 };

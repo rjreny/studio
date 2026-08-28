@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -158,9 +158,47 @@ CREATE TABLE IF NOT EXISTS taste_feedback (
   media_kind TEXT NOT NULL DEFAULT 'movie',
   action TEXT NOT NULL,
   reason TEXT,
+  suppressed_until TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS taste_recommendation_exposures (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tmdb_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  prior_candidate_exposures INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS taste_exposure_features (
+  exposure_id TEXT NOT NULL REFERENCES taste_recommendation_exposures(id),
+  feature_key TEXT NOT NULL,
+  PRIMARY KEY (exposure_id, feature_key)
+);
+
+CREATE TABLE IF NOT EXISTS taste_feedback_events (
+  id TEXT PRIMARY KEY,
+  exposure_id TEXT NOT NULL REFERENCES taste_recommendation_exposures(id),
+  tmdb_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  reason TEXT,
+  target_feature_key TEXT,
+  mood_scope TEXT,
+  mood_fallback INTEGER NOT NULL DEFAULT 0,
+  requested_adjustments_json TEXT NOT NULL DEFAULT '[]',
+  applied_adjustments_json TEXT NOT NULL DEFAULT '[]',
+  feature_snapshot_json TEXT NOT NULL DEFAULT '{}',
+  feedback_signal_version TEXT NOT NULL,
+  expires_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_exposures_tmdb ON taste_recommendation_exposures(tmdb_id);
+CREATE INDEX IF NOT EXISTS idx_taste_exposure_features_key ON taste_exposure_features(feature_key);
+CREATE INDEX IF NOT EXISTS idx_taste_feedback_events_exposure ON taste_feedback_events(exposure_id);
 
 CREATE TABLE IF NOT EXISTS taste_run_snapshot (
   id INTEGER PRIMARY KEY CHECK (id = 1),

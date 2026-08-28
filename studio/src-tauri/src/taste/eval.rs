@@ -1027,6 +1027,7 @@ mod tests {
 
         fn feat(name: &str, family: &str, n: u32, aff: f32) -> MatchedFeatureView {
             MatchedFeatureView {
+                feature_key: String::new(),
                 name: name.into(),
                 family: family.into(),
                 appearances: n,

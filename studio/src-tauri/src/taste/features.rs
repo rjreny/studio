@@ -410,6 +410,7 @@ pub fn repeated_execution_signals(reviews: &[&str]) -> Vec<String> {
         .filter(|(_, phrases)| {
             reviews
                 .iter()
+                .filter(|review| substantive_review(review))
                 .filter(|review| review_mentions_any(review, phrases))
                 .count()
                 >= 2
@@ -422,6 +423,9 @@ pub fn repeated_execution_signals(reviews: &[&str]) -> Vec<String> {
 /// The returned names are deliberately human-readable because they can appear
 /// in explanations and profile exports.
 pub fn execution_keywords_for_review(review: &str, accepted: &[String]) -> Vec<Keyword> {
+    if !substantive_review(review) {
+        return Vec::new();
+    }
     EXECUTION_LEXICON
         .iter()
         .filter(|(label, phrases)| {
@@ -433,6 +437,15 @@ pub fn execution_keywords_for_review(review: &str, accepted: &[String]) -> Vec<K
             name: (*label).to_string(),
         })
         .collect()
+}
+
+/// Personal reviews are optional supplementary evidence. A one-liner or joke
+/// cannot infer an aspect preference even if it happens to contain a keyword.
+pub fn substantive_review(review: &str) -> bool {
+    review.split_whitespace().count() >= 25
+        && EXECUTION_LEXICON
+            .iter()
+            .any(|(_, phrases)| review_mentions_any(review, phrases))
 }
 
 /// Polarity for the small, repeated review lexicon. These labels are only
@@ -623,6 +636,10 @@ pub struct FeatureAffinity {
     pub confidence: f32,
     pub feature_strength: f32,
     pub portability: f32,
+    /// Bounded, event-sourced feedback applied only to the content-score term.
+    /// It never changes citeability, evidence grades, retrieval, or embeddings.
+    #[serde(default)]
+    pub feedback_adjustment: f32,
     pub positive_evidence: Vec<EvidenceFilm>,
     pub negative_evidence: Vec<EvidenceFilm>,
     #[serde(default)]
@@ -631,7 +648,7 @@ pub struct FeatureAffinity {
 
 impl FeatureAffinity {
     pub fn scoring_affinity(&self) -> f32 {
-        self.recommendation_mean
+        (self.recommendation_mean + self.feedback_adjustment)
             * self.confidence
             * self.key.family.weight()
             * self.portability
@@ -807,6 +824,7 @@ pub fn build_profile(obs: &[FeatureObservation]) -> FeatureProfile {
             confidence,
             feature_strength: recommendation_mean.abs(),
             portability,
+            feedback_adjustment: 0.0,
             positive_evidence,
             negative_evidence,
             evidence_cluster,
@@ -1360,8 +1378,8 @@ mod tests {
         assert!(repeated_execution_signals(&one).is_empty());
 
         let repeated = [
-            "The acting was great and the pacing was tight.",
-            "Great acting with tight pacing throughout.",
+            "The acting was great and the pacing was tight throughout the entire film, with every scene feeling purposeful, energetic, and carefully shaped instead of rushed or repetitive.",
+            "Great acting with tight pacing throughout, and the performances kept each emotional turn clear while the film moved confidently through its story without losing the smaller details.",
         ];
         let signals = repeated_execution_signals(&repeated);
         assert!(signals.iter().any(|s| s == "strong performances"));

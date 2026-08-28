@@ -220,6 +220,7 @@ mod tests {
         }];
         craft.matched_features = vec![
             crate::taste::explain::MatchedFeatureView {
+                feature_key: String::new(),
                 name: "Greig Fraser".into(),
                 family: "cinematographer".into(),
                 appearances: 4,
@@ -231,6 +232,7 @@ mod tests {
                 cited: true,
             },
             crate::taste::explain::MatchedFeatureView {
+                feature_key: String::new(),
                 name: "neo-noir".into(),
                 family: "keyword".into(),
                 appearances: 7,
@@ -261,6 +263,7 @@ mod tests {
             },
         ];
         neighbor.matched_features = vec![crate::taste::explain::MatchedFeatureView {
+            feature_key: String::new(),
             name: "John Powell".into(),
             family: "composer".into(),
             appearances: 9,
