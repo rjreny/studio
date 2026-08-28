@@ -475,7 +475,7 @@ function TastePickCard({
     <>
       <Poster name={pick.title} poster={pick.poster} large />
       <span className="taste-pick-copy">
-        <strong>{pick.title}</strong>
+        <strong title={pick.title}>{pick.title}</strong>
         <span className="taste-pick-meta muted">
           <span className={`taste-match ${matchTone(pick)}`}>{matchPercent(pick)}</span>
           {pick.year != null ? <span>{pick.year}</span> : null}

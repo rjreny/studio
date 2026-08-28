@@ -249,18 +249,27 @@ html[data-theme="light"] .glass {
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 74%, rgb(0 0 0 / .82) 88%, transparent 100%);
 }
 
+.home-cinema .hero {
+  --home-hero-bleed: 36px;
+  z-index: 0;
+  overflow: visible;
+}
+
 .home-cinema .hero-image,
 .home-cinema .hero-image-backdrop {
-  object-position: center 5%;
+  object-position: center 10%;
 }
 
 .home-cinema .hero-image-main {
+  inset-block-end: auto;
+  height: calc(100% + var(--home-hero-bleed));
   mask-image: linear-gradient(to bottom, #000 0%, #000 78%, rgb(0 0 0 / .82) 92%, transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 78%, rgb(0 0 0 / .82) 92%, transparent 100%);
 }
 
 .home-cinema .hero::after {
-  height: 60%;
+  inset-block-end: calc(-1 * var(--home-hero-bleed));
+  height: calc(60% + var(--home-hero-bleed));
 }
 
 .hero-image.is-empty {
@@ -480,6 +489,11 @@ html[data-theme="light"] .ghost {
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+.home-cinema .home-shelves {
+  position: relative;
+  z-index: 1;
 }
 
 .shelf-head {
@@ -1324,11 +1338,12 @@ html[data-theme="light"] .ghost {
 }
 
 .taste-pick-copy strong {
-  display: -webkit-box;
-  block-size: 2.4em;
+  display: block;
+  inline-size: 100%;
+  min-inline-size: 0;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text);
   font-size: 16px;
   line-height: 1.2;
