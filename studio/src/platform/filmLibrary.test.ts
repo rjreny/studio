@@ -4,7 +4,7 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { getFilm, getLibrary, invalidateDataCache, setRating } from "./filmLibrary";
+import { getFilm, getLibrary, invalidateDataCache, letterboxdFilmUrl, setRating } from "./filmLibrary";
 
 const page = {
   items: [],
@@ -52,5 +52,13 @@ describe("film library cache", () => {
     await expect(getFilm("film-1")).resolves.toBe(updated);
 
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Letterboxd handoff", () => {
+  it("uses the stable TMDB redirect and rejects invalid ids", () => {
+    expect(letterboxdFilmUrl(27205)).toBe("https://letterboxd.com/tmdb/27205/");
+    expect(letterboxdFilmUrl(0)).toBeNull();
+    expect(letterboxdFilmUrl(Number.NaN)).toBeNull();
   });
 });

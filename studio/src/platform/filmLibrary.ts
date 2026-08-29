@@ -42,6 +42,11 @@ export function invalidateTasteCache() {
   dataCache.delete("taste");
 }
 
+export function letterboxdFilmUrl(tmdbId: number): string | null {
+  if (!Number.isSafeInteger(tmdbId) || tmdbId <= 0) return null;
+  return `https://letterboxd.com/tmdb/${tmdbId}/`;
+}
+
 export async function getSession(): Promise<AppSession> {
   return cached("session", () => invoke<AppSession>("get_session"));
 }

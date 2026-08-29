@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { tasteAnalyze, tasteFeedbackSet, tasteGet } from "../../platform/filmLibrary";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { letterboxdFilmUrl, tasteAnalyze, tasteFeedbackSet, tasteGet } from "../../platform/filmLibrary";
 import type { JobProgress, TasteFeedback, TasteModelInfo, TastePick, TasteState } from "../../platform/types/film";
 import { log } from "../../platform/log";
 import { Menu } from "../ui/Menu";
@@ -237,6 +238,16 @@ export function RecsView({
       setState(next);
       setInterested(likedIds(next.feedback));
       setHidden(new Set());
+      if (action === "interested") {
+        const url = letterboxdFilmUrl(id);
+        if (!url) return;
+        try {
+          await openUrl(url);
+        } catch (err) {
+          setError("Saved in Taste, but Studio could not open Letterboxd.");
+          log("warn", "could not open Letterboxd recommendation", err);
+        }
+      }
     } catch (err) {
       setHidden(prevHidden);
       setInterested(prevLiked);
