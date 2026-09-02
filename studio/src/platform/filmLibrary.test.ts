@@ -4,7 +4,14 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { getFilm, getLibrary, invalidateDataCache, letterboxdFilmUrl, setRating } from "./filmLibrary";
+import {
+  getFilm,
+  getLibrary,
+  invalidateDataCache,
+  letterboxdFilmUrl,
+  setRating,
+  shouldNotifyEnrichCompletion,
+} from "./filmLibrary";
 
 const page = {
   items: [],
@@ -60,5 +67,27 @@ describe("Letterboxd handoff", () => {
     expect(letterboxdFilmUrl(27205)).toBe("https://letterboxd.com/tmdb/27205/");
     expect(letterboxdFilmUrl(0)).toBeNull();
     expect(letterboxdFilmUrl(Number.NaN)).toBeNull();
+  });
+});
+
+describe("enrichment completion notices", () => {
+  const unchanged = {
+    hasKey: true,
+    keyValid: true,
+    attempted: 0,
+    matched: 0,
+    posters: 0,
+    remainingUnmatched: 0,
+    remainingWithoutPoster: 0,
+    errors: 0,
+    lastError: null,
+    logPath: null,
+  };
+
+  it("stays quiet when an enrichment pass changed nothing", () => {
+    expect(shouldNotifyEnrichCompletion(unchanged)).toBe(false);
+    expect(shouldNotifyEnrichCompletion({ ...unchanged, posters: 1 })).toBe(true);
+    expect(shouldNotifyEnrichCompletion({ ...unchanged, matched: 1 })).toBe(true);
+    expect(shouldNotifyEnrichCompletion({ ...unchanged, errors: 1 })).toBe(true);
   });
 });

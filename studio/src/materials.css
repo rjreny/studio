@@ -184,15 +184,22 @@ html[data-theme="light"] .glass {
   pointer-events: auto;
 }
 
-.activity-toast {
+.toast-stack {
   position: fixed;
   right: 20px;
   bottom: 20px;
   z-index: var(--z-toast);
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 40px));
+}
+
+.activity-toast {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  width: min(360px, calc(100vw - 40px));
+  box-sizing: border-box;
+  width: 100%;
   padding: 12px 12px 12px 14px;
   border: 1px solid color-mix(in oklch, var(--border) 84%, transparent);
   border-radius: 14px;
@@ -214,6 +221,46 @@ html[data-theme="light"] .glass {
 
 .activity-toast.is-busy .activity-indicator {
   animation: activity-spin 800ms linear infinite;
+}
+
+.update-toast {
+  align-items: center;
+}
+
+.update-available-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.update-available-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.update-toast-action {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: var(--radius-pill);
+  background: var(--play-bg);
+  color: var(--play-fg);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.update-toast-action:hover {
+  filter: brightness(1.05);
 }
 
 .activity-copy {

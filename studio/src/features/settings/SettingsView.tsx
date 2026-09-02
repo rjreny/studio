@@ -126,7 +126,6 @@ export function SettingsView({
       if (next.import) setLastImport(next.import);
       if (next.enrich) {
         setLastEnrich(next.enrich);
-        onStatus(formatEnrich(next.enrich));
       }
       if (next.done && next.import) {
         onStatus(formatImport(next.import));

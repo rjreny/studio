@@ -20,12 +20,15 @@ import {
   invalidateTasteCache,
   migrateFromLegacy,
   setSelfUsername,
+  shouldNotifyEnrichCompletion,
   syncFeeds,
   tmdbEnrich,
 } from "./platform/filmLibrary";
 import type { AppSession, HomeViewModel, JobProgress, LibraryCoverage } from "./platform/types/film";
 import { log } from "./platform/log";
 import { getSetting, setSetting } from "./platform/settings";
+import { checkAppUpdate, downloadAndInstallUpdate, type UpdateProgress } from "./platform/updater";
+import { UpdateOverlay } from "./app/shell/UpdateOverlay";
 import "./styles.css";
 import "./materials.css";
 
@@ -41,6 +44,14 @@ const NAV: { id: Route; label: string }[] = [
 type DetailSelection = {
   id: string;
   source: Route;
+};
+
+const idleUpdateProgress: UpdateProgress = {
+  phase: "idle",
+  label: "Ready",
+  percent: null,
+  version: null,
+  error: null,
 };
 
 function detailBackLabel(source: Route) {
@@ -64,8 +75,13 @@ export default function App() {
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [job, setJob] = useState<JobProgress | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [availableUpdate, setAvailableUpdate] = useState<string | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress>(idleUpdateProgress);
   const launchHydrationStarted = useRef(false);
   const pendingLaunchEnrich = useRef(false);
+  const updateCheckStarted = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const scrollIdleTimer = useRef<number | undefined>(undefined);
   const detailReturnFocus = useRef<HTMLElement | null>(null);
@@ -190,11 +206,24 @@ export default function App() {
   }, [route, theme, accent, username, hydrated]);
 
   useEffect(() => {
+    if (!hydrated || import.meta.env.DEV || updateCheckStarted.current) return;
+    updateCheckStarted.current = true;
+    void checkAppUpdate().then((result) => {
+      if (result.available && result.version && result.signingConfigured) {
+        setAvailableUpdate(result.version);
+        setUpdateDismissed(false);
+      }
+    });
+  }, [hydrated]);
+
+  useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<JobProgress>("studio-job", (event) => {
       const next = event.payload;
       setJob(next.done ? null : next);
-      setStatus(next.label);
+      if (next.done && (next.job !== "enrich" || (next.enrich && shouldNotifyEnrichCompletion(next.enrich)))) {
+        setStatus(next.label);
+      }
       if (next.done) {
         if (next.job === "taste") {
           invalidateTasteCache();
@@ -234,6 +263,18 @@ export default function App() {
   }, [refresh]);
 
   const closePalette = useCallback(() => setPalette(false), []);
+
+  const installAvailableUpdate = useCallback(async () => {
+    setUpdateOpen(true);
+    setUpdateProgress({
+      phase: "checking",
+      label: "Preparing update…",
+      percent: null,
+      version: availableUpdate,
+      error: null,
+    });
+    await downloadAndInstallUpdate(setUpdateProgress);
+  }, [availableUpdate]);
 
   const closeDetail = useCallback(() => {
     setSelectedFilm(null);
@@ -370,34 +411,64 @@ export default function App() {
           </div>
         </main>
       </div>
-      {job || status ? (
-        <aside className={`activity-toast${job ? " is-busy" : ""}`} role="status" aria-live="polite" aria-atomic="true">
-          <span className="activity-indicator" aria-hidden="true" />
-          <div className="activity-copy">
-            <strong>{job?.label ?? status}</strong>
-            {job ? (
-              <>
-                {job.total > 0 || job.posters ? (
-                  <span>
-                    {job.total > 0 ? `${job.current}/${job.total}` : null}
-                    {job.posters ? ` · ${job.posters} posters` : ""}
-                  </span>
+      {job || status || (availableUpdate && !updateDismissed) ? (
+        <div className="toast-stack">
+          {job || status ? (
+            <aside className={`activity-toast${job ? " is-busy" : ""}`} role="status" aria-live="polite" aria-atomic="true">
+              <span className="activity-indicator" aria-hidden="true" />
+              <div className="activity-copy">
+                <strong>{job?.label ?? status}</strong>
+                {job ? (
+                  <>
+                    {job.total > 0 || job.posters ? (
+                      <span>
+                        {job.total > 0 ? `${job.current}/${job.total}` : null}
+                        {job.posters ? ` · ${job.posters} posters` : ""}
+                      </span>
+                    ) : null}
+                    {job.total > 0 ? (
+                      <div className="activity-progress" aria-hidden="true">
+                        <span style={{ width: `${Math.min(100, Math.round((job.current / job.total) * 100))}%` }} />
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
-                {job.total > 0 ? (
-                  <div className="activity-progress" aria-hidden="true">
-                    <span style={{ width: `${Math.min(100, Math.round((job.current / job.total) * 100))}%` }} />
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-          {!job ? (
-            <button className="activity-dismiss" type="button" aria-label="Dismiss status" onClick={() => setStatus("")}>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
-            </button>
+              </div>
+              {!job ? (
+                <button className="activity-dismiss" type="button" aria-label="Dismiss status" onClick={() => setStatus("")}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+                </button>
+              ) : null}
+            </aside>
           ) : null}
-        </aside>
+          {availableUpdate && !updateDismissed ? (
+            <aside className="activity-toast update-toast" role="status" aria-live="polite" aria-atomic="true">
+              <span className="update-available-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" /></svg>
+              </span>
+              <div className="activity-copy">
+                <strong>Studio {availableUpdate} is ready</strong>
+                <span>Install the latest improvements.</span>
+              </div>
+              <button className="update-toast-action" type="button" onClick={() => void installAvailableUpdate()}>
+                Update now
+              </button>
+              <button className="activity-dismiss" type="button" aria-label="Dismiss update notice" onClick={() => setUpdateDismissed(true)}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+              </button>
+            </aside>
+          ) : null}
+        </div>
       ) : null}
+      <UpdateOverlay
+        open={updateOpen}
+        title="Installing update"
+        progress={updateProgress}
+        onClose={() => {
+          setUpdateOpen(false);
+          setUpdateProgress(idleUpdateProgress);
+        }}
+      />
       {palette ? (
         <div className="overlay" onMouseDown={closePalette}>
           <div className="palette glass" onMouseDown={(e) => e.stopPropagation()}>

@@ -275,6 +275,10 @@ export function formatEnrich(r: EnrichReport): string {
   return parts.join(" · ");
 }
 
+export function shouldNotifyEnrichCompletion(r: EnrichReport): boolean {
+  return r.keyValid === false || !r.hasKey || r.matched > 0 || r.posters > 0 || r.errors > 0;
+}
+
 export function formatImport(r: ImportResult): string {
   return `Imported ${r.movies} films · ${r.viewings} viewings · ${r.ratings} ratings · ${r.skipped} already present`;
 }
