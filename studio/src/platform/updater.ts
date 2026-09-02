@@ -203,7 +203,7 @@ export async function downloadAndInstallUpdate(
         case "Finished":
           onProgress({
             phase: "installing",
-            label: "Installing update…",
+            label: "Finishing update — Studio will reopen automatically…",
             percent: 100,
             version: update.version,
             error: null,
