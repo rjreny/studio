@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { communityRatingOutOfFive, isHighQualityBanner } from "../../core/images";
 import { log } from "../../platform/log";
-import { getFilm } from "../../platform/filmLibrary";
+import { getFilm, getFilmArtwork, setFilmArtwork } from "../../platform/filmLibrary";
 import type {
   FilmCastMember,
   FilmConnection,
   FilmCrewMember,
   FilmDetail,
+  FilmArtwork,
   LibraryItem,
   ProductionCompany,
   ViewingHistoryItem,
 } from "../../platform/types/film";
 import { FilmCard } from "./FilmCard";
+import { Poster } from "./Poster";
 import { RatingDisplay } from "./RatingDisplay";
 import { Shelf } from "./Shelf";
 
@@ -172,15 +174,142 @@ function RelatedShelf({ title, source, films, onSelect }: { title: string; sourc
   return <section className="detail-block detail-related"><Shelf title={title}>{films.map((film) => <FilmCard key={film.id} film={film} onSelect={onSelect} />)}</Shelf><p className="section-source">{source}</p></section>;
 }
 
-export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFilm }: {
+const INITIAL_POSTER_CHOICES = 24;
+const INITIAL_BACKDROP_CHOICES = 12;
+
+function ArtworkPicker({ film, onUpdated, onStatus }: {
+  film: FilmDetail;
+  onUpdated: (film: FilmDetail) => void;
+  onStatus: (status: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [artwork, setArtwork] = useState<FilmArtwork | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [posterUrl, setPosterUrl] = useState("");
+  const [backdropUrl, setBackdropUrl] = useState("");
+  const [posterLimit, setPosterLimit] = useState(INITIAL_POSTER_CHOICES);
+  const [backdropLimit, setBackdropLimit] = useState(INITIAL_BACKDROP_CHOICES);
+
+  useEffect(() => {
+    setOpen(false);
+    setArtwork(null);
+    setError(null);
+    setPosterUrl("");
+    setBackdropUrl("");
+    setPosterLimit(INITIAL_POSTER_CHOICES);
+    setBackdropLimit(INITIAL_BACKDROP_CHOICES);
+  }, [film.id]);
+
+  async function openPicker() {
+    setOpen(true);
+    if (artwork || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await getFilmArtwork(film.id);
+      setArtwork(next);
+      setPosterUrl(next.selectedPoster?.startsWith("https://") ? next.selectedPoster : "");
+      setBackdropUrl(next.selectedBackdrop?.startsWith("https://") ? next.selectedBackdrop : "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function save(poster: string | null, backdrop: string | null, message: string) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await setFilmArtwork(film.id, { poster, backdrop });
+      onUpdated(updated);
+      setArtwork((current) => current ? {
+        ...current,
+        selectedPoster: poster ?? current.defaultPoster,
+        selectedBackdrop: backdrop ?? current.defaultBackdrop,
+      } : current);
+      onStatus(message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!film.tmdbId) return null;
+
+  return (
+    <section className="artwork-panel" aria-label="Artwork controls">
+      <div className="artwork-panel-heading">
+        <div><strong>Artwork</strong><span>Choose a high-resolution TMDB image or use an HTTPS image URL.</span></div>
+        <button type="button" className="detail-expand" aria-expanded={open} onClick={() => open ? setOpen(false) : void openPicker()}>
+          {open ? "Close artwork options" : "Customize artwork"}
+        </button>
+      </div>
+      {open ? (
+        <div className="artwork-panel-content">
+          {loading ? <p className="muted">Loading artwork…</p> : null}
+          {error ? <p className="artwork-error" role="status">{error}</p> : null}
+          {artwork ? <>
+            <div className="artwork-choice-group">
+              <div className="detail-heading"><h2>Poster</h2><span className="muted">{artwork.posters.length} choices</span></div>
+              {artwork.posters.length ? <div className="artwork-poster-grid">
+                {artwork.posters.slice(0, posterLimit).map((image, index) => <button
+                  type="button"
+                  key={image.path}
+                  className={`artwork-poster-choice${artwork.selectedPoster === image.path ? " is-selected" : ""}`}
+                  aria-label={`Use poster ${index + 1}`}
+                  aria-pressed={artwork.selectedPoster === image.path}
+                  disabled={saving}
+                  onClick={() => void save(image.path, artwork.selectedBackdrop, "Poster updated")}
+                ><img src={image.url} alt="" loading="lazy" decoding="async" /></button>)}
+              </div> : <p className="muted">TMDB has no high-resolution poster alternatives for this film.</p>}
+              {artwork.posters.length > posterLimit ? <button type="button" className="detail-expand artwork-load-more" onClick={() => setPosterLimit((current) => current + INITIAL_POSTER_CHOICES)}>Show {Math.min(INITIAL_POSTER_CHOICES, artwork.posters.length - posterLimit)} more posters</button> : null}
+            </div>
+            <div className="artwork-choice-group">
+              <div className="detail-heading"><h2>Hero background</h2><span className="muted">{artwork.backdrops.length} choices</span></div>
+              {artwork.backdrops.length ? <div className="artwork-backdrop-grid">
+                {artwork.backdrops.slice(0, backdropLimit).map((image, index) => <button
+                  type="button"
+                  key={image.path}
+                  className={`artwork-backdrop-choice${artwork.selectedBackdrop === image.path ? " is-selected" : ""}`}
+                  aria-label={`Use hero background ${index + 1}`}
+                  aria-pressed={artwork.selectedBackdrop === image.path}
+                  disabled={saving}
+                  onClick={() => void save(artwork.selectedPoster, image.path, "Hero background updated")}
+                ><img src={image.url} alt="" loading="lazy" decoding="async" /></button>)}
+              </div> : <p className="muted">TMDB has no high-resolution backdrop alternatives for this film.</p>}
+              {artwork.backdrops.length > backdropLimit ? <button type="button" className="detail-expand artwork-load-more" onClick={() => setBackdropLimit((current) => current + INITIAL_BACKDROP_CHOICES)}>Show {Math.min(INITIAL_BACKDROP_CHOICES, artwork.backdrops.length - backdropLimit)} more backgrounds</button> : null}
+            </div>
+            <div className="artwork-url-controls">
+              <label>Poster image URL<input type="url" value={posterUrl} placeholder="https://…" onChange={(event) => setPosterUrl(event.target.value)} /></label>
+              <label>Hero image URL<input type="url" value={backdropUrl} placeholder="https://…" onChange={(event) => setBackdropUrl(event.target.value)} /></label>
+              <p className="muted artwork-url-note">Image URLs are your own choice and are not quality-checked.</p>
+              <div className="artwork-url-actions">
+                <button type="button" className="detail-expand" disabled={saving || (!posterUrl.trim() && !backdropUrl.trim())} onClick={() => void save(posterUrl.trim() || artwork.selectedPoster, backdropUrl.trim() || artwork.selectedBackdrop, "Custom artwork saved")}>Use image URLs</button>
+                <button type="button" className="detail-expand" disabled={saving} onClick={() => void save(null, null, "Restored TMDB artwork")}>Restore TMDB artwork</button>
+              </div>
+            </div>
+          </> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFilm, onArtworkChange }: {
   filmId: string;
   onBack: () => void;
   backLabel: string;
   onStatus: (s: string) => void;
   onSelectFilm?: (id: string) => void;
+  onArtworkChange?: () => void;
 }) {
   const [film, setFilm] = useState<FilmDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [heroImageFailed, setHeroImageFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,10 +325,12 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
     return () => { cancelled = true; };
   }, [filmId, onStatus]);
 
+  useEffect(() => setHeroImageFailed(false), [film?.id, film?.backdrop]);
+
   if (error) return <div className="pad page-pad"><button type="button" className="detail-back" onClick={onBack}>{backLabel}</button><p className="muted">Could not load this film. {error}</p></div>;
   if (!film) return <p className="muted pad">Loading…</p>;
 
-  const image = isHighQualityBanner(film.backdrop) ? film.backdrop : null;
+  const image = !heroImageFailed && isHighQualityBanner(film.backdrop) ? film.backdrop : null;
   const directors = film.directors?.join(" · ");
   const runtime = runtimeLabel(film.runtime);
   const community = communityRatingOutOfFive(film.tmdbVoteAverage);
@@ -208,12 +339,12 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
   return (
     <article className="film-detail">
       <header className={`hero detail-hero${image ? "" : " is-empty-hero"}`}>
-        {image ? <img className="hero-image" src={image} alt="" /> : <div className="hero-image is-empty" />}
+        {image ? <img className="hero-image" src={image} alt="" onError={() => setHeroImageFailed(true)} /> : <div className="hero-image is-empty" />}
         <div className="hero-scrim" />
         <div className="hero-copy">
           <button type="button" className="detail-back" onClick={onBack}>{backLabel}</button>
           <div className="detail-identity">
-            {film.poster ? <img className="detail-poster" src={film.poster} alt="" /> : null}
+            <Poster name={film.title} poster={film.poster} large className="detail-poster" />
             <div className="hero-copy-text">
               {directors ? <p className="hero-cast">{directors}</p> : null}
               <h1>{film.title}</h1>
@@ -226,6 +357,8 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
           </div>
         </div>
       </header>
+
+      <ArtworkPicker film={film} onUpdated={(updated) => { setFilm(updated); onArtworkChange?.(); }} onStatus={onStatus} />
 
       <div className="detail-body">
         <div className="detail-layout">

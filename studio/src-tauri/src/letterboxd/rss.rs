@@ -90,6 +90,7 @@ pub fn sync_rss(db: &mut Database, username: &str, xml: &str) -> Result<SyncResu
         let meta = SourceMovieMeta {
             poster: item.poster.clone(),
             tmdb_id: item.tmdb_id,
+            ..Default::default()
         };
         let smr_id = upsert_source_movie(
             &tx,
@@ -219,6 +220,7 @@ pub fn sync_friend_rss(
         let meta = SourceMovieMeta {
             poster: item.poster.clone(),
             tmdb_id: item.tmdb_id,
+            ..Default::default()
         };
         let _smr = upsert_source_movie(
             &tx,
@@ -326,6 +328,13 @@ pub(crate) fn parse_items(xml: &str) -> Vec<RssItem> {
             let body = chunk.split("</item>").next()?;
             let film_title = tag(body, "filmTitle").unwrap_or_default();
             let title = tag(body, "title").unwrap_or_default();
+            let link = tag(body, "link").unwrap_or_default();
+            // A Letterboxd RSS feed also contains list activity. It has no
+            // filmTitle and no /film/ URL, so it must not become a faux movie
+            // record that later appears as a missing-poster failure.
+            if film_title.is_empty() && !is_film_link(&link) {
+                return None;
+            }
             let name = if film_title.is_empty() {
                 title.split(" - ").next()?.trim().to_string()
             } else {
@@ -353,7 +362,7 @@ pub(crate) fn parse_items(xml: &str) -> Vec<RssItem> {
                 title,
                 film_title: decode(&name),
                 year,
-                link: tag(body, "link").unwrap_or_default(),
+                link,
                 published: tag(body, "pubDate").unwrap_or_default(),
                 watched_date: tag(body, "watchedDate"),
                 rating,
@@ -364,6 +373,10 @@ pub(crate) fn parse_items(xml: &str) -> Vec<RssItem> {
             })
         })
         .collect()
+}
+
+fn is_film_link(link: &str) -> bool {
+    link.to_lowercase().contains("/film/")
 }
 
 fn tag(xml: &str, name: &str) -> Option<String> {
@@ -527,6 +540,16 @@ mod tests {
         let (title, year) = parse_activity_payload(raw);
         assert_eq!(title, "Ant-Man");
         assert_eq!(year, Some(2015));
+    }
+
+    #[test]
+    fn rss_ignores_non_film_list_activity() {
+        let xml = r#"<?xml version="1.0"?><rss><channel>
+            <item><title>Most Excited For in 2026</title>
+            <link>https://letterboxd.com/example/list/most-excited-for-in-2026/</link>
+            <guid>list-1</guid><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+        </channel></rss>"#;
+        assert!(parse_items(xml).is_empty());
     }
 
     #[test]

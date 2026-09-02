@@ -1,15 +1,41 @@
 use crate::letterboxd::normalize::{normalize_title, parse_year};
 use crate::letterboxd::posters::{
     backdrop_url, backfill_letterboxd_posters, cache_poster_for_siblings, full_poster_url,
-    poster_url,
+    letterboxd_page_metadata, poster_url,
 };
-use crate::models::{EnrichReport, JobProgress, LibraryItem, TmdbKeyStatus};
+use crate::models::{ArtworkImage, EnrichReport, FilmArtwork, JobProgress, LibraryItem, SetArtworkInput, TmdbKeyStatus};
 use crate::storage::db::Database;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use uuid::Uuid;
 
 const TMDB_BASE: &str = "https://api.themoviedb.org/3";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TmdbMediaType {
+    Movie,
+    Tv,
+}
+
+impl TmdbMediaType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Tv => "tv",
+        }
+    }
+
+    fn from_raw(value: Option<&str>) -> Self {
+        match value {
+            Some("tv") => Self::Tv,
+            _ => Self::Movie,
+        }
+    }
+
+    fn endpoint(self) -> &'static str {
+        self.as_str()
+    }
+}
 
 pub fn set_api_key(key: &str) -> Result<(), String> {
     keyring::Entry::new("studio", "tmdb_api_key")
@@ -159,16 +185,205 @@ fn tmdb_get(key: &str, path_and_query: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+fn artwork_paths(primary: Option<&str>, images: &serde_json::Value, kind: &str) -> Vec<String> {
+    let mut paths = primary
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| vec![path.to_string()])
+        .unwrap_or_default();
+    let mut alternates = artwork_candidates(images, kind, false);
+    for (_, _, _, path) in alternates.drain(..) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn artwork_picker_paths(images: &serde_json::Value, kind: &str) -> Vec<String> {
+    artwork_candidates(images, kind, true)
+        .into_iter()
+        .map(|(_, _, _, path)| path)
+        .collect()
+}
+
+fn artwork_candidates(
+    images: &serde_json::Value,
+    kind: &str,
+    require_high_quality: bool,
+) -> Vec<(u8, i64, i64, String)> {
+    let mut candidates: Vec<(u8, i64, i64, String)> = images[kind]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|image| {
+            let path = image["file_path"].as_str()?.trim();
+            let width = image["width"].as_i64().unwrap_or(0);
+            let height = image["height"].as_i64().unwrap_or(0);
+            (!path.is_empty() && (!require_high_quality || picker_image_is_high_quality(kind, width, height))).then(|| {
+                let language_rank = match image["iso_639_1"].as_str() {
+                    Some("en") => 0,
+                    None => 1,
+                    _ => 2,
+                };
+                let votes = image["vote_count"].as_i64().unwrap_or(0);
+                (language_rank, -(width * height), -votes, path.to_string())
+            })
+        })
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+fn picker_image_is_high_quality(kind: &str, width: i64, height: i64) -> bool {
+    match kind {
+        "posters" => width >= 500 && height >= 750 && height > width,
+        "backdrops" => width >= 1280 && height >= 720 && width > height,
+        _ => false,
+    }
+}
+
+fn preferred_artwork_path(
+    primary: Option<&str>,
+    images: &serde_json::Value,
+    kind: &str,
+) -> Option<String> {
+    artwork_paths(primary, images, kind).into_iter().next()
+}
+
+fn artwork_image(path: String, backdrop: bool) -> ArtworkImage {
+    let url = if backdrop {
+        backdrop_url(Some(path.clone()))
+    } else {
+        poster_url(Some(path.clone()))
+    }
+    .unwrap_or(path.clone());
+    ArtworkImage { path, url }
+}
+
+fn resolve_artwork_movie(
+    db: &Database,
+    id: &str,
+) -> Result<(String, i64, TmdbMediaType, Option<String>, Option<String>, Option<String>, Option<String>), String> {
+    let row: (String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>) = db.conn()
+        .query_row(
+            r#"
+            SELECT m.id, m.tmdb_id, m.tmdb_media_type, m.poster_path, m.backdrop_path,
+                   m.poster_override_url, m.backdrop_override_url
+            FROM movies m
+            LEFT JOIN movie_links ml ON ml.movie_id = m.id
+            LEFT JOIN source_movie_records smr ON smr.id = ml.source_movie_record_id
+            WHERE m.id = ?1
+               OR CAST(m.tmdb_id AS TEXT) = ?1
+               OR ('tmdb:' || CAST(m.tmdb_id AS TEXT)) = ?1
+               OR smr.id = ?1
+               OR (smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')) = ?1
+            LIMIT 1
+            "#,
+            params![id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Artwork is available after this film has a TMDB match".to_string())?;
+    let Some(tmdb_id) = row.1 else {
+        return Err("Artwork is available after this film has a TMDB match".into());
+    };
+    Ok((
+        row.0,
+        tmdb_id,
+        TmdbMediaType::from_raw(Some(&row.2)),
+        row.3,
+        row.4,
+        row.5,
+        row.6,
+    ))
+}
+
+pub fn film_artwork(db: &Database, id: &str) -> Result<FilmArtwork, String> {
+    let (_, tmdb_id, media_type, default_poster, default_backdrop, selected_poster, selected_backdrop) =
+        resolve_artwork_movie(db, id)?;
+    let api_key = get_api_key()?.ok_or("Add a TMDB key in Settings to browse artwork")?;
+    let body = tmdb_get(
+        &api_key,
+        &format!("/{}/{tmdb_id}/images?include_image_language=en,null", media_type.endpoint()),
+    )?;
+    let images: serde_json::Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    Ok(FilmArtwork {
+        posters: artwork_picker_paths(&images, "posters")
+            .into_iter()
+            .map(|path| artwork_image(path, false))
+            .collect(),
+        backdrops: artwork_picker_paths(&images, "backdrops")
+            .into_iter()
+            .map(|path| artwork_image(path, true))
+            .collect(),
+        selected_poster: selected_poster.or(default_poster.clone()),
+        selected_backdrop: selected_backdrop.or(default_backdrop.clone()),
+        default_poster,
+        default_backdrop,
+    })
+}
+
+fn normalize_artwork_override(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.starts_with('/') || value.starts_with("https://") {
+        return Ok(Some(value));
+    }
+    Err("Artwork must be a TMDB image choice or an HTTPS image URL".into())
+}
+
+pub fn set_film_artwork(db: &Database, input: &SetArtworkInput) -> Result<(), String> {
+    let (movie_id, _, _, _, _, _, _) = resolve_artwork_movie(db, &input.id)?;
+    let poster = normalize_artwork_override(input.poster.clone())?;
+    let backdrop = normalize_artwork_override(input.backdrop.clone())?;
+    db.conn()
+        .execute(
+            "UPDATE movies SET poster_override_url = ?2, backdrop_override_url = ?3 WHERE id = ?1",
+            params![movie_id, poster, backdrop],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct TmdbSearchResponse {
     results: Vec<TmdbSearchResult>,
 }
 
 #[derive(Deserialize)]
+struct TmdbTvSearchResponse {
+    results: Vec<TmdbTvSearchResult>,
+}
+
+#[derive(Deserialize)]
 struct TmdbSearchResult {
     id: i64,
     title: String,
+    original_title: Option<String>,
     release_date: Option<String>,
+    poster_path: Option<String>,
+    #[serde(default)]
+    vote_count: u32,
+}
+
+#[derive(Clone, Deserialize)]
+struct TmdbTvSearchResult {
+    id: i64,
+    name: String,
+    original_name: Option<String>,
+    first_air_date: Option<String>,
     poster_path: Option<String>,
 }
 
@@ -232,7 +447,7 @@ pub fn enrich_catalog_with(
         if report.key_valid == Some(true) {
             let queue = list_unmatched(db)?;
             let total = queue.len() as u32;
-            for (smr_id, raw, normalized, year) in queue {
+            for (smr_id, raw, normalized, year, external_id) in queue {
                 report.attempted += 1;
                 progress(JobProgress {
                     job: "enrich".into(),
@@ -244,16 +459,52 @@ pub fn enrich_catalog_with(
                     done: false,
                     ..Default::default()
                 });
-                match enrich_one_film(db, &api_key, &smr_id, &raw, &normalized, year) {
+                let had_poster = source_has_poster(db, &smr_id)?;
+                match enrich_one_film(
+                    db,
+                    &api_key,
+                    &smr_id,
+                    &raw,
+                    &normalized,
+                    year,
+                    external_id.as_deref(),
+                ) {
                     Ok(true) => {
                         report.matched += 1;
-                        report.posters += 1;
+                        if !had_poster && source_has_poster(db, &smr_id)? {
+                            report.posters += 1;
+                        }
                     }
-                    Ok(false) => {}
+                    Ok(false) => {
+                        if !had_poster && source_has_poster(db, &smr_id)? {
+                            report.posters += 1;
+                        }
+                    }
                     Err(err) => {
                         report.errors += 1;
                         report.last_error = Some(err);
                     }
+                }
+            }
+
+            // Poster recovery and metadata hydration have different stop
+            // conditions. A trusted source cover can exist before its TMDB
+            // detail record was filled, so repair those gaps independently.
+            for (tmdb_id, media_type) in list_metadata_gaps(db)? {
+                report.attempted += 1;
+                progress(JobProgress {
+                    job: "enrich".into(),
+                    label: format!("Hydrating details · {}", report.attempted),
+                    current: report.attempted,
+                    total: report.attempted.max(1),
+                    posters: report.posters,
+                    errors: report.errors,
+                    done: false,
+                    ..Default::default()
+                });
+                if let Err(error) = upsert_tmdb(db, tmdb_id, media_type) {
+                    report.errors += 1;
+                    report.last_error = Some(error);
                 }
             }
         }
@@ -266,10 +517,9 @@ pub fn enrich_catalog_with(
     );
 
     for _ in 0..12 {
-        let before = report.posters;
         match backfill_letterboxd_posters(db, 40) {
-            Ok(n) => {
-                report.posters += n;
+            Ok(batch) => {
+                report.posters += batch.updated;
                 progress(JobProgress {
                     job: "enrich".into(),
                     label: format!("Letterboxd posters · {} fetched", report.posters),
@@ -280,7 +530,7 @@ pub fn enrich_catalog_with(
                     done: false,
                     ..Default::default()
                 });
-                if n == 0 || report.posters == before {
+                if batch.attempted == 0 || batch.resolved == 0 {
                     break;
                 }
             }
@@ -328,30 +578,97 @@ fn count_without_poster(db: &Database) -> Result<u32, String> {
              LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
              LEFT JOIN movies m ON m.id = ml.movie_id
              WHERE (smr.cached_poster_url IS NULL OR TRIM(smr.cached_poster_url) = '')
-               AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')",
+               AND (m.poster_override_url IS NULL OR TRIM(m.poster_override_url) = '')
+               AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')
+               AND (smr.source_type != 'letterboxd_rss'
+                    OR LOWER(COALESCE(smr.external_id, '')) LIKE '%/film/%')",
             [],
             |row| row.get::<_, u32>(0),
         )
         .map_err(|e| e.to_string())
 }
 
+fn source_has_poster(db: &Database, smr_id: &str) -> Result<bool, String> {
+    db.conn()
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM source_movie_records smr
+               LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+               LEFT JOIN movies m ON m.id = ml.movie_id
+               WHERE smr.id = ?1
+                 AND (
+                   COALESCE(TRIM(smr.cached_poster_url), '') != ''
+                   OR COALESCE(TRIM(m.poster_override_url), '') != ''
+                   OR COALESCE(TRIM(m.poster_path), '') != ''
+                 )
+             )",
+            params![smr_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists != 0)
+        .map_err(|error| error.to_string())
+}
+
+fn list_metadata_gaps(db: &Database) -> Result<Vec<(i64, TmdbMediaType)>, String> {
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT DISTINCT tmdb_id, tmdb_media_type
+             FROM movies
+             WHERE tmdb_id IS NOT NULL
+               AND (
+                 enriched_at IS NULL
+                 OR genres_json IS NULL
+                 OR credits_json IS NULL
+                 OR production_companies_json IS NULL
+                 OR keywords_json IS NULL
+                 OR similar_json IS NULL
+               )",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?
+        .filter_map(|row| row.ok())
+        .map(|(id, kind)| (id, TmdbMediaType::from_raw(Some(&kind))))
+        .collect();
+    Ok(rows)
+}
+
 pub(crate) fn match_progress_label(current: u32, total: u32) -> String {
     format!("Matching TMDB · {current}/{total}")
 }
 
-fn list_unmatched(db: &Database) -> Result<Vec<(String, String, String, Option<i32>)>, String> {
+fn list_unmatched(
+    db: &Database,
+) -> Result<Vec<(String, String, String, Option<i32>, Option<String>)>, String> {
     let mut stmt = db
         .conn()
         .prepare(
-            "SELECT smr.id, smr.raw_identity, smr.normalized_title, smr.release_year
+            "SELECT smr.id, smr.raw_identity, smr.normalized_title, smr.release_year, smr.external_id
              FROM source_movie_records smr
              JOIN movie_links ml ON ml.source_movie_record_id = smr.id
-             WHERE ml.match_state IN ('unmatched', 'ambiguous')",
+             LEFT JOIN movies m ON m.id = ml.movie_id
+             WHERE (
+                  ml.match_state IN ('unmatched', 'ambiguous')
+                OR (
+                  m.tmdb_id IS NOT NULL
+                  AND (m.poster_override_url IS NULL OR TRIM(m.poster_override_url) = '')
+                  AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')
+                  AND (smr.cached_poster_url IS NULL OR TRIM(smr.cached_poster_url) = '')
+                ))
+               AND (smr.source_type != 'letterboxd_rss'
+                    OR LOWER(COALESCE(smr.external_id, '')) LIKE '%/film/%')",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
@@ -364,29 +681,121 @@ fn enrich_one_film(
     api_key: &str,
     smr_id: &str,
     raw: &str,
-    normalized: &str,
+    _normalized: &str,
     year: Option<i32>,
+    external_id: Option<&str>,
 ) -> Result<bool, String> {
-    if try_tmdb_id_from_raw(db, smr_id, raw)? {
+    if let Some((movie_id, tmdb_id, media_type)) = try_tmdb_id_from_raw(db, smr_id, raw)? {
+        if let Some(poster) = cache_missing_tmdb_artwork(db, api_key, &movie_id, tmdb_id, media_type)? {
+            cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+        }
         return Ok(true);
     }
-    if try_exact_match(db, smr_id, normalized, year)? {
+    if let Some((tmdb_id, media_type)) = linked_tmdb(db, smr_id)? {
+        let movie_id = upsert_tmdb(db, tmdb_id, media_type)?;
+        confirm_link(db, smr_id, &movie_id, "tmdb_artwork_refresh")?;
+        if let Some(poster) = cache_missing_tmdb_artwork(db, api_key, &movie_id, tmdb_id, media_type)? {
+            cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+        }
         return Ok(true);
     }
-    Ok(search_and_queue(db, api_key, smr_id, raw, normalized, year)? > 0)
+    let (title, lookup_year) = title_and_embedded_year(&parse_raw_title(raw), year);
+    let lookup_normalized = normalize_title(&title);
+    if try_exact_match(db, smr_id, &lookup_normalized, lookup_year)? {
+        return Ok(true);
+    }
+    if search_and_queue(db, api_key, smr_id, &title, &lookup_normalized, lookup_year)? > 0 {
+        return Ok(true);
+    }
+
+    // Title matching is deliberately conservative. When it cannot identify a
+    // Letterboxd film, its page's explicit TMDB link lets the normal TMDB
+    // detail path hydrate cast, crew, genres, and artwork.
+    if let Some(uri) = external_id {
+        // Provider hiccups must not stop the conservative TMDB and TV fallbacks
+        // below. They remain eligible for the no-key poster backfill afterwards.
+        if let Ok(source_metadata) = letterboxd_page_metadata(uri) {
+            if let Some(poster) = source_metadata.poster.as_deref() {
+                cache_poster_for_siblings(db.conn(), smr_id, poster)?;
+            }
+            if let Some(tmdb_id) = source_metadata.tmdb_id {
+                let media_type = TmdbMediaType::from_raw(source_metadata.tmdb_media_type.as_deref());
+                let movie_id = upsert_tmdb(db, tmdb_id, media_type)?;
+                confirm_link(db, smr_id, &movie_id, "letterboxd_tmdb_link")?;
+                if let Some(poster) = cache_missing_tmdb_artwork(db, api_key, &movie_id, tmdb_id, media_type)? {
+                    cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+                }
+                return Ok(true);
+            }
+        }
+    }
+
+    if let Some(tv_match) = search_tv_fallback(api_key, &title, &lookup_normalized, lookup_year)? {
+        match tv_match {
+            TvSearchMatch::Exact(result) => {
+                let movie_id = upsert_tmdb(db, result.id, TmdbMediaType::Tv)?;
+                confirm_link(db, smr_id, &movie_id, "tmdb_tv_search")?;
+                if let Some(poster) = cache_missing_tmdb_artwork(
+                    db,
+                    api_key,
+                    &movie_id,
+                    result.id,
+                    TmdbMediaType::Tv,
+                )? {
+                    cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+                }
+                return Ok(true);
+            }
+            TvSearchMatch::ParentSeries(result) => {
+                let movie_id = upsert_tmdb(db, result.id, TmdbMediaType::Tv)?;
+                confirm_link(db, smr_id, &movie_id, "tmdb_tv_parent_series")?;
+                if let Some(poster) = cache_missing_tmdb_artwork(
+                    db,
+                    api_key,
+                    &movie_id,
+                    result.id,
+                    TmdbMediaType::Tv,
+                )? {
+                    cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+                }
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
-fn try_tmdb_id_from_raw(db: &Database, smr_id: &str, raw: &str) -> Result<bool, String> {
-    let Some(id) = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|v| v.get("tmdb_id").and_then(|x| x.as_i64()))
+fn linked_tmdb(db: &Database, smr_id: &str) -> Result<Option<(i64, TmdbMediaType)>, String> {
+    let row: Option<(Option<i64>, String)> = db.conn()
+        .query_row(
+            "SELECT m.tmdb_id, m.tmdb_media_type FROM movie_links ml
+             JOIN movies m ON m.id = ml.movie_id
+            WHERE ml.source_movie_record_id = ?1",
+            params![smr_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(row.and_then(|(id, kind)| id.map(|id| (id, TmdbMediaType::from_raw(Some(&kind))))))
+}
+
+fn try_tmdb_id_from_raw(
+    db: &Database,
+    smr_id: &str,
+    raw: &str,
+) -> Result<Option<(String, i64, TmdbMediaType)>, String> {
+    let Some(value) = serde_json::from_str::<serde_json::Value>(raw).ok() else {
+        return Ok(None);
+    };
+    let Some(id) = value.get("tmdb_id").and_then(|x| x.as_i64())
         .filter(|&id| id > 0)
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    let movie_id = upsert_tmdb_movie(db, id)?;
+    let media_type = TmdbMediaType::from_raw(value.get("tmdb_media_type").and_then(|x| x.as_str()));
+    let movie_id = upsert_tmdb(db, id, media_type)?;
     confirm_link(db, smr_id, &movie_id, "export_tmdb_id")?;
-    Ok(true)
+    Ok(Some((movie_id, id, media_type)))
 }
 
 fn confirm_link(db: &Database, smr_id: &str, movie_id: &str, method: &str) -> Result<(), String> {
@@ -424,20 +833,71 @@ fn propagate_movie_link(db: &Database, smr_id: &str, movie_id: &str) -> Result<(
         )
         .map_err(|e| e.to_string())?;
 
-    let poster_path: Option<String> = db
+    let poster_path = db
         .conn()
         .query_row(
             "SELECT poster_path FROM movies WHERE id = ?1",
             params![movie_id],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()
+        .map(|path| path.flatten())
         .map_err(|e| e.to_string())?;
 
     if let Some(path) = poster_path.filter(|p| !p.is_empty()) {
         cache_poster_for_siblings(db.conn(), smr_id, &full_poster_url(&path))?;
     }
     Ok(())
+}
+
+/// The movie-details response occasionally has no primary poster even though
+/// TMDB's dedicated artwork endpoint does. This performs that narrower fetch
+/// only for a confirmed movie still lacking a poster, and leaves any existing
+/// poster or custom override untouched.
+fn cache_missing_tmdb_artwork(
+    db: &Database,
+    api_key: &str,
+    movie_id: &str,
+    tmdb_id: i64,
+    media_type: TmdbMediaType,
+) -> Result<Option<String>, String> {
+    let has_poster: bool = db
+        .conn()
+        .query_row(
+            "SELECT COALESCE(NULLIF(TRIM(COALESCE(poster_override_url, poster_path, '')), ''), '') != ''
+             FROM movies WHERE id = ?1",
+            params![movie_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false);
+    if has_poster {
+        return Ok(None);
+    }
+
+    let response = tmdb_get(
+        api_key,
+        &format!("/{}/{tmdb_id}/images?include_image_language=en,null", media_type.endpoint()),
+    )?;
+    let images: serde_json::Value =
+        serde_json::from_str(&response).map_err(|error| error.to_string())?;
+    let poster = preferred_artwork_path(None, &images, "posters");
+    let backdrop = preferred_artwork_path(None, &images, "backdrops");
+    if poster.is_none() && backdrop.is_none() {
+        return Ok(None);
+    }
+
+    db.conn()
+        .execute(
+            "UPDATE movies
+             SET poster_path = COALESCE(NULLIF(TRIM(poster_path), ''), ?2),
+                 backdrop_path = COALESCE(NULLIF(TRIM(backdrop_path), ''), ?3)
+             WHERE id = ?1",
+            params![movie_id, poster, backdrop],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(poster.map(|path| full_poster_url(&path)))
 }
 
 fn try_exact_match(
@@ -476,23 +936,91 @@ fn search_movies(
     serde_json::from_str(&response).map_err(|e| e.to_string())
 }
 
+fn search_tv(
+    api_key: &str,
+    title: &str,
+    year: Option<i32>,
+) -> Result<TmdbTvSearchResponse, String> {
+    let mut path = format!("/search/tv?query={}", percent_encode(title));
+    if let Some(y) = year {
+        path.push_str(&format!("&first_air_date_year={y}"));
+    }
+    let response = tmdb_get(api_key, &path)?;
+    serde_json::from_str(&response).map_err(|e| e.to_string())
+}
+
+enum TvSearchMatch {
+    Exact(TmdbTvSearchResult),
+    ParentSeries(TmdbTvSearchResult),
+}
+
+fn search_tv_fallback(
+    api_key: &str,
+    title: &str,
+    normalized: &str,
+    year: Option<i32>,
+) -> Result<Option<TvSearchMatch>, String> {
+    let mut parsed = search_tv(api_key, title, year)?;
+    if pick_tv_match(&parsed.results, normalized, year).is_none() && year.is_some() {
+        parsed = search_tv(api_key, title, None)?;
+    }
+    if let Some(result) = pick_tv_match(&parsed.results, normalized, year) {
+        return Ok(Some(TvSearchMatch::Exact(result.clone())));
+    }
+
+    // TMDB does not index every TV special by its full Letterboxd title. For
+    // likely specials only, search a few distinctive title words and retain a
+    // result solely when the parent-series check below still proves that its
+    // complete series title appears in the source title.
+    let mut candidates = Vec::new();
+    for query in tv_parent_search_queries(normalized) {
+        let results = search_tv(api_key, &query, None)?;
+        if let Some(result) = pick_tv_match(&results.results, normalized, year) {
+            if !candidates
+                .iter()
+                .any(|candidate: &TmdbTvSearchResult| candidate.id == result.id)
+            {
+                candidates.push(result.clone());
+            }
+        }
+    }
+    Ok((candidates.len() == 1).then(|| TvSearchMatch::ParentSeries(candidates.remove(0))))
+}
+
 fn search_and_queue(
     db: &Database,
     api_key: &str,
     smr_id: &str,
-    raw: &str,
+    title: &str,
     normalized: &str,
     year: Option<i32>,
 ) -> Result<u32, String> {
-    let title = parse_raw_title(raw);
-    let mut parsed = search_movies(api_key, &title, year)?;
+    let mut parsed = search_movies(api_key, title, year)?;
     if pick_search_match(&parsed.results, normalized, year).is_none() && year.is_some() {
-        parsed = search_movies(api_key, &title, None)?;
+        parsed = search_movies(api_key, title, None)?;
     }
 
     if let Some(result) = pick_search_match(&parsed.results, normalized, year) {
         let movie_id = upsert_tmdb_movie(db, result.id)?;
+        let search_poster = result
+            .poster_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(full_poster_url);
         confirm_link(db, smr_id, &movie_id, "tmdb_search")?;
+        let artwork_poster = cache_missing_tmdb_artwork(
+            db,
+            api_key,
+            &movie_id,
+            result.id,
+            TmdbMediaType::Movie,
+        )?;
+        // Search results carry poster art even when the detail endpoint's
+        // artwork payload is temporarily incomplete. Save that visual fallback
+        // without weakening the title/year match that selected the movie.
+        if let Some(poster) = search_poster.or(artwork_poster) {
+            cache_poster_for_siblings(db.conn(), smr_id, &poster)?;
+        }
         return Ok(1);
     }
 
@@ -518,7 +1046,105 @@ fn pick_search_match<'a>(
 ) -> Option<&'a TmdbSearchResult> {
     let exact_year: Vec<_> = results
         .iter()
-        .filter(|r| titles_match(&r.title, normalized) && release_year(r) == year)
+        .filter(|r| search_result_title_matches(r, normalized) && release_year(r) == year)
+        .collect();
+    if let Some(result) = preferred_search_match(&exact_year) {
+        return Some(result);
+    }
+
+    let title_only: Vec<_> = results
+        .iter()
+        .filter(|r| search_result_title_matches(r, normalized))
+        .collect();
+    if let Some(result) = preferred_search_match(&title_only) {
+        return Some(result);
+    }
+
+    if let Some(y) = year {
+        let near: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                search_result_title_matches(r, normalized)
+                    && release_year(r)
+                        .map(|ry| (ry - y).abs() <= 1)
+                        .unwrap_or(false)
+            })
+            .collect();
+        if let Some(result) = preferred_search_match(&near) {
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// TMDB sometimes returns duplicate records with the same title and release
+/// year. When community validation produces a clear winner, prefer it over
+/// leaving an otherwise exact film unresolved.
+fn preferred_search_match<'a>(candidates: &[&'a TmdbSearchResult]) -> Option<&'a TmdbSearchResult> {
+    if candidates.len() == 1 {
+        return candidates.first().copied();
+    }
+    let mut ranked = candidates.to_vec();
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.vote_count));
+    let top = ranked.first().copied()?;
+    let runner_up = ranked.get(1).copied()?;
+    (top.vote_count > runner_up.vote_count).then_some(top)
+}
+
+fn titles_match(candidate: &str, normalized: &str) -> bool {
+    match_title_key(candidate) == match_title_key(normalized)
+}
+
+/// Comparison-only normalization for search results. Stored titles retain their
+/// original punctuation, while matching treats punctuation and whitespace-only
+/// variations as the same title.
+fn match_title_key(title: &str) -> String {
+    normalize_title(title)
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn search_result_title_matches(result: &TmdbSearchResult, normalized: &str) -> bool {
+    title_matches_or_subtitled_variant(&result.title, normalized)
+        || result
+            .original_title
+            .as_deref()
+            .is_some_and(|title| title_matches_or_subtitled_variant(title, normalized))
+}
+
+// Some Letterboxd entries use a film's short title while TMDB records its
+// official colon subtitle. Treat that as a match only when the base title is
+// exact; this deliberately does not accept looser word-prefix matches.
+fn title_matches_or_subtitled_variant(candidate: &str, normalized: &str) -> bool {
+    let candidate_key = match_title_key(candidate);
+    let normalized_key = match_title_key(normalized);
+    candidate_key == normalized_key
+        || candidate
+            .trim()
+            .to_lowercase()
+            .strip_prefix(normalized.trim().to_lowercase().as_str())
+            .is_some_and(|suffix| suffix.starts_with(':'))
+}
+
+fn pick_tv_match<'a>(
+    results: &'a [TmdbTvSearchResult],
+    normalized: &str,
+    year: Option<i32>,
+) -> Option<&'a TmdbTvSearchResult> {
+    let exact_year: Vec<_> = results
+        .iter()
+        .filter(|result| tv_result_title_matches(result, normalized) && tv_release_year(result) == year)
         .collect();
     if exact_year.len() == 1 {
         return Some(exact_year[0]);
@@ -526,7 +1152,7 @@ fn pick_search_match<'a>(
 
     let title_only: Vec<_> = results
         .iter()
-        .filter(|r| titles_match(&r.title, normalized))
+        .filter(|result| tv_result_title_matches(result, normalized))
         .collect();
     if title_only.len() == 1 {
         return Some(title_only[0]);
@@ -535,9 +1161,9 @@ fn pick_search_match<'a>(
     if let Some(y) = year {
         let near: Vec<_> = results
             .iter()
-            .filter(|r| {
-                titles_match(&r.title, normalized)
-                    && release_year(r)
+            .filter(|result| {
+                tv_result_title_matches(result, normalized)
+                    && tv_release_year(result)
                         .map(|ry| (ry - y).abs() <= 1)
                         .unwrap_or(false)
             })
@@ -547,11 +1173,78 @@ fn pick_search_match<'a>(
         }
     }
 
+    // A Letterboxd entry can be a one-off special or episode while TMDB only
+    // exposes artwork for its parent series. A unique, distinctive series-name
+    // subset is safe to use as artwork-only fallback; it never creates a movie
+    // link or changes the record's media type.
+    let parent_series: Vec<_> = results
+        .iter()
+        .filter(|result| tv_series_title_is_in_special(result, normalized))
+        .collect();
+    if parent_series.len() == 1 {
+        return Some(parent_series[0]);
+    }
     None
 }
 
-fn titles_match(candidate: &str, normalized: &str) -> bool {
-    normalize_title(candidate) == normalized
+fn tv_result_title_matches(result: &TmdbTvSearchResult, normalized: &str) -> bool {
+    titles_match(&result.name, normalized)
+        || result
+            .original_name
+            .as_deref()
+            .is_some_and(|title| titles_match(title, normalized))
+}
+
+fn tv_series_title_is_in_special(result: &TmdbTvSearchResult, normalized: &str) -> bool {
+    let source_tokens = distinctive_title_tokens(normalized);
+    if source_tokens.len() < 2 {
+        return false;
+    }
+    [Some(result.name.as_str()), result.original_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(distinctive_title_tokens)
+        .any(|series_tokens| {
+            series_tokens.len() >= 2
+                && series_tokens
+                    .iter()
+                    .all(|token| source_tokens.contains(token))
+        })
+}
+
+fn distinctive_title_tokens(title: &str) -> Vec<String> {
+    match_title_key(title)
+        .split_whitespace()
+        .filter(|token| {
+            token.len() > 1
+                && !matches!(
+                    *token,
+                    "a" | "an" | "and" | "the" | "of" | "for" | "to" | "in" | "on" | "with"
+                        | "movie" | "film" | "special" | "episode" | "part"
+                )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn tv_parent_search_queries(normalized: &str) -> Vec<String> {
+    let title_key = match_title_key(normalized);
+    if !title_key.split_whitespace().any(|token| matches!(token, "special" | "episode")) {
+        return Vec::new();
+    }
+
+    let mut tokens = distinctive_title_tokens(&title_key);
+    tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+    let mut queries = Vec::new();
+    for token in tokens {
+        if !queries.contains(&token) {
+            queries.push(token);
+        }
+        if queries.len() == 4 {
+            break;
+        }
+    }
+    queries
 }
 
 fn release_year(result: &TmdbSearchResult) -> Option<i32> {
@@ -562,11 +1255,32 @@ fn release_year(result: &TmdbSearchResult) -> Option<i32> {
         .and_then(parse_year)
 }
 
+fn tv_release_year(result: &TmdbTvSearchResult) -> Option<i32> {
+    result
+        .first_air_date
+        .as_deref()
+        .and_then(|date| date.get(0..4))
+        .and_then(parse_year)
+}
+
 fn upsert_tmdb_movie(db: &Database, tmdb_id: i64) -> Result<String, String> {
     refresh_movie_catalog(db, tmdb_id, false)
 }
 
 pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result<String, String> {
+    refresh_tmdb_catalog(db, tmdb_id, TmdbMediaType::Movie, force)
+}
+
+fn upsert_tmdb(db: &Database, tmdb_id: i64, media_type: TmdbMediaType) -> Result<String, String> {
+    refresh_tmdb_catalog(db, tmdb_id, media_type, false)
+}
+
+fn refresh_tmdb_catalog(
+    db: &Database,
+    tmdb_id: i64,
+    media_type: TmdbMediaType,
+    force: bool,
+) -> Result<String, String> {
     if !force {
         if let Some((
             existing_id,
@@ -581,13 +1295,13 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
         )) = db
             .conn()
             .query_row(
-                "SELECT id, COALESCE(poster_path, ''), collection_json,
+                "SELECT id, COALESCE(poster_override_url, poster_path, ''), collection_json,
                         genres_json, credits_json, production_companies_json, keywords_json, similar_json,
                         CASE WHEN enriched_at IS NOT NULL
                               AND datetime(enriched_at) >= datetime('now', '-30 days')
                              THEN 1 ELSE 0 END
-                 FROM movies WHERE tmdb_id = ?1",
-                params![tmdb_id],
+                 FROM movies WHERE tmdb_id = ?1 AND tmdb_media_type = ?2",
+                params![tmdb_id, media_type.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -621,27 +1335,42 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
 
     let api_key = get_api_key()?.ok_or("missing api key")?;
     let path = format!(
-        "/movie/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords"
+        "/{}/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords,images",
+        media_type.endpoint()
     );
     let body = tmdb_get(&api_key, &path)?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    let title = v["title"].as_str().unwrap_or("Unknown").to_string();
-    let year = v["release_date"]
-        .as_str()
+    let title = if media_type == TmdbMediaType::Tv {
+        v["name"].as_str()
+    } else {
+        v["title"].as_str()
+    }
+    .unwrap_or("Unknown")
+    .to_string();
+    let year = if media_type == TmdbMediaType::Tv {
+        v["first_air_date"].as_str()
+    } else {
+        v["release_date"].as_str()
+    }
         .and_then(|d| d.get(0..4))
         .and_then(parse_year);
-    let poster = v["poster_path"].as_str().unwrap_or("").to_string();
+    let poster = preferred_artwork_path(v["poster_path"].as_str(), &v["images"], "posters")
+        .unwrap_or_default();
     let tagline = v["tagline"]
         .as_str()
         .map(str::to_string)
         .filter(|s| !s.is_empty());
-    let (collection_name, collection_items) = collection_from_movie(&api_key, &v);
+    let (collection_name, collection_items) = if media_type == TmdbMediaType::Movie {
+        collection_from_movie(&api_key, &v)
+    } else {
+        (None, Vec::new())
+    };
     let (recommendations, similar) = related_lists(&v);
     let existing_id: Option<String> = db
         .conn()
         .query_row(
-            "SELECT id FROM movies WHERE tmdb_id = ?1",
-            params![tmdb_id],
+            "SELECT id FROM movies WHERE tmdb_id = ?1 AND tmdb_media_type = ?2",
+            params![tmdb_id, media_type.as_str()],
             |row| row.get(0),
         )
         .optional()
@@ -655,9 +1384,14 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     } else {
         Some(poster)
     };
-    let backdrop = v["backdrop_path"].as_str().map(str::to_string);
+    let backdrop = preferred_artwork_path(v["backdrop_path"].as_str(), &v["images"], "backdrops");
     let overview = v["overview"].as_str().map(str::to_string);
-    let runtime = v["runtime"].as_i64();
+    let runtime = v["runtime"].as_i64().or_else(|| {
+        v["episode_run_time"]
+            .as_array()
+            .and_then(|runtimes| runtimes.first())
+            .and_then(|runtime| runtime.as_i64())
+    });
     let vote_average = v["vote_average"].as_f64();
     let vote_count = v["vote_count"].as_i64();
     let genres = serde_json::to_string(&genre_names(&v)).unwrap_or_else(|_| "[]".into());
@@ -678,11 +1412,11 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     if existing_id.is_some() {
         db.conn()
             .execute(
-                "UPDATE movies SET canonical_title = ?2, release_year = ?3, tmdb_id = ?4, poster_path = ?5,
-                 backdrop_path = ?6, overview = ?7, runtime = ?8, vote_average = ?9, vote_count = ?10,
-                 genres_json = ?11, cast_json = ?12, crew_json = ?13, similar_json = ?14,
-                 reviews_json = ?15, tagline = ?16, collection_name = ?17, collection_json = ?18,
-                 keywords_json = ?19, credits_json = ?20, production_companies_json = ?21,
+                "UPDATE movies SET canonical_title = ?2, release_year = ?3, tmdb_id = ?4, tmdb_media_type = ?5, poster_path = ?6,
+                 backdrop_path = ?7, overview = ?8, runtime = ?9, vote_average = ?10, vote_count = ?11,
+                 genres_json = ?12, cast_json = ?13, crew_json = ?14, similar_json = ?15,
+                 reviews_json = ?16, tagline = ?17, collection_name = ?18, collection_json = ?19,
+                 keywords_json = ?20, credits_json = ?21, production_companies_json = ?22,
                  enriched_at = datetime('now')
                  WHERE id = ?1",
                 params![
@@ -690,6 +1424,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                     title,
                     year,
                     tmdb_id,
+                    media_type.as_str(),
                     poster_store,
                     backdrop,
                     overview,
@@ -715,15 +1450,16 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
 
     db.conn()
         .execute(
-            "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, poster_path, backdrop_path,
+            "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, tmdb_media_type, poster_path, backdrop_path,
              overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json,
              reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, production_companies_json, enriched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, datetime('now'))",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, datetime('now'))",
             params![
                 id,
                 title,
                 year,
                 tmdb_id,
+                media_type.as_str(),
                 poster_store,
                 backdrop,
                 overview,
@@ -761,6 +1497,48 @@ fn parse_raw_title(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+/// A few import feeds put the release year directly in the title instead of
+/// supplying a separate year field (for example, "Magnolia, 1999").  Remove
+/// only an unambiguous trailing year delimiter for lookup; preserve the source
+/// title exactly as imported and prefer an explicit year when it exists.
+fn title_and_embedded_year(title: &str, explicit_year: Option<i32>) -> (String, Option<i32>) {
+    let trimmed = title.trim();
+    if trimmed.len() < 6 {
+        return (trimmed.to_string(), explicit_year);
+    }
+
+    let split_at = trimmed.len() - 4;
+    let (prefix, digits) = trimmed.split_at(split_at);
+    let Some(embedded_year) = digits
+        .chars()
+        .all(|character| character.is_ascii_digit())
+        .then(|| digits.parse::<i32>().ok())
+        .flatten()
+        .filter(|year| (1880..=2100).contains(year))
+    else {
+        return (trimmed.to_string(), explicit_year);
+    };
+
+    let prefix = prefix.trim_end();
+    let Some(delimiter) = prefix.chars().last() else {
+        return (trimmed.to_string(), explicit_year);
+    };
+    if !matches!(delimiter, ',' | '(' | '[') {
+        return (trimmed.to_string(), explicit_year);
+    }
+
+    let clean_title = prefix
+        .trim_end_matches(|character| matches!(character, ',' | '(' | '['))
+        .trim_end();
+    if clean_title.is_empty() {
+        return (trimmed.to_string(), explicit_year);
+    }
+    (
+        clean_title.to_string(),
+        explicit_year.or(Some(embedded_year)),
+    )
 }
 
 fn percent_encode(s: &str) -> String {
@@ -1174,6 +1952,13 @@ mod tests {
     }
 
     #[test]
+    fn search_title_matching_ignores_punctuation_only_differences() {
+        assert!(titles_match("Spider-Man: No Way Home", "spider man no way home"));
+        assert!(titles_match("Amélie", "amélie"));
+        assert!(!titles_match("The Piano Tuner", "tuner"));
+    }
+
+    #[test]
     fn tmdb_keyring_persists_beyond_the_entry() {
         use keyring::credential::{CredentialBuilderApi as _, CredentialPersistence};
         let persistence = keyring::default::default_credential_builder().persistence();
@@ -1240,10 +2025,320 @@ mod tests {
         let results = vec![TmdbSearchResult {
             id: 1571662,
             title: "The Piano Tuner".into(),
+            original_title: None,
             release_date: Some("2025-01-01".into()),
             poster_path: None,
+            vote_count: 100,
         }];
         assert!(pick_search_match(&results, "tuner", Some(2025)).is_none());
+    }
+
+    #[test]
+    fn search_matches_a_film_by_its_original_title() {
+        let results = vec![TmdbSearchResult {
+            id: 1,
+            title: "Localized title".into(),
+            original_title: Some("Original Title".into()),
+            release_date: Some("2020-01-01".into()),
+            poster_path: None,
+            vote_count: 100,
+        }];
+        assert_eq!(
+            pick_search_match(&results, "original title", Some(2020)).map(|result| result.id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn search_matches_a_short_title_when_tmdb_only_adds_a_colon_subtitle() {
+        let results = vec![TmdbSearchResult {
+            id: 2,
+            title: "Yellow: a LEGO Horror Movie".into(),
+            original_title: None,
+            release_date: Some("2026-07-02".into()),
+            poster_path: Some("/yellow.jpg".into()),
+            vote_count: 100,
+        }];
+        assert_eq!(
+            pick_search_match(&results, "yellow", Some(2026)).map(|result| result.id),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn search_selects_the_clearly_canonical_duplicate() {
+        let results = vec![
+            TmdbSearchResult {
+                id: 10,
+                title: "Companion".into(),
+                original_title: None,
+                release_date: Some("2025-01-31".into()),
+                poster_path: Some("/canonical.jpg".into()),
+                vote_count: 5000,
+            },
+            TmdbSearchResult {
+                id: 11,
+                title: "Companion".into(),
+                original_title: None,
+                release_date: Some("2025-01-31".into()),
+                poster_path: None,
+                vote_count: 1,
+            },
+        ];
+        assert_eq!(
+            pick_search_match(&results, "companion", Some(2025)).map(|result| result.id),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn search_prefers_a_clear_title_match_when_the_import_year_is_off() {
+        let results = vec![
+            TmdbSearchResult {
+                id: 10,
+                title: "Talk to Me".into(),
+                original_title: None,
+                release_date: Some("2023-07-26".into()),
+                poster_path: Some("/canonical.jpg".into()),
+                vote_count: 5000,
+            },
+            TmdbSearchResult {
+                id: 11,
+                title: "Talk to Me".into(),
+                original_title: None,
+                release_date: Some("1984-01-01".into()),
+                poster_path: None,
+                vote_count: 1,
+            },
+        ];
+        assert_eq!(
+            pick_search_match(&results, "talk to me", Some(2022)).map(|result| result.id),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn lookup_title_extracts_a_trailing_embedded_year() {
+        assert_eq!(
+            title_and_embedded_year("Magnolia, 1999", None),
+            ("Magnolia".to_string(), Some(1999))
+        );
+        assert_eq!(
+            title_and_embedded_year("The Phantom of the Opera (2004", Some(2004)),
+            ("The Phantom of the Opera".to_string(), Some(2004))
+        );
+        assert_eq!(
+            title_and_embedded_year("2001", None),
+            ("2001".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parent_series_queries_only_expand_likely_tv_specials() {
+        let queries = tv_parent_search_queries("a very solar holiday opposites special");
+        assert!(queries.contains(&"opposites".to_string()));
+        assert!(queries.contains(&"solar".to_string()));
+        assert!(queries.len() <= 4);
+        assert!(tv_parent_search_queries("the hunt for brown october").is_empty());
+    }
+
+    #[test]
+    fn tv_artwork_fallback_requires_an_exact_series_title() {
+        let results = vec![TmdbTvSearchResult {
+            id: 1,
+            name: "Localized series title".into(),
+            original_name: Some("Pop Star Academy: KATSEYE".into()),
+            first_air_date: Some("2024-08-21".into()),
+            poster_path: Some("/katseye.jpg".into()),
+        }];
+        assert_eq!(
+            pick_tv_match(
+                &results,
+                &normalize_title("Pop Star Academy: KATSEYE"),
+                Some(2024),
+            )
+                .and_then(|result| result.poster_path.as_deref()),
+            Some("/katseye.jpg")
+        );
+        assert!(pick_tv_match(&results, "katseye wild hearts", Some(2026)).is_none());
+    }
+
+    #[test]
+    fn tv_artwork_fallback_can_use_a_unique_parent_series_for_a_special() {
+        let results = vec![TmdbTvSearchResult {
+            id: 2,
+            name: "Solar Opposites".into(),
+            original_name: None,
+            first_air_date: Some("2020-05-08".into()),
+            poster_path: Some("/solar-opposites.jpg".into()),
+        }];
+        assert_eq!(
+            pick_tv_match(
+                &results,
+                "a very solar holiday opposites special",
+                Some(2021),
+            )
+            .and_then(|result| result.poster_path.as_deref()),
+            Some("/solar-opposites.jpg")
+        );
+    }
+
+    #[test]
+    fn community_images_fill_a_missing_default_poster() {
+        let images = serde_json::json!({
+            "posters": [
+                { "file_path": "/foreign.jpg", "iso_639_1": "fr", "vote_count": 90 },
+                { "file_path": "/english.jpg", "iso_639_1": "en", "vote_count": 2 }
+            ]
+        });
+        assert_eq!(
+            preferred_artwork_path(None, &images, "posters"),
+            Some("/english.jpg".into())
+        );
+    }
+
+    #[test]
+    fn artwork_picker_keeps_only_high_resolution_portrait_and_landscape_images() {
+        let images = serde_json::json!({
+            "posters": [
+                { "file_path": "/tiny-poster.jpg", "width": 342, "height": 513, "vote_count": 100 },
+                { "file_path": "/wide-poster.jpg", "width": 1000, "height": 600, "vote_count": 100 },
+                { "file_path": "/sharp-poster.jpg", "width": 1000, "height": 1500, "vote_count": 2 }
+            ],
+            "backdrops": [
+                { "file_path": "/tiny-backdrop.jpg", "width": 780, "height": 439, "vote_count": 50 },
+                { "file_path": "/tall-backdrop.jpg", "width": 1280, "height": 1800, "vote_count": 50 },
+                { "file_path": "/sharp-backdrop.jpg", "width": 1920, "height": 1080, "vote_count": 2 }
+            ]
+        });
+        assert_eq!(artwork_picker_paths(&images, "posters"), vec!["/sharp-poster.jpg"]);
+        assert_eq!(artwork_picker_paths(&images, "backdrops"), vec!["/sharp-backdrop.jpg"]);
+    }
+
+    #[test]
+    fn artwork_gap_reuses_an_existing_tmdb_match() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, raw_identity, created_at)
+                 VALUES ('source', 'letterboxd_export', 'source', 'gap film', '{\"title\":\"Gap Film\"}', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id) VALUES ('movie', 'Gap Film', 42)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state)
+                 VALUES ('source', 'movie', 'confirmed')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            linked_tmdb(&db, "source").unwrap(),
+            Some((42, TmdbMediaType::Movie))
+        );
+    }
+
+    #[test]
+    fn cached_confirmed_cover_is_not_requeued_as_a_tmdb_artwork_gap() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, raw_identity, cached_poster_url, created_at)
+                 VALUES ('cached', 'letterboxd_export', 'cached', 'cached film', '{}', 'https://cover.test/cached.jpg', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id) VALUES ('movie', 'Cached Film', 42)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state)
+                 VALUES ('cached', 'movie', 'confirmed')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, raw_identity, cached_poster_url, created_at)
+                 VALUES ('unmatched', 'letterboxd_export', 'unmatched', 'unmatched film', '{}', 'https://cover.test/unmatched.jpg', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, match_state)
+                 VALUES ('unmatched', 'unmatched')",
+                [],
+            )
+            .unwrap();
+
+        let ids: Vec<_> = list_unmatched(&db)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(ids, vec!["unmatched"]);
+        assert!(source_has_poster(&db, "cached").unwrap());
+    }
+
+    #[test]
+    fn metadata_gaps_are_hydrated_independently_of_poster_status() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id, tmdb_media_type, poster_path)
+                 VALUES ('gap', 'A Series Special', 77, 'tv', '/already-has-a-cover.jpg')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(
+                   id, canonical_title, tmdb_id, tmdb_media_type, enriched_at,
+                   genres_json, credits_json, production_companies_json, keywords_json, similar_json
+                 ) VALUES ('complete', 'Complete', 78, 'movie', datetime('now'), '[]', '{}', '[]', '[]', '{}')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(list_metadata_gaps(&db).unwrap(), vec![(77, TmdbMediaType::Tv)]);
+    }
+
+    #[test]
+    fn propagating_a_movie_without_a_poster_does_not_fail() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, raw_identity, created_at)
+                 VALUES ('source', 'letterboxd_export', 'source', 'posterless film', '{\"title\":\"Posterless Film\"}', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id, poster_path)
+                 VALUES ('movie', 'Posterless Film', 43, NULL)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state)
+                 VALUES ('source', 'movie', 'confirmed')",
+                [],
+            )
+            .unwrap();
+
+        assert!(propagate_movie_link(&db, "source", "movie").is_ok());
     }
 
     #[test]

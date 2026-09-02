@@ -153,6 +153,20 @@ export type FilmDetail = {
   similar: LibraryItem[];
 };
 
+export type ArtworkImage = {
+  path: string;
+  url: string;
+};
+
+export type FilmArtwork = {
+  posters: ArtworkImage[];
+  backdrops: ArtworkImage[];
+  selectedPoster: string | null;
+  selectedBackdrop: string | null;
+  defaultPoster: string | null;
+  defaultBackdrop: string | null;
+};
+
 export type FilmCastMember = {
   tmdbId: number | null;
   name: string;

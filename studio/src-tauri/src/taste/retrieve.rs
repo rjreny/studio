@@ -195,7 +195,7 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
               m.keywords_json,
               m.similar_json,
               m.runtime,
-              COALESCE(m.poster_path, smr.cached_poster_url),
+              COALESCE(m.poster_override_url, m.poster_path, smr.cached_poster_url),
               m.vote_count,
               smr.raw_identity
             FROM source_movie_records smr

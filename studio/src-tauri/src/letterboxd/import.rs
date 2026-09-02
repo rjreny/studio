@@ -523,6 +523,7 @@ pub fn upsert_source_movie(
             source_record_key,
             meta.poster.as_deref(),
             meta.tmdb_id,
+            meta.tmdb_media_type.as_deref(),
         )?;
         return Ok(id);
     }
@@ -534,6 +535,9 @@ pub fn upsert_source_movie(
     }
     if let Some(tmdb_id) = meta.tmdb_id {
         identity["tmdb_id"] = serde_json::json!(tmdb_id);
+    }
+    if let Some(kind) = meta.tmdb_media_type.as_deref() {
+        identity["tmdb_media_type"] = serde_json::json!(kind);
     }
     tx.execute(
         "INSERT INTO source_movie_records(

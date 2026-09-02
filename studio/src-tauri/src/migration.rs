@@ -61,6 +61,7 @@ pub fn migrate_legacy(
                 &SourceMovieMeta {
                     poster: film.poster.clone(),
                     tmdb_id: film.tmdb_id.as_deref().and_then(parse_tmdb_id),
+                    ..Default::default()
                 },
             )?;
 

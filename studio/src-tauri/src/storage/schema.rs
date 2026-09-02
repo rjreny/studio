@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 13;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -25,8 +25,11 @@ CREATE TABLE IF NOT EXISTS movies (
   canonical_title TEXT NOT NULL,
   release_year INTEGER,
   tmdb_id INTEGER,
+  tmdb_media_type TEXT NOT NULL DEFAULT 'movie',
   poster_path TEXT,
   backdrop_path TEXT,
+  poster_override_url TEXT,
+  backdrop_override_url TEXT,
   overview TEXT,
   runtime INTEGER,
   vote_average REAL,

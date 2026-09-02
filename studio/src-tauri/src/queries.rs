@@ -60,11 +60,11 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
           SELECT
             {film_key} AS film_key,
             smr.id AS source_id,
-            COALESCE(m.canonical_title, smr.raw_identity) AS title_raw,
-            COALESCE(m.release_year, smr.release_year) AS year,
+            CASE WHEN m.tmdb_media_type = 'tv' THEN smr.raw_identity ELSE COALESCE(m.canonical_title, smr.raw_identity) END AS title_raw,
+            CASE WHEN m.tmdb_media_type = 'tv' THEN smr.release_year ELSE COALESCE(m.release_year, smr.release_year) END AS year,
             ums.current_rating,
-            m.poster_path AS poster,
-            m.backdrop_path AS backdrop,
+            COALESCE(m.poster_override_url, m.poster_path) AS poster,
+            COALESCE(m.backdrop_override_url, m.backdrop_path) AS backdrop,
             m.overview AS overview,
             smr.cached_poster_url,
             json_extract(smr.raw_identity, '$.poster') AS identity_poster,
@@ -97,13 +97,13 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
           SELECT
             fe.*,
             (
-              SELECT COALESCE(m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster'))
+              SELECT COALESCE(m3.poster_override_url, m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster'))
               FROM source_movie_records smr3
               LEFT JOIN movie_links ml3 ON ml3.source_movie_record_id = smr3.id
               LEFT JOIN movies m3 ON m3.id = ml3.movie_id
               WHERE COALESCE(ml3.movie_id, smr3.normalized_title || ':' || IFNULL(CAST(smr3.release_year AS TEXT), '')) = fe.film_key
-                AND COALESCE(m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster')) IS NOT NULL
-                AND TRIM(COALESCE(m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster'), '')) != ''
+                AND COALESCE(m3.poster_override_url, m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster')) IS NOT NULL
+                AND TRIM(COALESCE(m3.poster_override_url, m3.poster_path, smr3.cached_poster_url, json_extract(smr3.raw_identity, '$.poster'), '')) != ''
               LIMIT 1
             ) AS resolved_poster,
             ROW_NUMBER() OVER (
@@ -372,11 +372,11 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
             r#"
             SELECT
               COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')),
-              COALESCE(m.canonical_title, smr.raw_identity),
-              COALESCE(m.release_year, smr.release_year),
+              CASE WHEN m.tmdb_media_type = 'tv' THEN smr.raw_identity ELSE COALESCE(m.canonical_title, smr.raw_identity) END,
+              CASE WHEN m.tmdb_media_type = 'tv' THEN smr.release_year ELSE COALESCE(m.release_year, smr.release_year) END,
               ums.current_rating,
-              COALESCE(m.poster_path, smr.cached_poster_url, json_extract(smr.raw_identity, '$.poster')),
-              m.backdrop_path,
+              COALESCE(m.poster_override_url, m.poster_path, smr.cached_poster_url, json_extract(smr.raw_identity, '$.poster')),
+              COALESCE(m.backdrop_override_url, m.backdrop_path),
               m.overview,
               m.runtime,
               m.genres_json,
@@ -493,7 +493,9 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         .conn()
         .query_row(
             r#"
-            SELECT id, canonical_title, release_year, poster_path, backdrop_path, overview, runtime,
+            SELECT id, canonical_title, release_year,
+                   COALESCE(poster_override_url, poster_path),
+                   COALESCE(backdrop_override_url, backdrop_path), overview, runtime,
                    genres_json, vote_average, vote_count, reviews_json, cast_json, crew_json,
                    similar_json, tmdb_id, tagline, collection_name, collection_json, credits_json,
                    production_companies_json, keywords_json
@@ -789,9 +791,9 @@ fn film_connections(
             r#"
             SELECT
               COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')),
-              COALESCE(m.canonical_title, smr.raw_identity),
+              CASE WHEN m.tmdb_media_type = 'tv' THEN smr.raw_identity ELSE COALESCE(m.canonical_title, smr.raw_identity) END,
               ums.current_rating,
-              m.poster_path,
+              COALESCE(m.poster_override_url, m.poster_path),
               m.tmdb_id,
               m.credits_json,
               m.production_companies_json
@@ -1320,6 +1322,37 @@ mod tests {
         assert!(detail.backdrop.unwrap().contains("/original/"));
         assert_eq!(detail.similar.len(), 1);
         assert_eq!(detail.similar[0].title, "Inception");
+    }
+
+    #[test]
+    fn tv_special_keeps_the_source_title_while_using_series_metadata() {
+        let db = Database::in_memory().expect("db");
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, tmdb_media_type, overview, genres_json, credits_json, production_companies_json, keywords_json, similar_json, collection_json)
+                 VALUES ('series', 'Solar Opposites', 2020, 97680, 'tv', 'Series details', '[]', '{}', '[]', '[]', '{}', '[]')",
+                [],
+            )
+            .expect("series");
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, release_year, raw_identity, created_at)
+                 VALUES ('special', 'letterboxd_export', 'special', 'solar special', 2025, '{\"title\":\"An Earth Shatteringly Romantic Solar Valentines Day Opposites Special\"}', datetime('now'))",
+                [],
+            )
+            .expect("special");
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, movie_id, match_state)
+                 VALUES ('special', 'series', 'confirmed')",
+                [],
+            )
+            .expect("link");
+
+        let detail = get_film(&db, "special").expect("detail");
+        assert_eq!(detail.title, "An Earth Shatteringly Romantic Solar Valentines Day Opposites Special");
+        assert_eq!(detail.year, Some(2025));
+        assert_eq!(detail.overview.as_deref(), Some("Series details"));
     }
 
     #[test]

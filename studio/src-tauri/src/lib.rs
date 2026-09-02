@@ -250,6 +250,8 @@ pub fn run() {
             commands::library_get,
             commands::stats_get,
             commands::film_get,
+            commands::film_artwork_get,
+            commands::film_artwork_set,
             commands::home_get,
             commands::import_export_zip,
             commands::import_get_diagnostics,

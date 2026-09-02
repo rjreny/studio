@@ -319,6 +319,7 @@ export default function App() {
                 backLabel={detailBackLabel(selectedFilm.source)}
                 onStatus={setStatus}
                 onSelectFilm={(id) => openFilm(id, selectedFilm.source)}
+                onArtworkChange={refresh}
               />
             ) : (
               <>

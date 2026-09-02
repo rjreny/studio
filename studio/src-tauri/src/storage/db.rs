@@ -202,6 +202,22 @@ impl Database {
                 [],
             );
         }
+        if version < 12 {
+            let _ = self.conn.execute(
+                "ALTER TABLE movies ADD COLUMN poster_override_url TEXT",
+                [],
+            );
+            let _ = self.conn.execute(
+                "ALTER TABLE movies ADD COLUMN backdrop_override_url TEXT",
+                [],
+            );
+        }
+        if version < 13 {
+            let _ = self.conn.execute(
+                "ALTER TABLE movies ADD COLUMN tmdb_media_type TEXT NOT NULL DEFAULT 'movie'",
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -667,7 +683,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("11".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("13".into()));
     }
 
     #[test]
@@ -734,9 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v11_keeps_existing_taste_tables_and_adds_company_storage() {
+    fn schema_v13_keeps_existing_taste_tables_and_adds_artwork_overrides() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("11".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("13".into()));
         let feedback: i64 = db
             .conn()
             .query_row(
@@ -791,6 +807,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(company_column, 1);
+        let artwork_columns: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('movies') WHERE name IN ('poster_override_url', 'backdrop_override_url')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artwork_columns, 2);
+        let media_type_column: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('movies') WHERE name = 'tmdb_media_type'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(media_type_column, 1);
         db.reset_all_data().unwrap();
         let leftover: i64 = db
             .conn()

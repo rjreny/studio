@@ -374,6 +374,32 @@ pub struct SetRatingInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArtworkImage {
+    pub path: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmArtwork {
+    pub posters: Vec<ArtworkImage>,
+    pub backdrops: Vec<ArtworkImage>,
+    pub selected_poster: Option<String>,
+    pub selected_backdrop: Option<String>,
+    pub default_poster: Option<String>,
+    pub default_backdrop: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetArtworkInput {
+    pub id: String,
+    pub poster: Option<String>,
+    pub backdrop: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MigrationResult {
     pub status: String,
     pub migration_version: i32,

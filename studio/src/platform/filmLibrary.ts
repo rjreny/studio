@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSession,
+  FilmArtwork,
   EnrichReport,
   FilmDetail,
   FilmTasteFit,
@@ -85,6 +86,20 @@ export async function getStats(): Promise<StatsSnapshot> {
 
 export async function getFilm(id: string): Promise<FilmDetail> {
   return cached(`film:${id}`, () => invoke<FilmDetail>("film_get", { id }));
+}
+
+export async function getFilmArtwork(id: string): Promise<FilmArtwork> {
+  return invoke<FilmArtwork>("film_artwork_get", { id });
+}
+
+export async function setFilmArtwork(
+  id: string,
+  artwork: { poster: string | null; backdrop: string | null },
+): Promise<FilmDetail> {
+  const film = await invoke<FilmDetail>("film_artwork_set", { input: { id, ...artwork } });
+  invalidateDataCache();
+  dataCache.set(`film:${id}`, Promise.resolve(film));
+  return film;
 }
 
 export async function getFilmTasteDetail(id: string): Promise<FilmTasteFit> {

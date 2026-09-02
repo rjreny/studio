@@ -4,9 +4,9 @@ use crate::letterboxd::rss::{rss_url, sync_rss};
 use crate::letterboxd::zip::discover_zip;
 use crate::migration::migrate_legacy;
 use crate::models::{
-    AppSession, EnrichReport, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics,
+    AppSession, EnrichReport, FilmArtwork, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics,
     ImportResult, ImportSummary, InstallInfo, JobProgress, LegacyLibrary, LibraryCoverage,
-    LibraryPage, LibraryQuery, MigrationResult, SetRatingInput, StatsSnapshot, SyncResult, TmdbKeyStatus,
+    LibraryPage, LibraryQuery, MigrationResult, SetArtworkInput, SetRatingInput, StatsSnapshot, SyncResult, TmdbKeyStatus,
 };
 use crate::queries::{get_film, get_home, get_library, get_stats, parse_tmdb_ref, resolve_source_movie_ids};
 use crate::storage::db::Database;
@@ -197,6 +197,22 @@ pub fn film_get(id: String, state: State<'_, AppState>) -> Result<FilmDetail, St
             Err(err)
         }
     }
+}
+
+#[tauri::command]
+pub fn film_artwork_get(id: String, state: State<'_, AppState>) -> Result<FilmArtwork, String> {
+    let db = state.db.lock().map_err(|error| error.to_string())?;
+    tmdb::film_artwork(&db, &id)
+}
+
+#[tauri::command]
+pub fn film_artwork_set(
+    input: SetArtworkInput,
+    state: State<'_, AppState>,
+) -> Result<FilmDetail, String> {
+    let db = state.db.lock().map_err(|error| error.to_string())?;
+    tmdb::set_film_artwork(&db, &input)?;
+    get_film(&db, &input.id)
 }
 
 #[tauri::command]
@@ -540,14 +556,29 @@ pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
                     report.last_error
                 ),
             );
+            let finished_label = match (report.has_key, report.key_valid) {
+                (false, _) => format!(
+                    "TMDB key missing · {} still missing",
+                    report.remaining_without_poster
+                ),
+                (_, Some(false)) => format!(
+                    "TMDB key rejected · {} still missing",
+                    report.remaining_without_poster
+                ),
+                _ if report.errors > 0 => format!(
+                    "Finished · {} posters · {} still missing · {} errors",
+                    report.posters, report.remaining_without_poster, report.errors
+                ),
+                _ => format!(
+                    "Finished · {} posters · {} still missing",
+                    report.posters, report.remaining_without_poster
+                ),
+            };
             let _ = app.emit(
                 "studio-job",
                 JobProgress {
                     job: "enrich".into(),
-                    label: format!(
-                        "Finished · {} posters · {} still missing",
-                        report.posters, report.remaining_without_poster
-                    ),
+                    label: finished_label,
                     current: report.attempted,
                     total: report.attempted.max(1),
                     posters: report.posters,
