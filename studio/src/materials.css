@@ -71,10 +71,9 @@ html[data-theme="light"] .glass {
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
-
-.stage::-webkit-scrollbar { width: 0; height: 0; }
 
 .stage::-webkit-scrollbar {
   width: 12px;
