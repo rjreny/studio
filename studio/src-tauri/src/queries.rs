@@ -1,13 +1,16 @@
 use crate::catalog::tmdb::library_item_from_tmdb_value;
-use crate::letterboxd::posters::{backdrop_url, poster_from_rss_body, poster_url};
+use crate::letterboxd::posters::{backdrop_url, poster_from_rss_body, poster_url, tmdb_image_url};
 use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::{
-    FilmDetail, FriendActivityItem, HomeViewModel, LibraryItem, LibraryPage,
-    LibraryQuery, ViewingHistoryItem,
+    ConnectionFilm, FilmCastMember, FilmConnection, FilmCrewMember, FilmDetail,
+    FriendActivityItem, HomeViewModel, LibraryItem, LibraryPage, LibraryQuery,
+    ProductionCompany, StatsBucket, StatsSnapshot, ViewingHistoryItem,
 };
 use crate::storage::db::Database;
+use chrono::{Datelike, Utc};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 use serde_json;
+use std::collections::HashMap;
 
 const FILM_KEY: &str =
     "COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), ''))";
@@ -176,6 +179,133 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
     })
 }
 
+pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
+    let mut monthly_stmt = db
+        .conn()
+        .prepare(
+            r#"
+            SELECT strftime('%Y-%m', COALESCE(occurred_at, observed_at)) AS month, COUNT(*)
+            FROM viewings
+            WHERE strftime('%Y-%m', COALESCE(occurred_at, observed_at)) IS NOT NULL
+            GROUP BY month
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let monthly_counts: HashMap<String, u32> = monthly_stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let viewing_months = recent_month_labels(24)
+        .into_iter()
+        .map(|label| StatsBucket {
+            count: monthly_counts.get(&label).copied().unwrap_or(0),
+            label,
+            average_rating: None,
+        })
+        .collect();
+
+    let mut genre_stmt = db
+        .conn()
+        .prepare(
+            r#"
+            WITH watched_movies AS (
+              SELECT DISTINCT m.id, ums.current_rating
+              FROM viewings v
+              JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+              JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+              JOIN movies m ON m.id = ml.movie_id
+              LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
+              WHERE m.genres_json IS NOT NULL
+            )
+            SELECT genre.value, COUNT(*) AS film_count, AVG(current_rating)
+            FROM watched_movies wm
+            JOIN movies m ON m.id = wm.id
+            JOIN json_each(m.genres_json) genre
+            WHERE TRIM(genre.value) != ''
+            GROUP BY genre.value
+            ORDER BY film_count DESC, genre.value COLLATE NOCASE ASC
+            LIMIT 8
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let genres = genre_stmt
+        .query_map([], |row| {
+            Ok(StatsBucket {
+                label: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u32,
+                average_rating: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+
+    let rewatch_count: u32 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM viewings WHERE rewatch = 1", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let (total_runtime_minutes, runtime_viewings): (u32, u32) = db
+        .conn()
+        .query_row(
+            r#"
+            SELECT COALESCE(SUM(m.runtime), 0), COUNT(*)
+            FROM viewings v
+            JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+            JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+            JOIN movies m ON m.id = ml.movie_id
+            WHERE m.runtime IS NOT NULL AND m.runtime > 0
+            "#,
+            [],
+            |row| Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u32)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let metadata_movies: u32 = db
+        .conn()
+        .query_row(
+            r#"
+            SELECT COUNT(DISTINCT m.id)
+            FROM viewings v
+            JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+            JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+            JOIN movies m ON m.id = ml.movie_id
+            WHERE m.genres_json IS NOT NULL
+            "#,
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(StatsSnapshot {
+        viewing_months,
+        genres,
+        rewatch_count,
+        total_runtime_minutes,
+        runtime_viewings,
+        metadata_movies,
+    })
+}
+
+fn recent_month_labels(month_count: usize) -> Vec<String> {
+    let now = Utc::now();
+    let mut year = now.year();
+    let mut month = now.month() as i32;
+    let mut labels = Vec::with_capacity(month_count);
+
+    for _ in 0..month_count {
+        labels.push(format!("{year}-{month:02}"));
+        month -= 1;
+        if month == 0 {
+            month = 12;
+            year -= 1;
+        }
+    }
+    labels.reverse();
+    labels
+}
+
 pub fn parse_tmdb_ref(id: &str) -> Option<i64> {
     id.strip_prefix("tmdb:")?.parse().ok().filter(|n| *n > 0)
 }
@@ -261,7 +391,10 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
               m.tmdb_id,
               m.tagline,
               m.collection_name,
-              m.collection_json
+              m.collection_json,
+              m.credits_json,
+              m.production_companies_json,
+              m.keywords_json
             FROM source_movie_records smr
             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             LEFT JOIN movies m ON m.id = ml.movie_id
@@ -298,6 +431,9 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
                     row.get::<_, Option<String>>(18)?,
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
+                    row.get::<_, Option<String>>(23)?,
                 ))
             },
         )
@@ -311,7 +447,10 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
     let source_ids = resolve_source_movie_ids(db, id)?;
     let title = parse_raw_title(&row.1);
     let your_history = viewing_history(db, &source_ids)?;
-    let crew = json_vec(row.15.as_deref());
+    let legacy_crew = json_vec(row.15.as_deref());
+    let (cast, crew) = structured_credits(row.21.as_deref(), row.14.as_deref(), row.15.as_deref());
+    let companies = production_companies(row.22.as_deref());
+    let connections = film_connections(db, &cast, &crew, &companies, row.17)?;
     let similar = relink_catalog_items(db, parse_related(row.16.as_deref()));
     let collection = relink_catalog_items(db, parse_related(row.20.as_deref()));
 
@@ -334,13 +473,17 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         tmdb_vote_count: row.12,
         tmdb_reviews: json_vec(row.13.as_deref()),
         tagline: row.18.filter(|s| !s.is_empty()),
-        directors: directors_from_crew(&crew),
-        cast: json_vec(row.14.as_deref()),
+        directors: directors_from_people(&crew, &legacy_crew),
+        cast: cast.clone(),
         crew,
+        companies: companies.clone(),
+        keywords: keyword_names(row.23.as_deref()),
+        connections,
         collection_name: row.19.filter(|s| !s.is_empty()),
         collection,
         similar,
         collection_hydrated: row.20.is_some(),
+        detail_metadata_hydrated: structured_metadata_hydrated(row.21.as_deref(), row.22.as_deref()),
     }))
 }
 
@@ -352,7 +495,8 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
             r#"
             SELECT id, canonical_title, release_year, poster_path, backdrop_path, overview, runtime,
                    genres_json, vote_average, vote_count, reviews_json, cast_json, crew_json,
-                   similar_json, tmdb_id, tagline, collection_name, collection_json
+                   similar_json, tmdb_id, tagline, collection_name, collection_json, credits_json,
+                   production_companies_json, keywords_json
             FROM movies
             WHERE id = ?1
                OR CAST(tmdb_id AS TEXT) = ?1
@@ -380,6 +524,9 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
                     row.get::<_, Option<String>>(15)?,
                     row.get::<_, Option<String>>(16)?,
                     row.get::<_, Option<String>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
                 ))
             },
         )
@@ -390,7 +537,10 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         return Ok(None);
     };
 
-    let crew = json_vec(row.12.as_deref());
+    let legacy_crew = json_vec(row.12.as_deref());
+    let (cast, crew) = structured_credits(row.18.as_deref(), row.11.as_deref(), row.12.as_deref());
+    let companies = production_companies(row.19.as_deref());
+    let connections = film_connections(db, &cast, &crew, &companies, row.14)?;
     let catalog_id = tmdb_id
         .or(row.14)
         .map(|n| format!("tmdb:{n}"))
@@ -414,13 +564,17 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         tmdb_vote_count: row.9,
         tmdb_reviews: json_vec(row.10.as_deref()),
         tagline: row.15.filter(|s| !s.is_empty()),
-        directors: directors_from_crew(&crew),
-        cast: json_vec(row.11.as_deref()),
+        directors: directors_from_people(&crew, &legacy_crew),
+        cast: cast.clone(),
         crew,
+        companies: companies.clone(),
+        keywords: keyword_names(row.20.as_deref()),
+        connections,
         collection_name: row.16.filter(|s| !s.is_empty()),
         collection: parse_related(row.17.as_deref()),
         similar: parse_related(row.13.as_deref()),
         collection_hydrated: row.17.is_some(),
+        detail_metadata_hydrated: structured_metadata_hydrated(row.18.as_deref(), row.19.as_deref()),
     }))
 }
 
@@ -457,6 +611,299 @@ fn directors_from_crew(crew: &[String]) -> Vec<String> {
     crew.iter()
         .filter_map(|entry| entry.strip_suffix(" (Director)").map(str::to_string))
         .collect()
+}
+
+fn directors_from_people(crew: &[FilmCrewMember], legacy_crew: &[String]) -> Vec<String> {
+    let mut directors: Vec<String> = crew
+        .iter()
+        .filter(|member| member.job.eq_ignore_ascii_case("director"))
+        .map(|member| member.name.clone())
+        .collect();
+    directors.sort();
+    directors.dedup();
+    if directors.is_empty() {
+        directors_from_crew(legacy_crew)
+    } else {
+        directors
+    }
+}
+
+fn structured_credits(
+    raw: Option<&str>,
+    legacy_cast: Option<&str>,
+    legacy_crew: Option<&str>,
+) -> (Vec<FilmCastMember>, Vec<FilmCrewMember>) {
+    if let Some(raw) = raw {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            let cast = serde_json::from_value::<Vec<FilmCastMember>>(value["cast"].clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|member| !member.name.trim().is_empty())
+                .map(|mut member| {
+                    member.profile = tmdb_image_url(member.profile, "w185");
+                    member
+                })
+                .collect::<Vec<_>>();
+            let crew = serde_json::from_value::<Vec<FilmCrewMember>>(value["crew"].clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|member| !member.name.trim().is_empty() && !member.job.trim().is_empty())
+                .map(|mut member| {
+                    member.profile = tmdb_image_url(member.profile, "w185");
+                    member
+                })
+                .collect::<Vec<_>>();
+            if !cast.is_empty() || !crew.is_empty() {
+                return (cast, crew);
+            }
+        }
+    }
+
+    let cast = json_vec(legacy_cast)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(order, entry)| {
+            let (name, character) = entry
+                .split_once(" as ")
+                .map(|(name, character)| (name.trim(), Some(character.trim().to_string())))
+                .unwrap_or((entry.trim(), None));
+            (!name.is_empty()).then(|| FilmCastMember {
+                tmdb_id: None,
+                name: name.to_string(),
+                profile: None,
+                character: character.filter(|value| !value.is_empty()),
+                order: Some(order as i32),
+            })
+        })
+        .collect();
+    let crew = json_vec(legacy_crew)
+        .into_iter()
+        .filter_map(|entry| {
+            let (name, job) = entry.rsplit_once(" (")?;
+            let job = job.trim_end_matches(')').trim();
+            (!name.trim().is_empty() && !job.is_empty()).then(|| FilmCrewMember {
+                tmdb_id: None,
+                name: name.trim().to_string(),
+                profile: None,
+                department: None,
+                job: job.to_string(),
+            })
+        })
+        .collect();
+    (cast, crew)
+}
+
+fn production_companies(raw: Option<&str>) -> Vec<ProductionCompany> {
+    raw.and_then(|value| serde_json::from_str::<Vec<ProductionCompany>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|company| !company.name.trim().is_empty())
+        .map(|mut company| {
+            company.logo = tmdb_image_url(company.logo, "w185");
+            company
+        })
+        .collect()
+}
+
+fn keyword_names(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok())
+        .map(|keywords| {
+            keywords
+                .into_iter()
+                .filter_map(|keyword| keyword["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn structured_metadata_hydrated(credits: Option<&str>, companies: Option<&str>) -> bool {
+    credits
+        .map(|value| value.contains("\"detailVersion\":1"))
+        .unwrap_or(false)
+        && companies.is_some()
+}
+
+#[derive(Clone)]
+struct ConnectionEntity {
+    kind: &'static str,
+    id: String,
+    name: String,
+    roles: Vec<String>,
+}
+
+fn entity_key(kind: &str, tmdb_id: Option<i64>, name: &str) -> String {
+    match tmdb_id {
+        Some(id) => format!("{kind}:{id}"),
+        None => format!("{kind}:{}", name.trim().to_ascii_lowercase()),
+    }
+}
+
+fn film_connections(
+    db: &Database,
+    cast: &[FilmCastMember],
+    crew: &[FilmCrewMember],
+    companies: &[ProductionCompany],
+    detail_tmdb_id: Option<i64>,
+) -> Result<Vec<FilmConnection>, String> {
+    let mut entities: HashMap<String, ConnectionEntity> = HashMap::new();
+    for member in cast {
+        let key = entity_key("person", member.tmdb_id, &member.name);
+        let entry = entities.entry(key.clone()).or_insert_with(|| ConnectionEntity {
+            kind: "person",
+            id: key,
+            name: member.name.clone(),
+            roles: Vec::new(),
+        });
+        if !entry.roles.iter().any(|role| role == "Cast") {
+            entry.roles.push("Cast".into());
+        }
+    }
+    for member in crew {
+        let key = entity_key("person", member.tmdb_id, &member.name);
+        let entry = entities.entry(key.clone()).or_insert_with(|| ConnectionEntity {
+            kind: "person",
+            id: key,
+            name: member.name.clone(),
+            roles: Vec::new(),
+        });
+        if !entry.roles.iter().any(|role| role == &member.job) {
+            entry.roles.push(member.job.clone());
+        }
+    }
+    for company in companies {
+        let key = entity_key("company", company.tmdb_id, &company.name);
+        entities.entry(key.clone()).or_insert_with(|| ConnectionEntity {
+            kind: "company",
+            id: key,
+            name: company.name.clone(),
+            roles: vec!["Production company".into()],
+        });
+    }
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = db
+        .conn()
+        .prepare(
+            r#"
+            SELECT
+              COALESCE(ml.movie_id, smr.normalized_title || ':' || IFNULL(CAST(smr.release_year AS TEXT), '')),
+              COALESCE(m.canonical_title, smr.raw_identity),
+              ums.current_rating,
+              m.poster_path,
+              m.tmdb_id,
+              m.credits_json,
+              m.production_companies_json
+            FROM source_movie_records smr
+            JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
+            LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
+            LEFT JOIN movies m ON m.id = ml.movie_id
+            WHERE ums.current_rating IS NOT NULL
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let rows = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
+    let ratings = rows.iter().map(|row| row.2).collect::<Vec<_>>();
+    if ratings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let baseline = ratings.iter().sum::<f64>() / ratings.len() as f64;
+    let mut evidence: HashMap<String, Vec<ConnectionFilm>> = HashMap::new();
+    for (id, raw_title, rating, poster, tmdb_id, credits, stored_companies) in rows {
+        if detail_tmdb_id.is_some() && detail_tmdb_id == tmdb_id {
+            continue;
+        }
+        let (local_cast, local_crew) = structured_credits(credits.as_deref(), None, None);
+        let local_companies = production_companies(stored_companies.as_deref());
+        let mut matched = std::collections::HashSet::new();
+        for member in local_cast {
+            matched.insert(entity_key("person", member.tmdb_id, &member.name));
+        }
+        for member in local_crew {
+            matched.insert(entity_key("person", member.tmdb_id, &member.name));
+        }
+        for company in local_companies {
+            matched.insert(entity_key("company", company.tmdb_id, &company.name));
+        }
+        let item = ConnectionFilm {
+            id,
+            title: parse_raw_title(&raw_title),
+            rating,
+            poster: poster_url(poster),
+        };
+        for key in matched {
+            if entities.contains_key(&key) {
+                let values = evidence.entry(key).or_default();
+                if !values.iter().any(|value| value.id == item.id) {
+                    values.push(item.clone());
+                }
+            }
+        }
+    }
+
+    let mut connections = evidence
+        .into_iter()
+        .filter_map(|(key, mut films)| {
+            let entity = entities.get(&key)?;
+            films.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap_or(std::cmp::Ordering::Equal));
+            let shared_count = films.len() as u32;
+            let average_rating = films.iter().map(|film| film.rating).sum::<f64>() / shared_count as f64;
+            let tone = if shared_count >= 3 && average_rating >= baseline + 0.35 {
+                "positive"
+            } else if shared_count >= 3 && average_rating <= baseline - 0.35 {
+                "negative"
+            } else if shared_count >= 3 {
+                "mixed"
+            } else {
+                "unknown"
+            };
+            let confidence = match shared_count {
+                0 => "No shared films",
+                1 | 2 => "Limited evidence",
+                3 | 4 => "Some history",
+                _ => "Strong sample",
+            };
+            Some(FilmConnection {
+                entity_kind: entity.kind.into(),
+                entity_id: entity.id.clone(),
+                name: entity.name.clone(),
+                roles: entity.roles.clone(),
+                shared_count,
+                average_rating: (average_rating * 10.0).round() / 10.0,
+                confidence: confidence.into(),
+                tone: tone.into(),
+                evidence: films,
+            })
+        })
+        .collect::<Vec<_>>();
+    let tone_rank = |tone: &str| match tone {
+        "positive" => 0,
+        "negative" => 1,
+        "mixed" => 2,
+        _ => 3,
+    };
+    connections.sort_by(|a, b| {
+        tone_rank(&a.tone)
+            .cmp(&tone_rank(&b.tone))
+            .then_with(|| b.shared_count.cmp(&a.shared_count))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(connections)
 }
 
 fn parse_related(raw: Option<&str>) -> Vec<LibraryItem> {
@@ -635,6 +1082,93 @@ mod tests {
         .expect("library page");
         assert_eq!(page.items.len(), 0);
         assert_eq!(page.total, 0);
+    }
+
+    #[test]
+    fn structured_credits_keep_person_fields_and_fall_back_to_legacy_data() {
+        let raw = r#"{
+          "detailVersion": 1,
+          "cast": [{"tmdbId": 7, "name": "Ada Actor", "profile": "/ada.jpg", "character": "Lead", "order": 0}],
+          "crew": [{"tmdbId": 8, "name": "Dee Director", "profile": "/dee.jpg", "department": "Directing", "job": "Director"}]
+        }"#;
+        let (cast, crew) = structured_credits(Some(raw), None, None);
+        assert_eq!(cast[0].tmdb_id, Some(7));
+        assert_eq!(cast[0].character.as_deref(), Some("Lead"));
+        assert!(cast[0].profile.as_deref().unwrap_or_default().contains("/w185/ada.jpg"));
+        assert_eq!(crew[0].department.as_deref(), Some("Directing"));
+
+        let (legacy_cast, legacy_crew) = structured_credits(
+            None,
+            Some(r#"["Ada Actor as Lead"]"#),
+            Some(r#"["Dee Director (Director)"]"#),
+        );
+        assert_eq!(legacy_cast[0].name, "Ada Actor");
+        assert_eq!(legacy_crew[0].job, "Director");
+    }
+
+    #[test]
+    fn stats_snapshot_uses_viewings_and_enriched_movie_metadata() {
+        use rusqlite::params;
+
+        let db = Database::in_memory().expect("db");
+        db.conn()
+            .execute(
+                "INSERT INTO movies (id, canonical_title, runtime, genres_json) VALUES (?1, ?2, ?3, ?4)",
+                params!["movie-1", "Example Film", 100, r#"["Adventure","Drama"]"#],
+            )
+            .expect("movie");
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records (id, source_type, source_record_key, normalized_title, raw_identity, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["source-1", "letterboxd_export", "film|example", "example film", "{}", "2026-01-01T00:00:00Z"],
+            )
+            .expect("source movie");
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links (source_movie_record_id, movie_id, match_state)
+                 VALUES (?1, ?2, 'confirmed')",
+                params!["source-1", "movie-1"],
+            )
+            .expect("link");
+        db.conn()
+            .execute(
+                "INSERT INTO user_movie_state (source_movie_record_id, movie_id, watched, current_rating, projection_updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4)",
+                params!["source-1", "movie-1", 4.5, "2026-01-01T00:00:00Z"],
+            )
+            .expect("state");
+
+        let current_month = Utc::now().format("%Y-%m").to_string();
+        let previous_month = (Utc::now() - chrono::Duration::days(31))
+            .format("%Y-%m")
+            .to_string();
+        for (id, record_key, occurred_at, rewatch) in [
+            ("viewing-1", "viewing|1", format!("{previous_month}-15"), 0),
+            ("viewing-2", "viewing|2", format!("{current_month}-15"), 1),
+        ] {
+            db.conn()
+                .execute(
+                    "INSERT INTO viewings (id, source_movie_record_id, source_record_key, occurred_at, observed_at, source_type, rewatch)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![id, "source-1", record_key, occurred_at, occurred_at, "letterboxd_export", rewatch],
+                )
+                .expect("viewing");
+        }
+
+        let stats = get_stats(&db).expect("stats");
+        assert_eq!(stats.rewatch_count, 1);
+        assert_eq!(stats.total_runtime_minutes, 200);
+        assert_eq!(stats.runtime_viewings, 2);
+        assert_eq!(stats.metadata_movies, 1);
+        assert_eq!(stats.viewing_months.len(), 24);
+        assert_eq!(stats.viewing_months.iter().map(|bucket| bucket.count).sum::<u32>(), 2);
+        assert_eq!(stats.genres.len(), 2);
+        assert!(stats.genres.iter().all(|genre| genre.count == 1));
+        assert!(stats
+            .genres
+            .iter()
+            .all(|genre| genre.average_rating == Some(4.5)));
     }
 
     #[test]

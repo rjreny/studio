@@ -574,6 +574,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
             collection_json,
             genres_json,
             credits_json,
+            production_companies_json,
             keywords_json,
             similar_json,
             fresh,
@@ -581,7 +582,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
             .conn()
             .query_row(
                 "SELECT id, COALESCE(poster_path, ''), collection_json,
-                        genres_json, credits_json, keywords_json, similar_json,
+                        genres_json, credits_json, production_companies_json, keywords_json, similar_json,
                         CASE WHEN enriched_at IS NOT NULL
                               AND datetime(enriched_at) >= datetime('now', '-30 days')
                              THEN 1 ELSE 0 END
@@ -596,7 +597,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        row.get::<_, i64>(7)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, i64>(8)?,
                     ))
                 },
             )
@@ -609,6 +611,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                 && credits_json.is_some()
                 && keywords_json.is_some()
                 && similar_json.is_some()
+                && production_companies_json.is_some()
                 && fresh == 1
             {
                 return Ok(existing_id);
@@ -669,6 +672,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
     let collection_json = serde_json::to_string(&collection_items).unwrap_or_else(|_| "[]".into());
     let keywords_json = serde_json::to_string(&keyword_entries(&v)).unwrap_or_else(|_| "[]".into());
     let credits_blob = serde_json::to_string(&credit_entries(&v)).unwrap_or_else(|_| "{}".into());
+    let production_companies_json = serde_json::to_string(&production_companies(&v))
+        .unwrap_or_else(|_| "[]".into());
 
     if existing_id.is_some() {
         db.conn()
@@ -677,7 +682,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                  backdrop_path = ?6, overview = ?7, runtime = ?8, vote_average = ?9, vote_count = ?10,
                  genres_json = ?11, cast_json = ?12, crew_json = ?13, similar_json = ?14,
                  reviews_json = ?15, tagline = ?16, collection_name = ?17, collection_json = ?18,
-                 keywords_json = ?19, credits_json = ?20,
+                 keywords_json = ?19, credits_json = ?20, production_companies_json = ?21,
                  enriched_at = datetime('now')
                  WHERE id = ?1",
                 params![
@@ -701,6 +706,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                     collection_json,
                     keywords_json,
                     credits_blob,
+                    production_companies_json,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -711,8 +717,8 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
         .execute(
             "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, poster_path, backdrop_path,
              overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json,
-             reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, enriched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, datetime('now'))",
+             reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, production_companies_json, enriched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, datetime('now'))",
             params![
                 id,
                 title,
@@ -734,6 +740,7 @@ pub fn refresh_movie_catalog(db: &Database, tmdb_id: i64, force: bool) -> Result
                 collection_json,
                 keywords_json,
                 credits_blob,
+                production_companies_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -865,11 +872,14 @@ fn credit_entries(v: &serde_json::Value) -> serde_json::Value {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .take(16)
+                .take(64)
                 .filter_map(|g| {
                     Some(serde_json::json!({
-                        "id": g["id"].as_i64(),
+                        "tmdbId": g["id"].as_i64(),
                         "name": g["name"].as_str()?,
+                        "profile": g["profile_path"].as_str(),
+                        "character": g["character"].as_str().filter(|name| !name.trim().is_empty()),
+                        "order": g["order"].as_i64(),
                     }))
                 })
                 .collect()
@@ -880,21 +890,42 @@ fn credit_entries(v: &serde_json::Value) -> serde_json::Value {
         .map(|arr| {
             arr.iter()
                 .filter_map(|g| {
-                    let job = g["job"].as_str()?;
-                    if !CREW_JOBS.contains(&job) {
+                    let job = g["job"].as_str()?.trim();
+                    if job.is_empty() {
                         return None;
                     }
                     Some(serde_json::json!({
-                        "id": g["id"].as_i64(),
+                        "tmdbId": g["id"].as_i64(),
                         "name": g["name"].as_str()?,
                         "job": job,
+                        "department": g["department"].as_str(),
+                        "profile": g["profile_path"].as_str(),
                     }))
                 })
-                .take(48)
+                .take(120)
                 .collect()
         })
         .unwrap_or_default();
-    serde_json::json!({ "cast": cast, "crew": crew })
+    serde_json::json!({ "detailVersion": 1, "cast": cast, "crew": crew })
+}
+
+fn production_companies(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v["production_companies"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|company| {
+                    Some(serde_json::json!({
+                        "tmdbId": company["id"].as_i64(),
+                        "name": company["name"].as_str()?,
+                        "logo": company["logo_path"].as_str(),
+                        "originCountry": company["origin_country"].as_str(),
+                    }))
+                })
+                .take(24)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

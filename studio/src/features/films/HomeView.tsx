@@ -84,7 +84,7 @@ export function HomeView({
 
   const image = featured ? heroSrc(featured, detail) : null;
   const castLine =
-    (detail?.directors?.length ? detail.directors : detail?.cast ?? []).slice(0, 3).join("  ").toUpperCase();
+    (detail?.directors?.length ? detail.directors : detail?.cast.map((member) => member.name) ?? []).slice(0, 3).join("  ").toUpperCase();
   const overview = trimOverview(detail?.overview || featured?.overview);
   const runtime = runtimeLabel(detail?.runtime);
   const genre = detail?.genres[0];

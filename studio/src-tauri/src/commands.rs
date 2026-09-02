@@ -6,9 +6,9 @@ use crate::migration::migrate_legacy;
 use crate::models::{
     AppSession, EnrichReport, FilmDetail, FriendSyncResult, HomeViewModel, ImportDiagnostics,
     ImportResult, ImportSummary, InstallInfo, JobProgress, LegacyLibrary, LibraryCoverage,
-    LibraryPage, LibraryQuery, MigrationResult, SetRatingInput, SyncResult, TmdbKeyStatus,
+    LibraryPage, LibraryQuery, MigrationResult, SetRatingInput, StatsSnapshot, SyncResult, TmdbKeyStatus,
 };
-use crate::queries::{get_film, get_home, get_library, parse_tmdb_ref, resolve_source_movie_ids};
+use crate::queries::{get_film, get_home, get_library, get_stats, parse_tmdb_ref, resolve_source_movie_ids};
 use crate::storage::db::Database;
 use chrono::Utc;
 use rusqlite::params;
@@ -162,6 +162,12 @@ pub fn library_get(query: LibraryQuery, state: State<'_, AppState>) -> Result<Li
 }
 
 #[tauri::command]
+pub fn stats_get(state: State<'_, AppState>) -> Result<StatsSnapshot, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    get_stats(&db)
+}
+
+#[tauri::command]
 pub fn film_get(id: String, state: State<'_, AppState>) -> Result<FilmDetail, String> {
     let detail = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -169,7 +175,7 @@ pub fn film_get(id: String, state: State<'_, AppState>) -> Result<FilmDetail, St
     };
 
     match detail {
-        Ok(d) if d.tmdb_id.is_some() && !d.collection_hydrated => {
+        Ok(d) if d.tmdb_id.is_some() && (!d.collection_hydrated || !d.detail_metadata_hydrated) => {
             if let Some(tmdb_id) = d.tmdb_id {
                 if let Ok(worker) = crate::jobs::open_worker_db(&state.db_path) {
                     let _ = tmdb::refresh_movie_catalog(&worker, tmdb_id, true);
@@ -821,6 +827,15 @@ pub fn taste_set_web(enabled: bool, state: State<'_, AppState>) -> Result<crate:
 pub fn taste_get(state: State<'_, AppState>) -> Result<crate::taste::TasteState, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     crate::taste::load_state(&db)
+}
+
+#[tauri::command]
+pub fn film_taste_detail(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::taste::FilmTasteFit, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::taste::film_taste_detail(&db, &id)
 }
 
 #[tauri::command]

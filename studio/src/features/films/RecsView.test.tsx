@@ -93,7 +93,7 @@ describe("RecsView feedback", () => {
 
     const card = (await screen.findByText("New recommendation")).closest("article");
     expect(card).not.toBeNull();
-    fireEvent.click(within(card!).getByRole("button", { name: "Give recommendation feedback" }));
+    fireEvent.click(within(card!).getByRole("radio", { name: "Pass" }));
     fireEvent.click(await screen.findByRole("button", { name: "That connection doesn't fit" }));
 
     await waitFor(() => {
@@ -110,8 +110,23 @@ describe("RecsView feedback", () => {
 
     const newCard = (await screen.findByText("New recommendation")).closest("article");
     const watchlistCard = screen.getByText("Watchlist recommendation").closest("article");
-    expect(within(newCard!).getByRole("button", { name: "Tell Taste you are interested in this" })).toBeInTheDocument();
-    expect(within(watchlistCard!).getByRole("button", { name: "Tell Taste you are interested in this" })).toBeInTheDocument();
+    expect(within(newCard!).getByRole("radio", { name: "Interested" })).toBeInTheDocument();
+    expect(within(watchlistCard!).getByRole("radio", { name: "Interested" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+  });
+
+  it("opens match evidence in a portal popover and closes it with Escape", async () => {
+    render(<RecsView onSelectFilm={vi.fn()} onOpenSettings={vi.fn()} />);
+
+    const card = (await screen.findByText("New recommendation")).closest("article");
+    const trigger = within(card!).getByRole("button", { name: "Why New recommendation is a 74% match" });
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", { name: "Why this 74% match" });
+    expect(card).not.toContainElement(dialog);
+    expect(dialog).toHaveTextContent("Strong evidence");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Why this 74% match" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 });

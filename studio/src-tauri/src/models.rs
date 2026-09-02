@@ -217,6 +217,25 @@ pub struct LibraryPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StatsBucket {
+    pub label: String,
+    pub count: u32,
+    pub average_rating: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsSnapshot {
+    pub viewing_months: Vec<StatsBucket>,
+    pub genres: Vec<StatsBucket>,
+    pub rewatch_count: u32,
+    pub total_runtime_minutes: u32,
+    pub runtime_viewings: u32,
+    pub metadata_movies: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ViewingHistoryItem {
     pub id: String,
     pub occurred_at: Option<String>,
@@ -261,13 +280,80 @@ pub struct FilmDetail {
     pub tmdb_reviews: Vec<String>,
     pub tagline: Option<String>,
     pub directors: Vec<String>,
-    pub cast: Vec<String>,
-    pub crew: Vec<String>,
+    pub cast: Vec<FilmCastMember>,
+    pub crew: Vec<FilmCrewMember>,
+    pub companies: Vec<ProductionCompany>,
+    pub keywords: Vec<String>,
+    pub connections: Vec<FilmConnection>,
     pub collection_name: Option<String>,
     pub collection: Vec<LibraryItem>,
     pub similar: Vec<LibraryItem>,
     #[serde(skip)]
     pub collection_hydrated: bool,
+    #[serde(skip)]
+    pub detail_metadata_hydrated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmCastMember {
+    #[serde(default, alias = "id")]
+    pub tmdb_id: Option<i64>,
+    pub name: String,
+    #[serde(default, alias = "profile_path")]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub character: Option<String>,
+    #[serde(default)]
+    pub order: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmCrewMember {
+    #[serde(default, alias = "id")]
+    pub tmdb_id: Option<i64>,
+    pub name: String,
+    #[serde(default, alias = "profile_path")]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub department: Option<String>,
+    pub job: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionCompany {
+    #[serde(default, alias = "id")]
+    pub tmdb_id: Option<i64>,
+    pub name: String,
+    #[serde(default, alias = "logo_path")]
+    pub logo: Option<String>,
+    #[serde(default, alias = "origin_country")]
+    pub origin_country: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionFilm {
+    pub id: String,
+    pub title: String,
+    pub rating: f64,
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmConnection {
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub name: String,
+    pub roles: Vec<String>,
+    pub shared_count: u32,
+    pub average_rating: f64,
+    pub confidence: String,
+    pub tone: String,
+    pub evidence: Vec<ConnectionFilm>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

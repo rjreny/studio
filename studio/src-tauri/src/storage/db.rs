@@ -196,6 +196,12 @@ impl Database {
                 )
                 .map_err(|e| e.to_string())?;
         }
+        if version < 11 {
+            let _ = self.conn.execute(
+                "ALTER TABLE movies ADD COLUMN production_companies_json TEXT",
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -661,7 +667,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("10".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("11".into()));
     }
 
     #[test]
@@ -728,9 +734,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v10_has_feedback_snapshot_embedding_and_observation_tables() {
+    fn schema_v11_keeps_existing_taste_tables_and_adds_company_storage() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("10".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("11".into()));
         let feedback: i64 = db
             .conn()
             .query_row(
@@ -776,6 +782,15 @@ mod tests {
         assert_eq!(embeddings, 1);
         assert_eq!(exposures, 1);
         assert_eq!(events, 1);
+        let company_column: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('movies') WHERE name = 'production_companies_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(company_column, 1);
         db.reset_all_data().unwrap();
         let leftover: i64 = db
             .conn()

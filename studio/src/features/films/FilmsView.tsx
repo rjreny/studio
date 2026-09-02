@@ -78,6 +78,12 @@ export function FilmsView({
     ];
   }, [pool]);
 
+  const emptyMessage = query.trim()
+    ? `No films match “${query.trim()}”. Try a different search.`
+    : filter !== "all" || decade !== "any"
+      ? "No films match these filters."
+      : "Nothing here yet. Connect or import.";
+
   return (
     <div className="films page-pad">
       <header className="page-head films-page-head">
@@ -96,7 +102,7 @@ export function FilmsView({
           <FilmCard key={film.id} film={film} onSelect={onSelectFilm} />
         ))}
       </div>
-      {!items.length ? <p className="muted pad">Nothing here yet. Connect or import.</p> : null}
+      {!items.length && !busy ? <p className="muted pad">{emptyMessage}</p> : null}
     </div>
   );
 }

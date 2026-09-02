@@ -88,6 +88,21 @@ export type LibraryPage = {
   coverage: LibraryCoverage;
 };
 
+export type StatsBucket = {
+  label: string;
+  count: number;
+  averageRating: number | null;
+};
+
+export type StatsSnapshot = {
+  viewingMonths: StatsBucket[];
+  genres: StatsBucket[];
+  rewatchCount: number;
+  totalRuntimeMinutes: number;
+  runtimeViewings: number;
+  metadataMovies: number;
+};
+
 export type ViewingHistoryItem = {
   id: string;
   occurredAt: string | null;
@@ -128,11 +143,70 @@ export type FilmDetail = {
   tmdbReviews: string[];
   tagline?: string | null;
   directors?: string[];
-  cast: string[];
-  crew: string[];
+  cast: FilmCastMember[];
+  crew: FilmCrewMember[];
+  companies: ProductionCompany[];
+  keywords: string[];
+  connections: FilmConnection[];
   collectionName?: string | null;
   collection?: LibraryItem[];
   similar: LibraryItem[];
+};
+
+export type FilmCastMember = {
+  tmdbId: number | null;
+  name: string;
+  profile: string | null;
+  character: string | null;
+  order: number | null;
+};
+
+export type FilmCrewMember = {
+  tmdbId: number | null;
+  name: string;
+  profile: string | null;
+  department: string | null;
+  job: string;
+};
+
+export type ProductionCompany = {
+  tmdbId: number | null;
+  name: string;
+  logo: string | null;
+  originCountry: string | null;
+};
+
+export type ConnectionFilm = {
+  id: string;
+  title: string;
+  rating: number;
+  poster: string | null;
+};
+
+export type FilmConnection = {
+  entityKind: "person" | "company";
+  entityId: string;
+  name: string;
+  roles: string[];
+  sharedCount: number;
+  averageRating: number;
+  confidence: string;
+  tone: "positive" | "mixed" | "negative" | "unknown";
+  evidence: ConnectionFilm[];
+};
+
+export type FilmTasteFit = {
+  available: boolean;
+  score: number | null;
+  band: "strong" | "mixed" | "weak" | "notEnoughEvidence";
+  evidenceGrade: "none" | "medium" | "strong";
+  semanticFit: number;
+  semanticCoverage: boolean;
+  supportingSignals: string[];
+  counterSignals: string[];
+  evidenceTitles: string[];
+  watched: boolean;
+  unavailableReason: string | null;
 };
 
 export type HomeViewModel = {

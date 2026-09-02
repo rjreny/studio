@@ -3,6 +3,7 @@ import type {
   AppSession,
   EnrichReport,
   FilmDetail,
+  FilmTasteFit,
   FriendRow,
   HomeViewModel,
   ImportResult,
@@ -10,6 +11,7 @@ import type {
   LibraryCoverage,
   LibraryPage,
   LibraryQuery,
+  StatsSnapshot,
   TasteFeedback,
   TasteKeyStatus,
   TasteState,
@@ -77,8 +79,16 @@ export async function getLibrary(query: LibraryQuery = {}): Promise<LibraryPage>
   return cached(`library:${libraryKey(query)}`, () => invoke<LibraryPage>("library_get", { query }));
 }
 
+export async function getStats(): Promise<StatsSnapshot> {
+  return cached("stats", () => invoke<StatsSnapshot>("stats_get"));
+}
+
 export async function getFilm(id: string): Promise<FilmDetail> {
   return cached(`film:${id}`, () => invoke<FilmDetail>("film_get", { id }));
+}
+
+export async function getFilmTasteDetail(id: string): Promise<FilmTasteFit> {
+  return cached(`film-taste:${id}`, () => invoke<FilmTasteFit>("film_taste_detail", { id }));
 }
 
 export async function getHome(): Promise<HomeViewModel> {

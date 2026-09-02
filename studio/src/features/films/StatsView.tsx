@@ -1,23 +1,106 @@
 import { useEffect, useMemo, useState } from "react";
-import { getCoverage, getLibrary } from "../../platform/filmLibrary";
-import type { LibraryCoverage, LibraryItem } from "../../platform/types/film";
+import { getCoverage, getLibrary, getStats } from "../../platform/filmLibrary";
+import type { LibraryCoverage, LibraryItem, StatsBucket, StatsSnapshot } from "../../platform/types/film";
+import { FilmCard } from "./FilmCard";
+import { Shelf } from "./Shelf";
 
-function ratedCount(items: LibraryItem[]) {
-  return items.filter((f) => f.currentRating != null).length;
+function Histogram({
+  buckets,
+  className = "",
+  fill = false,
+  showValues = true,
+  formatLabel,
+}: {
+  buckets: Pick<StatsBucket, "label" | "count">[];
+  className?: string;
+  fill?: boolean;
+  showValues?: boolean;
+  formatLabel?: (label: string, index: number, total: number) => string;
+}) {
+  const max = Math.max(1, ...buckets.map(({ count }) => count));
+  return (
+    <div className="stats-chart">
+      <ol
+        className={`stats-histogram ${fill ? "is-fill" : ""} ${className}`}
+        style={fill ? { gridTemplateColumns: `repeat(${Math.max(1, buckets.length)}, minmax(0, 1fr))` } : undefined}
+      >
+        {buckets.map(({ label, count }, index) => (
+          <li key={label} aria-label={`${label}: ${count}`}>
+            <div className="stats-histogram-plot">
+              <div className="stats-histogram-column" style={{ height: `${Math.max(count ? 7 : 0, (count / max) * 100)}%` }}>
+                {showValues ? <strong>{count}</strong> : null}
+                <i />
+              </div>
+            </div>
+            <span>{formatLabel ? formatLabel(label, index, buckets.length) : label}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
 }
 
-export function StatsView() {
+function formatHours(minutes: number) {
+  if (!minutes) return "—";
+  const hours = Math.round(minutes / 60);
+  return `${hours.toLocaleString()}h`;
+}
+
+function activityMonthLabel(label: string, index: number, total: number) {
+  if (index % 3 !== 0 && index !== total - 1) return "";
+  if (!/^\d{4}-\d{2}$/.test(label)) return "";
+  const [year, month] = label.split("-");
+  return `${month}/${year.slice(2)}`;
+}
+
+function affinityTone(rating: number | null) {
+  if (rating == null || rating < 3) return "is-low";
+  if (rating < 3.75) return "is-mid";
+  return "is-high";
+}
+
+function GenreAffinity({ genres }: { genres: StatsBucket[] }) {
+  const maxCount = Math.max(1, ...genres.map((genre) => genre.count));
+  return (
+    <div className="stats-affinity-plot" role="img" aria-label="Genre affinity: farther right means you have watched more films in that genre; higher and greener means you rated it more highly.">
+      <span className="stats-affinity-y">Higher rated</span>
+      <span className="stats-affinity-x">More watched</span>
+      {genres.map((genre) => {
+        const rating = genre.averageRating ?? 0;
+        const left = 8 + (genre.count / maxCount) * 82;
+        const bottom = 10 + (Math.max(0, Math.min(5, rating)) / 5) * 76;
+        return (
+          <span
+            key={genre.label}
+            className={`stats-affinity-point ${affinityTone(genre.averageRating)}`}
+            style={{ left: `${left}%`, bottom: `${bottom}%` }}
+            title={`${genre.label}: ${genre.count} films${genre.averageRating != null ? `, ${genre.averageRating.toFixed(1)} average rating` : ""}`}
+          >
+            <i />
+            <b>{genre.label}</b>
+          </span>
+        );
+      })}
+      {!genres.length ? <p>No enriched viewing data yet</p> : null}
+    </div>
+  );
+}
+
+export function StatsView({ onSelectFilm }: { onSelectFilm: (id: string) => void }) {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [coverage, setCoverage] = useState<LibraryCoverage | null>(null);
+  const [snapshot, setSnapshot] = useState<StatsSnapshot | null>(null);
 
   useEffect(() => {
     void (async () => {
-      const [page, c] = await Promise.all([
+      const [page, c, stats] = await Promise.all([
         getLibrary({ limit: 10000, sort: "rating" }),
         getCoverage(),
+        getStats().catch(() => null),
       ]);
       setItems(page.items);
       setCoverage(c);
+      setSnapshot(stats);
     })();
   }, []);
 
@@ -39,11 +122,42 @@ export function StatsView() {
       if (d < 1920 || d > 2020) return;
       map.set(d, (map.get(d) ?? 0) + 1);
     });
-    return [...map.entries()].sort((a, b) => b[0] - a[0]);
+    return Array.from(
+      { length: 10 },
+      (_, index) => {
+        const decade = 1930 + index * 10;
+        return [decade, map.get(decade) ?? 0] as const;
+      },
+    );
   }, [items]);
 
   const maxBucket = Math.max(1, ...distribution);
-  const maxDecade = Math.max(1, ...decades.map(([, n]) => n), 1);
+  const ratings = items.filter((film) => film.currentRating != null);
+  const averageRating = ratings.length
+    ? ratings.reduce((sum, film) => sum + (film.currentRating ?? 0), 0) / ratings.length
+    : null;
+  const likedCount = items.filter((film) => film.liked).length;
+  const fiveStarCount = ratings.filter((film) => film.currentRating === 5).length;
+  const ratingCoverage = items.length ? Math.round((ratings.length / items.length) * 100) : 0;
+  const mostRepresentedDecade = [...decades].sort((a, b) => b[1] - a[1])[0];
+  const viewingMonths = snapshot?.viewingMonths ?? Array.from({ length: 24 }, (_, index) => ({
+    label: `month-${index + 1}`,
+    count: 0,
+  }));
+  const activityTotal = viewingMonths.reduce((sum, month) => sum + month.count, 0);
+  const genres = snapshot?.genres ?? [];
+  const topRated = [...ratings]
+    .sort((a, b) => (b.currentRating ?? 0) - (a.currentRating ?? 0) || b.viewingCount - a.viewingCount)
+    .slice(0, 12);
+  const mostRewatched = [...items]
+    .filter((film) => film.viewingCount > 1)
+    .sort((a, b) => b.viewingCount - a.viewingCount || (b.currentRating ?? 0) - (a.currentRating ?? 0))
+    .slice(0, 12);
+  const ratingBuckets = distribution.map((count, index) => ({
+    label: ((index + 1) / 2).toFixed(1).replace(".0", ""),
+    count,
+  }));
+  const decadeBuckets = decades.map(([decade, count]) => ({ label: `${decade}s`, count }));
 
   return (
     <div className="stats-page page-pad">
@@ -53,57 +167,88 @@ export function StatsView() {
           <p className="muted">Your log, as numbers</p>
         </div>
       </header>
-      <div className="stat-tiles">
-        <div className="stat-tile">
-          <strong>{coverage?.uniqueMovies ?? items.length}</strong>
-          <span>Films</span>
-        </div>
-        <div className="stat-tile">
-          <strong>{coverage?.totalViewings ?? 0}</strong>
-          <span>Times watched</span>
-        </div>
-        <div className="stat-tile">
-          <strong>{coverage?.ratingEvents ?? ratedCount(items)}</strong>
-          <span>Rating events</span>
-        </div>
-        <div className="stat-tile">
-          <strong>{coverage?.unresolvedMovies ?? 0}</strong>
-          <span>Unmatched</span>
-        </div>
-      </div>
-      <div className="stats-split">
-        <section className="stats-panel">
-          <h2>Ratings</h2>
-          <div className="chart" role="img" aria-label="Rating histogram">
-            {distribution.map((count, idx) => {
-              const label = ((idx + 1) / 2).toFixed(1);
-              const pct = (count / maxBucket) * 100;
-              return (
-                <div key={label} className="bar">
-                  <div className="bar-track">
-                    <span style={{ height: `${Math.max(count ? 8 : 0, pct)}%` }} title={`${label} stars: ${count}`} />
-                  </div>
-                  <small>{label.replace(".0", "")}</small>
-                </div>
-              );
-            })}
-          </div>
+      <p className="stats-summary" aria-label="Library summary">
+        <span><strong>{coverage?.uniqueMovies ?? items.length}</strong> films</span>
+        <span><strong>{coverage?.totalViewings ?? 0}</strong> watches</span>
+        <span><strong>{snapshot?.rewatchCount ?? 0}</strong> rewatches</span>
+        <span><strong>{formatHours(snapshot?.totalRuntimeMinutes ?? 0)}</strong> watched</span>
+        <span><strong>{averageRating?.toFixed(1) ?? "—"}</strong> average rating</span>
+        <span><strong>{coverage?.watchlistMovies ?? 0}</strong> on your watchlist</span>
+      </p>
+      <div className="stats-breakdown stats-primary-row">
+        <section className="stats-section stats-ratings">
+          <header className="stats-section-head">
+            <h2>Ratings</h2>
+            <p>{ratings.length} films rated · most often {((distribution.indexOf(maxBucket) + 1) / 2).toFixed(1).replace(".0", "")} stars</p>
+          </header>
+          <Histogram buckets={ratingBuckets} className="is-ratings" />
+          <dl className="stats-facts">
+            <div><dt>Five stars</dt><dd>{fiveStarCount}</dd></div>
+            <div><dt>Rated</dt><dd>{ratingCoverage}%</dd></div>
+            <div><dt>Liked</dt><dd>{likedCount}</dd></div>
+          </dl>
         </section>
-        <section className="stats-panel">
-          <h2>By decade</h2>
-          <ul className="decade-bars">
-            {decades.map(([decade, count]) => (
-              <li key={decade}>
-                <span>{decade}s</span>
-                <div>
-                  <i style={{ width: `${(count / maxDecade) * 100}%` }} />
-                </div>
-                <strong>{count}</strong>
+        <section className="stats-section stats-decades">
+          <header className="stats-section-head">
+            <h2>By decade</h2>
+            <p>{decades[0][0]}s–{decades[decades.length - 1][0]}s</p>
+          </header>
+          <Histogram buckets={decadeBuckets} />
+          <dl className="stats-facts">
+            <div><dt>Oldest</dt><dd>{decades[0]?.[0] ?? "—"}</dd></div>
+            <div><dt>Most represented</dt><dd>{mostRepresentedDecade ? `${mostRepresentedDecade[0]}s` : "—"}</dd></div>
+            <div><dt>Enriched</dt><dd>{snapshot?.metadataMovies ?? 0}</dd></div>
+          </dl>
+        </section>
+        <section className="stats-section stats-affinity">
+          <header className="stats-section-head">
+            <h2>Genre affinity</h2>
+            <p>More watched → · higher rated ↑</p>
+          </header>
+          <GenreAffinity genres={genres} />
+        </section>
+      </div>
+      <section className="stats-section stats-activity">
+        <header className="stats-section-head">
+          <h2>Watching activity</h2>
+          <p>{activityTotal ? "Last 24 months" : "0 logs in the last 24 months"}</p>
+        </header>
+        <Histogram buckets={viewingMonths} className="is-activity" fill showValues={false} formatLabel={activityMonthLabel} />
+      </section>
+      <section className="stats-section stats-genres">
+        <header className="stats-section-head">
+          <h2>Your genres</h2>
+          <p>{snapshot?.metadataMovies ?? 0} enriched films watched</p>
+        </header>
+        {genres.length ? (
+          <ol className="stats-rank-list">
+            {genres.map((genre) => (
+              <li key={genre.label}>
+                <strong>{genre.label}</strong>
+                <span>{genre.count} films{genre.averageRating != null ? ` · ${genre.averageRating.toFixed(1)} avg` : ""}</span>
               </li>
             ))}
-          </ul>
+          </ol>
+        ) : <p className="stats-empty">No enriched viewing data yet.</p>}
+      </section>
+      {mostRewatched.length ? (
+        <section className="stats-shelf">
+          <Shelf title="Most rewatched">
+            {mostRewatched.map((film) => (
+              <FilmCard key={film.id} film={film} caption={`${film.viewingCount}× watched`} onSelect={onSelectFilm} />
+            ))}
+          </Shelf>
         </section>
-      </div>
+      ) : null}
+      {topRated.length ? (
+        <section className="stats-shelf">
+          <Shelf title="Highest rated">
+            {topRated.map((film) => (
+              <FilmCard key={film.id} film={film} onSelect={onSelectFilm} />
+            ))}
+          </Shelf>
+        </section>
+      ) : null}
     </div>
   );
 }

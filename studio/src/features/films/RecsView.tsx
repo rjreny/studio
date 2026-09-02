@@ -4,6 +4,7 @@ import { tasteAnalyze, tasteFeedbackSet, tasteGet } from "../../platform/filmLib
 import type { JobProgress, TasteFeedback, TasteModelInfo, TastePick, TasteState } from "../../platform/types/film";
 import { log } from "../../platform/log";
 import { Menu } from "../ui/Menu";
+import { AnchoredPopover } from "../ui/AnchoredPopover";
 import { Poster } from "./Poster";
 
 const RUN_STEPS = [
@@ -58,6 +59,14 @@ type TasteFeedbackOptions = {
   reason?: "already_seen_disliked" | "not_this_kind" | "wrong_connection" | "not_in_the_mood";
   targetFeatureKey?: string;
   moodScope?: "this_movie_only" | "this_kind_right_now";
+};
+
+type TastePopoverKind = "why" | "pass";
+type OpenTastePopover = {
+  key: string;
+  kind: TastePopoverKind;
+  trigger: HTMLButtonElement;
+  openedWithKeyboard: boolean;
 };
 
 const TASTE_SORTS: { id: TasteSort; label: string }[] = [
@@ -373,6 +382,7 @@ function TasteLists({
   const visibleWatch = watch.filter((p) => !hidden.has(pickKey(p)));
   const [sort, setSort] = useState<TasteSort>("match");
   const [filter, setFilter] = useState<TasteFilter>("all");
+  const [openPopover, setOpenPopover] = useState<OpenTastePopover | null>(null);
   const sortedNew = sortTastePicks(visibleNew, sort, filter);
   const sortedWatch = sortTastePicks(visibleWatch, sort, filter);
   const controls = neu.length || watch.length ? (
@@ -401,6 +411,11 @@ function TasteLists({
                   interested={Boolean(pick.tmdbId && interested.has(pick.tmdbId))}
                   onSelectFilm={onSelectFilm}
                   onFeedback={onFeedback}
+                  openPopover={openPopover?.key === pickKey(pick) ? openPopover : null}
+                  onOpenPopover={(kind, trigger, openedWithKeyboard) =>
+                    setOpenPopover({ key: pickKey(pick), kind, trigger, openedWithKeyboard })
+                  }
+                  onClosePopover={() => setOpenPopover(null)}
                 />
               ))}
             </ul>
@@ -442,6 +457,11 @@ function TasteLists({
                   interested={Boolean(pick.tmdbId && interested.has(pick.tmdbId))}
                   onSelectFilm={onSelectFilm}
                   onFeedback={onFeedback}
+                  openPopover={openPopover?.key === pickKey(pick) ? openPopover : null}
+                  onOpenPopover={(kind, trigger, openedWithKeyboard) =>
+                    setOpenPopover({ key: pickKey(pick), kind, trigger, openedWithKeyboard })
+                  }
+                  onClosePopover={() => setOpenPopover(null)}
                 />
               ))}
             </ul>
@@ -467,26 +487,28 @@ function TasteProfileFooter({
   if (!summary && !affinities.length && !exceptions.length) return null;
   return (
     <footer className="taste-profile-footer" aria-label="Taste profile">
-      <span className="taste-profile-label">Taste profile</span>
+      <div className="taste-profile-overview">
+        <span className="taste-profile-label">Taste profile</span>
         {summary ? <p>{summary}</p> : null}
         {affinities.length ? <span className="taste-profile-affinities">{affinities.join(" · ")}</span> : null}
-        {exceptions.length ? (
-          <div className="taste-diagnostics">
-            <strong>Exceptions worth checking</strong>
-            <ul>
-              {exceptions.slice(0, 8).map((exception) => (
-                <li key={`${exception.title}:${exception.tmdbId ?? ""}`}>
-                  {exception.title} · {exception.residual > 0 ? "more positive" : "more negative"} than its {exception.matchingFeatures.slice(0, 3).join(", ")} evidence predicted
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-        {observation ? (
-          <span className="taste-observation">
-            Observation gate: {observation.feedbackEvents}/100 feedback · {observation.laterOutcomes}/30 outcomes · {observation.feedbackReasons}/3 reasons
-          </span>
-        ) : null}
+      </div>
+      {exceptions.length ? (
+        <section className="taste-diagnostics" aria-labelledby="taste-exceptions-heading">
+          <strong id="taste-exceptions-heading">Exceptions worth checking</strong>
+          <ul>
+            {exceptions.slice(0, 8).map((exception) => (
+              <li key={`${exception.title}:${exception.tmdbId ?? ""}`}>
+                {exception.title} · {exception.residual > 0 ? "more positive" : "more negative"} than its {exception.matchingFeatures.slice(0, 3).join(", ")} evidence predicted
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {observation ? (
+        <span className="taste-observation">
+          Observation gate: {observation.feedbackEvents}/100 feedback · {observation.laterOutcomes}/30 outcomes · {observation.feedbackReasons}/3 reasons
+        </span>
+      ) : null}
       </footer>
   );
 }
@@ -496,15 +518,21 @@ function TastePickCard({
   interested,
   onSelectFilm,
   onFeedback,
+  openPopover,
+  onOpenPopover,
+  onClosePopover,
 }: {
   pick: TastePick;
   interested: boolean;
   onSelectFilm: (id: string) => void;
   onFeedback: (pick: TastePick, action: "interested" | "rejected" | "seen", options?: TasteFeedbackOptions) => void;
+  openPopover: OpenTastePopover | null;
+  onOpenPopover: (kind: TastePopoverKind, trigger: HTMLButtonElement, openedWithKeyboard: boolean) => void;
+  onClosePopover: () => void;
 }) {
   const id = pickId(pick);
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const feedbackId = useId();
+  const whyPopoverId = useId();
+  const feedbackPopoverId = useId();
   const citedBridges = (pick.attribution?.citedPositive ?? pick.matchedFeatures ?? [])
     .filter((feature) => feature.citeable && feature.cited && feature.featureKey)
     .slice(0, 4);
@@ -512,111 +540,148 @@ function TastePickCard({
     ...(pick.attribution?.moodSignature.modes ?? []).map((mode) => `mode:${mode.toLowerCase()}`),
     ...(pick.attribution?.moodSignature.thematicKeywords ?? []).map((keyword) => `keyword:${keyword.toLowerCase()}`),
   ]).size;
-  const evidenceItems = (pick.evidenceItems ?? [])
-    .flatMap((item) => {
-      const evidenceId = item.filmId || (item.tmdbId != null ? `tmdb:${item.tmdbId}` : null);
-      return evidenceId ? [{ ...item, id: evidenceId }] : [];
-    })
-    .slice(0, 2);
-  const closeTo = pick.evidence?.length
-    ? `Close to ${pick.evidence.slice(0, 2).join(", ")}`
-    : pick.rhymesWith?.length
-      ? `Close to ${pick.rhymesWith.slice(0, 2).join(", ")}`
-      : null;
-  const rationale = evidenceItems.length ? null : pick.why || closeTo;
-  const heading = (
-    <>
-      <Poster name={pick.title} poster={pick.poster} large />
-      <span className="taste-pick-copy">
-        <strong title={pick.title}>{pick.title}</strong>
-        <span className="taste-pick-meta muted">
-          <span className={`taste-match ${matchTone(pick)}`}>{matchPercent(pick)}</span>
-          {pick.year != null ? <span>{pick.year}</span> : null}
-        </span>
-        {rationale ? <span className="taste-pick-rationale">{rationale}</span> : null}
-      </span>
-    </>
-  );
+  const passOpen = openPopover?.kind === "pass";
+  const whyOpen = openPopover?.kind === "why";
+  const selectedFeedback = interested ? "interested" : passOpen ? "rejected" : null;
+
+  function togglePopover(kind: TastePopoverKind, trigger: HTMLButtonElement, openedWithKeyboard: boolean) {
+    if (openPopover?.kind === kind) {
+      onClosePopover();
+      return;
+    }
+    onOpenPopover(kind, trigger, openedWithKeyboard);
+  }
+
+  function feedbackKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) return;
+    const controls = Array.from(
+      event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [],
+    );
+    const current = controls.indexOf(event.currentTarget);
+    const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+    const next = controls[(current + direction + controls.length) % controls.length];
+    event.preventDefault();
+    next?.focus();
+    next?.click();
+  }
+
+  function completePass(options: TasteFeedbackOptions) {
+    onClosePopover();
+    onFeedback(pick, "rejected", options);
+  }
+
   return (
     <li>
       <article className={`taste-pick${interested ? " is-interested" : ""}`}>
-        {id ? (
-          <button type="button" className="taste-pick-open" onClick={() => onSelectFilm(id)}>
-            {heading}
-          </button>
-        ) : (
-          <div className="taste-pick-open is-static">{heading}</div>
-        )}
-        {evidenceItems.length ? (
-          <div
-            className="taste-evidence"
-            role="group"
-            aria-label={`Picked from your interest in ${evidenceItems.map((item) => item.title).join(", ")}`}
-          >
-            {evidenceItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                title={item.title}
-                aria-label={`View ${item.title}`}
-                onClick={() => onSelectFilm(item.id)}
-              >
-                <Poster name={item.title} poster={item.poster} />
+        <div className="taste-pick-open">
+          {id ? (
+            <button type="button" className="taste-pick-poster" aria-label={`View ${pick.title}`} onClick={() => onSelectFilm(id)}>
+              <Poster name={pick.title} poster={pick.poster} large />
+            </button>
+          ) : (
+            <Poster name={pick.title} poster={pick.poster} large />
+          )}
+          <div className="taste-pick-copy">
+            {id ? (
+              <button type="button" className="taste-pick-title" title={pick.title} onClick={() => onSelectFilm(id)}>
+                {pick.title}
               </button>
-            ))}
+            ) : (
+              <strong title={pick.title}>{pick.title}</strong>
+            )}
+            <span className="taste-pick-meta muted">
+              <span className={`taste-match ${matchTone(pick)}`}>{matchPercent(pick)}</span>
+              {pick.attribution ? (
+                <button
+                  type="button"
+                  className="taste-why-trigger"
+                  aria-label={`Why ${pick.title} is a ${matchPercent(pick)}`}
+                  aria-controls={whyOpen ? whyPopoverId : undefined}
+                  aria-expanded={whyOpen}
+                  aria-haspopup="dialog"
+                  title="Why this match"
+                  onClick={(event) => togglePopover("why", event.currentTarget, event.detail === 0)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 10v5" /><path d="M12 7.2h.01" /></svg>
+                </button>
+              ) : null}
+              {pick.year != null ? <span>{pick.year}</span> : null}
+            </span>
+            <div className="taste-fb" role="radiogroup" aria-label={`Feedback for ${pick.title}`}>
+              <button
+                type="button"
+                role="radio"
+                aria-label="Interested"
+                aria-checked={selectedFeedback === "interested"}
+                title="Use this as a positive Taste signal on your next refresh"
+                className={`taste-fb-interest${selectedFeedback === "interested" ? " is-on" : ""}`}
+                onKeyDown={feedbackKeyDown}
+                onClick={() => onFeedback(pick, "interested")}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78Z"
+                    style={{ fill: interested ? "currentColor" : "none" }}
+                  />
+                </svg>
+                <span>Interested</span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                className="taste-fb-reject"
+                aria-label="Pass"
+                title="Tell Taste why this missed"
+                aria-checked={selectedFeedback === "rejected"}
+                aria-expanded={passOpen}
+                aria-controls={passOpen ? feedbackPopoverId : undefined}
+                aria-haspopup="dialog"
+                onKeyDown={feedbackKeyDown}
+                onClick={(event) => togglePopover("pass", event.currentTarget, event.detail === 0)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m7 7 10 10M17 7 7 17" />
+                </svg>
+                <span>Pass</span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                className="taste-fb-seen"
+                aria-label="Seen"
+                aria-checked={false}
+                title="Hide this recommendation because I have already seen it"
+                onKeyDown={feedbackKeyDown}
+                onClick={() => onFeedback(pick, "seen")}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m5 12.5 4.5 4.5L19 7" />
+                </svg>
+                <span>Seen</span>
+              </button>
+            </div>
           </div>
-        ) : null}
-        <div className="taste-fb" role="group" aria-label={`Feedback for ${pick.title}`}>
-          <button
-            type="button"
-            aria-label="Tell Taste you are interested in this"
-            aria-pressed={interested}
-            disabled={interested}
-            title="Use this as a positive Taste signal on your next refresh"
-            className={`taste-fb-interest${interested ? " is-on" : ""}`}
-            onClick={() => onFeedback(pick, "interested")}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78Z"
-                style={{ fill: interested ? "currentColor" : "none" }}
-              />
-            </svg>
-            <span>Interested</span>
-          </button>
-          <button
-            type="button"
-            className="taste-fb-reject"
-            aria-label="Give recommendation feedback"
-            title="Tell Taste why this missed"
-            aria-expanded={feedbackOpen}
-            aria-controls={feedbackId}
-            onClick={() => setFeedbackOpen((open) => !open)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m7 7 10 10M17 7 7 17" />
-            </svg>
-            <span>Pass</span>
-          </button>
-          <button
-            type="button"
-            className="taste-fb-seen"
-            aria-label="Hide this recommendation because I have already seen it"
-            title="Hide this recommendation because I have already seen it"
-            onClick={() => onFeedback(pick, "seen")}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m5 12.5 4.5 4.5L19 7" />
-            </svg>
-            <span>Seen</span>
-          </button>
         </div>
-        {pick.attribution || feedbackOpen ? (
-          <div className="taste-pick-disclosures">
-            {pick.attribution ? <TasteAttributionPanel pick={pick} /> : null}
-            {feedbackOpen ? (
-              <section id={feedbackId} className="taste-feedback-sheet" aria-labelledby={`${feedbackId}-title`}>
-                <strong id={`${feedbackId}-title`}>Tell Taste what missed</strong>
+        {whyOpen && pick.attribution ? (
+          <AnchoredPopover
+            id={whyPopoverId}
+            anchor={openPopover.trigger}
+            title={`Why this ${matchPercent(pick)}`}
+            openedWithKeyboard={openPopover.openedWithKeyboard}
+            onClose={onClosePopover}
+          >
+            <TasteAttributionPanel pick={pick} onSelectFilm={onSelectFilm} />
+          </AnchoredPopover>
+        ) : null}
+        {passOpen ? (
+          <AnchoredPopover
+            id={feedbackPopoverId}
+            anchor={openPopover.trigger}
+            title="Why did this miss?"
+            openedWithKeyboard={openPopover.openedWithKeyboard}
+            onClose={onClosePopover}
+          >
+            <section className="taste-feedback-sheet" aria-label="Tell Taste what missed">
                 {citedBridges.length ? (
                   <div className="taste-feedback-bridges">
                     {citedBridges.map((feature) => (
@@ -625,8 +690,7 @@ function TastePickCard({
                         <button
                           type="button"
                           onClick={() => {
-                            setFeedbackOpen(false);
-                            onFeedback(pick, "rejected", { reason: "wrong_connection", targetFeatureKey: feature.featureKey });
+                            completePass({ reason: "wrong_connection", targetFeatureKey: feature.featureKey });
                           }}
                         >
                           That connection doesn't fit
@@ -634,8 +698,7 @@ function TastePickCard({
                         <button
                           type="button"
                           onClick={() => {
-                            setFeedbackOpen(false);
-                            onFeedback(pick, "rejected", { reason: "not_this_kind", targetFeatureKey: feature.featureKey });
+                            completePass({ reason: "not_this_kind", targetFeatureKey: feature.featureKey });
                           }}
                         >
                           Not this kind of film
@@ -648,8 +711,7 @@ function TastePickCard({
                   <button
                     type="button"
                     onClick={() => {
-                      setFeedbackOpen(false);
-                      onFeedback(pick, "rejected", { reason: "already_seen_disliked" });
+                      completePass({ reason: "already_seen_disliked" });
                     }}
                   >
                     I've seen it and didn't like it
@@ -657,8 +719,7 @@ function TastePickCard({
                   <button
                     type="button"
                     onClick={() => {
-                      setFeedbackOpen(false);
-                      onFeedback(pick, "rejected", { reason: "not_in_the_mood", moodScope: "this_movie_only" });
+                      completePass({ reason: "not_in_the_mood", moodScope: "this_movie_only" });
                     }}
                   >
                     Not now — just this film
@@ -668,46 +729,60 @@ function TastePickCard({
                     disabled={moodSignatureCount < 2}
                     title={moodSignatureCount < 2 ? "This card has too little verified mood evidence, so Taste will only hide this movie." : undefined}
                     onClick={() => {
-                      setFeedbackOpen(false);
-                      onFeedback(pick, "rejected", { reason: "not_in_the_mood", moodScope: "this_kind_right_now" });
+                      completePass({ reason: "not_in_the_mood", moodScope: "this_kind_right_now" });
                     }}
                   >
                     Not now — this kind of film
                   </button>
                 </div>
-              </section>
-            ) : null}
-          </div>
+            </section>
+          </AnchoredPopover>
         ) : null}
       </article>
     </li>
   );
 }
 
-function TasteAttributionPanel({ pick }: { pick: TastePick }) {
+function TasteAttributionPanel({ pick, onSelectFilm }: { pick: TastePick; onSelectFilm: (id: string) => void }) {
   const attribution = pick.attribution;
   if (!attribution) return null;
   const evidence = attribution.citedPositive.slice(0, 4);
+  const evidenceItems = (pick.evidenceItems ?? [])
+    .flatMap((item) => {
+      const id = item.filmId || (item.tmdbId != null ? `tmdb:${item.tmdbId}` : null);
+      return id ? [{ ...item, id }] : [];
+    })
+    .slice(0, 3);
   return (
-    <details className="taste-attribution">
-      <summary>Why this match</summary>
-      <div>
-        <p>
-          <strong>{attribution.evidenceGrade}</strong> evidence · semantic fit {Math.round(attribution.semanticFit * 100)}%
-        </p>
-        {evidence.length ? (
-          <ul>
-            {evidence.map((feature) => (
-              <li key={feature.featureKey ?? `${feature.family}:${feature.name}`}>
-                {feature.name} · {feature.appearances} films · confidence {Math.round(feature.confidence * 100)}%
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {attribution.seedFilms.length ? <p>Seeds: {attribution.seedFilms.slice(0, 3).join(" · ")}</p> : null}
-        {attribution.rankingRationale.length ? <p>{attribution.rankingRationale.slice(0, 2).join(" · ")}</p> : null}
+    <div className="taste-attribution">
+      <div className="taste-attribution-summary">
+        <strong>{sentenceCase(attribution.evidenceGrade)} evidence</strong>
+        <span>Semantic fit {Math.round(attribution.semanticFit * 100)}%</span>
       </div>
-    </details>
+      {evidence.length ? (
+        <dl className="taste-attribution-list">
+          {evidence.map((feature) => (
+            <div key={feature.featureKey ?? `${feature.family}:${feature.name}`}>
+              <dt>{sentenceCase(feature.name)}</dt>
+              <dd>{feature.appearances} films · {Math.round(feature.confidence * 100)}%</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {evidenceItems.length ? (
+        <div className="taste-attribution-evidence">
+          <span>Similar to titles you loved</span>
+          <div>
+            {evidenceItems.map((item) => (
+              <button key={item.id} type="button" onClick={() => onSelectFilm(item.id)}>
+                <Poster name={item.title} poster={item.poster} />
+                <span>{item.title}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : attribution.seedFilms.length ? <p className="taste-attribution-seeds">Seeds: {attribution.seedFilms.slice(0, 3).join(" · ")}</p> : null}
+    </div>
   );
 }
 

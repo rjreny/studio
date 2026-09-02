@@ -307,36 +307,39 @@ export function SettingsView({
       <header className="page-head">
         <div>
           <h1>Settings</h1>
-          <p className="muted">Look, library, and this install</p>
+          <p className="muted">Library, taste, appearance, and this PC</p>
         </div>
       </header>
       <div className="settings-grid">
         <section className="settings-group">
           <h2>Library</h2>
-          <div className="field">
-            <label htmlFor="settings-user">Letterboxd user</label>
-            <input
-              id="settings-user"
-              value={username}
-              onChange={(e) => onUsername(e.target.value)}
-              placeholder="username"
-            />
-          </div>
-          <div className="field-row">
-            <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
-              {busy ? "Working…" : "Import full export"}
-            </button>
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy || !username.trim()}
-              onClick={() => void refreshDiary()}
-            >
-              Sync diary now
-            </button>
-            <button type="button" className="ghost-pill" disabled={busy} onClick={() => void runEnrich()}>
-              Match posters
-            </button>
+          <p className="hint">Your Letterboxd history, poster matching, and diary refresh.</p>
+          <div className="settings-inline-row settings-library-row">
+            <div className="field">
+              <label htmlFor="settings-user">Letterboxd user</label>
+              <input
+                id="settings-user"
+                value={username}
+                onChange={(e) => onUsername(e.target.value)}
+                placeholder="username"
+              />
+            </div>
+            <div className="field-row">
+              <button type="button" className="primary" disabled={busy} onClick={() => void importExport()}>
+                {busy ? "Working…" : "Import full export"}
+              </button>
+              <button
+                type="button"
+                className="ghost-pill"
+                disabled={busy || !username.trim()}
+                onClick={() => void refreshDiary()}
+              >
+                Sync diary now
+              </button>
+              <button type="button" className="ghost-pill" disabled={busy} onClick={() => void runEnrich()}>
+                Match posters
+              </button>
+            </div>
           </div>
           <p className="hint">
             Studio refreshes your public Letterboxd diary RSS about once an hour while the app is
@@ -358,50 +361,79 @@ export function SettingsView({
           {lastImport ? (
             <p className="hint">{formatImport(lastImport)}</p>
           ) : null}
-          <div className="field">
-            <label htmlFor="settings-tmdb">TMDB API key</label>
-            {keyConnected ? (
-              <p className="key-status is-ok">Saved in Windows Credential Manager</p>
-            ) : (
-              <input
-                id="settings-tmdb"
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder={keyStatus?.stored ? "Paste a replacement key" : "v3 key from themoviedb.org"}
-                spellCheck={false}
-                disabled={busy}
-              />
-            )}
-          </div>
-          {keyStatus?.stored && keyStatus.valid === false ? (
-            <p className="key-status is-bad">{keyStatus.lastError ?? "TMDB rejected this key."}</p>
-          ) : null}
-          <div className="field-row">
-            {!keyConnected ? (
-              <button type="button" className="ghost-pill" disabled={busy || !keyInput.trim()} onClick={() => void saveKey()}>
-                Save key
+          <div className="settings-inline-row settings-key-row">
+            <div className="field">
+              <label htmlFor="settings-tmdb">TMDB API key</label>
+              {keyConnected ? (
+                <p className="key-status is-ok">Saved in Windows Credential Manager</p>
+              ) : (
+                <input
+                  id="settings-tmdb"
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder={keyStatus?.stored ? "Paste a replacement key" : "v3 key from themoviedb.org"}
+                  spellCheck={false}
+                  disabled={busy}
+                />
+              )}
+            </div>
+            {keyStatus?.stored && keyStatus.valid === false ? (
+              <p className="key-status is-bad">{keyStatus.lastError ?? "TMDB rejected this key."}</p>
+            ) : null}
+            <div className="field-row">
+              {!keyConnected ? (
+                <button type="button" className="ghost-pill" disabled={busy || !keyInput.trim()} onClick={() => void saveKey()}>
+                  Save key
+                </button>
+              ) : (
+                <button type="button" className="ghost-pill" disabled={busy} onClick={() => setReplacing(true)}>
+                  Replace key
+                </button>
+              )}
+              <button
+                type="button"
+                className="ghost-pill"
+                disabled={busy || !keyStatus?.stored}
+                onClick={() =>
+                  void tmdbClearKey().then((status) => {
+                    setKeyStatus(status);
+                    setReplacing(false);
+                    onStatus("TMDB key removed");
+                  })
+                }
+              >
+                Remove key
               </button>
-            ) : (
-              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setReplacing(true)}>
-                Replace key
-              </button>
-            )}
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy || !keyStatus?.stored}
-              onClick={() =>
-                void tmdbClearKey().then((status) => {
-                  setKeyStatus(status);
-                  setReplacing(false);
-                  onStatus("TMDB key removed");
-                })
-              }
-            >
-              Remove key
-            </button>
+            </div>
           </div>
           {lastEnrich ? <p className="hint">{formatEnrich(lastEnrich)}</p> : null}
+          </section>
+
+          <section className="settings-group">
+            <h2>Look</h2>
+            <p className="hint">Choose the theme and accent Studio uses on this PC.</p>
+            <div className="settings-inline-row settings-look-row">
+              <div className="field">
+                <span className="field-label">Theme</span>
+                <div className="seg">
+                  {(["system", "dark", "light"] as const).map((t) => (
+                    <button key={t} type="button" className={theme === t ? "is-on" : ""} onClick={() => onTheme(t)}>
+                      {t[0].toUpperCase() + t.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="field">
+                <span className="field-label">Accent</span>
+                <div className="seg">
+                  {(["app", "system"] as const).map((a) => (
+                    <button key={a} type="button" className={accent === a ? "is-on" : ""} onClick={() => onAccent(a)}>
+                      {a === "app" ? "App" : "System"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
         </section>
 
         <section className="settings-group">
@@ -443,82 +475,61 @@ export function SettingsView({
             </div>
             <p className="hint">A few critic-list lookups per run. Caps cost. No multi-model swarm.</p>
           </div>
-          <div className="field">
-            <label htmlFor="settings-openrouter">OpenRouter API key</label>
-            {tasteConnected ? (
-              <p className="key-status is-ok">Saved in Windows Credential Manager</p>
-            ) : (
-              <input
-                id="settings-openrouter"
-                value={tasteKeyInput}
-                onChange={(e) => setTasteKeyInput(e.target.value)}
-                placeholder={tasteStatus?.stored ? "Paste a replacement key" : "sk-or-... from openrouter.ai/keys"}
-                spellCheck={false}
-                disabled={busy}
-              />
-            )}
-          </div>
-          {tasteStatus?.stored && tasteStatus.valid === false ? (
-            <p className="key-status is-bad">{tasteStatus.lastError ?? "OpenRouter rejected this key."}</p>
-          ) : null}
-          <div className="field-row">
-            {!tasteConnected ? (
+          <div className="settings-inline-row settings-key-row">
+            <div className="field">
+              <label htmlFor="settings-openrouter">OpenRouter API key</label>
+              {tasteConnected ? (
+                <p className="key-status is-ok">Saved in Windows Credential Manager</p>
+              ) : (
+                <input
+                  id="settings-openrouter"
+                  value={tasteKeyInput}
+                  onChange={(e) => setTasteKeyInput(e.target.value)}
+                  placeholder={tasteStatus?.stored ? "Paste a replacement key" : "sk-or-... from openrouter.ai/keys"}
+                  spellCheck={false}
+                  disabled={busy}
+                />
+              )}
+            </div>
+            {tasteStatus?.stored && tasteStatus.valid === false ? (
+              <p className="key-status is-bad">{tasteStatus.lastError ?? "OpenRouter rejected this key."}</p>
+            ) : null}
+            <div className="field-row">
+              {!tasteConnected ? (
+                <button
+                  type="button"
+                  className="ghost-pill"
+                  disabled={busy || !tasteKeyInput.trim()}
+                  onClick={() => void saveTasteKey()}
+                >
+                  Save key
+                </button>
+              ) : (
+                <button type="button" className="ghost-pill" disabled={busy} onClick={() => setTasteReplacing(true)}>
+                  Replace key
+                </button>
+              )}
               <button
                 type="button"
                 className="ghost-pill"
-                disabled={busy || !tasteKeyInput.trim()}
-                onClick={() => void saveTasteKey()}
+                disabled={busy || !tasteStatus?.stored}
+                onClick={() =>
+                  void tasteClearKey().then((status) => {
+                    setTasteStatus(status);
+                    setTasteReplacing(false);
+                    onStatus("OpenRouter key removed");
+                  })
+                }
               >
-                Save key
+                Remove key
               </button>
-            ) : (
-              <button type="button" className="ghost-pill" disabled={busy} onClick={() => setTasteReplacing(true)}>
-                Replace key
-              </button>
-            )}
-            <button
-              type="button"
-              className="ghost-pill"
-              disabled={busy || !tasteStatus?.stored}
-              onClick={() =>
-                void tasteClearKey().then((status) => {
-                  setTasteStatus(status);
-                  setTasteReplacing(false);
-                  onStatus("OpenRouter key removed");
-                })
-              }
-            >
-              Remove key
-            </button>
-          </div>
-        </section>
-
-        <section className="settings-group">
-          <h2>Look</h2>
-          <div className="field">
-            <span className="field-label">Theme</span>
-            <div className="seg">
-              {(["system", "dark", "light"] as const).map((t) => (
-                <button key={t} type="button" className={theme === t ? "is-on" : ""} onClick={() => onTheme(t)}>
-                  {t[0].toUpperCase() + t.slice(1)}
-                </button>
-              ))}
             </div>
           </div>
-          <div className="field">
-            <span className="field-label">Accent</span>
-            <div className="seg">
-              {(["app", "system"] as const).map((a) => (
-                <button key={a} type="button" className={accent === a ? "is-on" : ""} onClick={() => onAccent(a)}>
-                  {a === "app" ? "App" : "System"}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="settings-group">
+          <section className="settings-group">
           <h2>This PC</h2>
+          <p className="hint">Storage, logs, and recovery controls for this installation.</p>
           {installInfo ? (
             <>
               <p className="hint">
@@ -547,10 +558,11 @@ export function SettingsView({
               Reset data
             </button>
           </div>
-        </section>
+          </section>
 
-        <section className="settings-group">
+          <section className="settings-group">
           <h2>Updates</h2>
+          <p className="hint">Keep Studio current with the latest fixes and improvements.</p>
           <div className="update-line">
             <button type="button" className="ghost-pill" onClick={() => void checkUpdates()}>
               Check

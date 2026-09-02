@@ -34,7 +34,8 @@ use crate::taste::reason::{
     CALL2_SYSTEM, CriticReport, ReasonerPick,
 };
 use crate::taste::retrieve::{
-    attach_signals, load_films, retrieve_with_coverage, seen_keys, FilmRecord,
+    attach_signals, load_films, retrieve_with_coverage, seen_keys, Candidate, FilmRecord,
+    MediaKind,
 };
 use crate::taste::score::ScoredCandidate;
 use rusqlite::params;
@@ -235,6 +236,40 @@ pub struct TasteState {
     pub feedback: Vec<crate::taste::feedback::TasteFeedback>,
     #[serde(default)]
     pub observation: crate::taste::feedback::TasteObservationSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmTasteFit {
+    pub available: bool,
+    pub score: Option<u8>,
+    pub band: String,
+    pub evidence_grade: String,
+    pub semantic_fit: f32,
+    pub semantic_coverage: bool,
+    pub supporting_signals: Vec<String>,
+    pub counter_signals: Vec<String>,
+    pub evidence_titles: Vec<String>,
+    pub watched: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+impl FilmTasteFit {
+    fn unavailable(reason: impl Into<String>, watched: bool) -> Self {
+        Self {
+            available: false,
+            score: None,
+            band: "notEnoughEvidence".into(),
+            evidence_grade: "none".into(),
+            semantic_fit: 0.5,
+            semantic_coverage: false,
+            supporting_signals: Vec::new(),
+            counter_signals: Vec::new(),
+            evidence_titles: Vec::new(),
+            watched,
+            unavailable_reason: Some(reason.into()),
+        }
+    }
 }
 
 pub fn default_model() -> String {
@@ -612,6 +647,100 @@ pub(crate) fn feature_profile_from_films(films: &[FilmRecord]) -> FeatureProfile
     profile.modes = modes;
     profile.mode_shifts = mode_shifts;
     profile
+}
+
+/// Scores the detail page with the same deterministic taste profile used by
+/// recommendations. It never invokes the reasoner or mutates feedback state.
+pub fn film_taste_detail(db: &Database, id: &str) -> Result<FilmTasteFit, String> {
+    let detail = crate::queries::get_film(db, id)?;
+    let watched = !detail.your_history.is_empty();
+    let mut films = load_films(db)?;
+    attach_signals(&mut films);
+    let rated = films.iter().filter(|film| film.rating.is_some()).count();
+    if rated < MIN_RATINGS {
+        return Ok(FilmTasteFit::unavailable(
+            format!("Rate at least {MIN_RATINGS} films to see a Taste fit."),
+            watched,
+        ));
+    }
+    if detail.genres.is_empty() && detail.crew.is_empty() && detail.cast.is_empty() {
+        return Ok(FilmTasteFit::unavailable(
+            "This film needs TMDB details before Studio can compare it to your taste.",
+            watched,
+        ));
+    }
+
+    let mut profile = feature_profile_from_films(&films);
+    let adjustments = crate::taste::feedback::active_feedback_adjustments(db)?;
+    crate::taste::feedback::apply_feedback_adjustments(&mut profile, &adjustments);
+    if profile.affinities.is_empty() {
+        return Ok(FilmTasteFit::unavailable(
+            "Studio does not have enough rated metadata to explain this fit yet.",
+            watched,
+        ));
+    }
+
+    let candidate = Candidate {
+        tmdb_id: detail.tmdb_id,
+        title: detail.title,
+        year: detail.year,
+        poster: detail.poster,
+        genres: detail.genres,
+        credits: detail
+            .crew
+            .into_iter()
+            .map(|member| crate::taste::features::Credit {
+                id: member.tmdb_id,
+                name: member.name,
+                job: member.job,
+            })
+            .chain(detail.cast.into_iter().take(16).map(|member| crate::taste::features::Credit {
+                id: member.tmdb_id,
+                name: member.name,
+                job: "Actor".into(),
+            }))
+            .collect(),
+        keywords: detail
+            .keywords
+            .into_iter()
+            .map(|name| crate::taste::features::Keyword { id: None, name })
+            .collect(),
+        runtime: detail.runtime,
+        vote_count: detail.tmdb_vote_count.map(i64::from),
+        watchlist: false,
+        sources: Vec::new(),
+        friend_affinity: 0.0,
+        tmdb_related: 0.0,
+        media_kind: MediaKind::Movie,
+    };
+    let scored = crate::taste::score::score_candidate(&profile, &candidate);
+    let evidence_grade = format!("{:?}", scored.eligibility.evidence_grade).to_ascii_lowercase();
+    let match_score = crate::taste::confidence::match_score(&scored);
+    let available = scored.eligibility.evidence_grade.displayable();
+    let band = if !available {
+        "notEnoughEvidence"
+    } else if match_score >= 70 {
+        "strong"
+    } else if match_score >= 55 {
+        "mixed"
+    } else {
+        "weak"
+    };
+    Ok(FilmTasteFit {
+        available,
+        score: available.then_some(match_score),
+        band: band.into(),
+        evidence_grade,
+        semantic_fit: scored.score.semantic_fit,
+        semantic_coverage: scored.score.semantic_coverage,
+        supporting_signals: scored.display_reasons.into_iter().take(4).collect(),
+        counter_signals: scored.negative_features.into_iter().take(3).collect(),
+        evidence_titles: scored.evidence.into_iter().take(6).collect(),
+        watched,
+        unavailable_reason: (!available).then_some(
+            "Studio found too little direct evidence to make this a useful Taste fit.".into(),
+        ),
+    })
 }
 
 pub fn load_state(db: &Database) -> Result<TasteState, String> {
