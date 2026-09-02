@@ -639,6 +639,11 @@ html[data-theme="light"] .glass {
   width: min(100%, 440px);
 }
 
+.settings-key-row > .field.is-key-connected {
+  flex-basis: auto;
+  width: auto;
+}
+
 .settings-key-row .key-status {
   margin: 0;
 }

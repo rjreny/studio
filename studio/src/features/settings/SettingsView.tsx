@@ -362,7 +362,7 @@ export function SettingsView({
             <p className="hint">{formatImport(lastImport)}</p>
           ) : null}
           <div className="settings-inline-row settings-key-row">
-            <div className="field">
+            <div className={keyConnected ? "field is-key-connected" : "field"}>
               <label htmlFor="settings-tmdb">TMDB API key</label>
               {keyConnected ? (
                 <p className="key-status is-ok">Saved in Windows Credential Manager</p>
@@ -476,7 +476,7 @@ export function SettingsView({
             <p className="hint">A few critic-list lookups per run. Caps cost. No multi-model swarm.</p>
           </div>
           <div className="settings-inline-row settings-key-row">
-            <div className="field">
+            <div className={tasteConnected ? "field is-key-connected" : "field"}>
               <label htmlFor="settings-openrouter">OpenRouter API key</label>
               {tasteConnected ? (
                 <p className="key-status is-ok">Saved in Windows Credential Manager</p>
