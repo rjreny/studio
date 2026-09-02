@@ -556,22 +556,25 @@ pub fn tmdb_enrich(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
                     report.last_error
                 ),
             );
+            let poster_status = if report.remaining_without_poster == 0 {
+                "all posters available".to_string()
+            } else {
+                format!("{} still without a poster", report.remaining_without_poster)
+            };
             let finished_label = match (report.has_key, report.key_valid) {
                 (false, _) => format!(
-                    "TMDB key missing · {} still missing",
-                    report.remaining_without_poster
+                    "TMDB key missing · {poster_status}"
                 ),
                 (_, Some(false)) => format!(
-                    "TMDB key rejected · {} still missing",
-                    report.remaining_without_poster
+                    "TMDB key rejected · {poster_status}"
                 ),
                 _ if report.errors > 0 => format!(
-                    "Finished · {} posters · {} still missing · {} errors",
-                    report.posters, report.remaining_without_poster, report.errors
+                    "Finished · {} posters · {poster_status} · {} errors",
+                    report.posters, report.errors
                 ),
                 _ => format!(
-                    "Finished · {} posters · {} still missing",
-                    report.posters, report.remaining_without_poster
+                    "Finished · {} posters · {poster_status}",
+                    report.posters
                 ),
             };
             let _ = app.emit(

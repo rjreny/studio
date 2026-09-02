@@ -35,6 +35,13 @@ impl TmdbMediaType {
     fn endpoint(self) -> &'static str {
         self.as_str()
     }
+
+    fn alternate(self) -> Self {
+        match self {
+            Self::Movie => Self::Tv,
+            Self::Tv => Self::Movie,
+        }
+    }
 }
 
 pub fn set_api_key(key: &str) -> Result<(), String> {
@@ -179,10 +186,31 @@ fn tmdb_get(key: &str, path_and_query: &str) -> Result<String, String> {
     if is_bearer_token(key) {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
-    req.call()
-        .map_err(|e| e.to_string())?
+    let response = req
+        .call()
+        .map_err(|error| tmdb_request_error(path_and_query, &error.to_string()))?;
+    response
         .into_string()
-        .map_err(|e| e.to_string())
+        .map_err(|_| format!("TMDB {}: response read failed", tmdb_path_label(path_and_query)))
+}
+
+fn tmdb_path_label(path_and_query: &str) -> &str {
+    path_and_query.split('?').next().unwrap_or(path_and_query)
+}
+
+fn tmdb_request_error(path_and_query: &str, error: &str) -> String {
+    let status = error
+        .split("status code ")
+        .nth(1)
+        .map(|suffix| suffix.chars().take_while(|character| character.is_ascii_digit()).collect::<String>())
+        .filter(|status| !status.is_empty())
+        .map(|status| format!("status code {status}"))
+        .unwrap_or_else(|| "request failed".into());
+    format!("TMDB {}: {status}", tmdb_path_label(path_and_query))
+}
+
+fn tmdb_not_found(error: &str) -> bool {
+    error.contains("status code 404")
 }
 
 fn artwork_paths(primary: Option<&str>, images: &serde_json::Value, kind: &str) -> Vec<String> {
@@ -471,17 +499,25 @@ pub fn enrich_catalog_with(
                 ) {
                     Ok(true) => {
                         report.matched += 1;
-                        if !had_poster && source_has_poster(db, &smr_id)? {
+                        let has_poster = source_has_poster(db, &smr_id)?;
+                        if !had_poster && has_poster {
                             report.posters += 1;
+                        }
+                        if !has_poster {
+                            mark_tmdb_checked(db, &smr_id)?;
                         }
                     }
                     Ok(false) => {
+                        mark_tmdb_checked(db, &smr_id)?;
                         if !had_poster && source_has_poster(db, &smr_id)? {
                             report.posters += 1;
                         }
                     }
                     Err(err) => {
                         report.errors += 1;
+                        if tmdb_not_found(&err) {
+                            mark_tmdb_checked(db, &smr_id)?;
+                        }
                         report.last_error = Some(err);
                     }
                 }
@@ -616,6 +652,7 @@ fn list_metadata_gaps(db: &Database) -> Result<Vec<(i64, TmdbMediaType)>, String
             "SELECT DISTINCT tmdb_id, tmdb_media_type
              FROM movies
              WHERE tmdb_id IS NOT NULL
+               AND (enriched_at IS NULL OR datetime(enriched_at) < datetime('now', '-7 days'))
                AND (
                  enriched_at IS NULL
                  OR genres_json IS NULL
@@ -634,8 +671,18 @@ fn list_metadata_gaps(db: &Database) -> Result<Vec<(i64, TmdbMediaType)>, String
     Ok(rows)
 }
 
+fn mark_tmdb_checked(db: &Database, smr_id: &str) -> Result<(), String> {
+    db.conn()
+        .execute(
+            "UPDATE movie_links SET tmdb_checked_at = datetime('now') WHERE source_movie_record_id = ?1",
+            params![smr_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn match_progress_label(current: u32, total: u32) -> String {
-    format!("Matching TMDB · {current}/{total}")
+    format!("Checking title matches · {current} of {total}")
 }
 
 fn list_unmatched(
@@ -649,13 +696,17 @@ fn list_unmatched(
              JOIN movie_links ml ON ml.source_movie_record_id = smr.id
              LEFT JOIN movies m ON m.id = ml.movie_id
              WHERE (
-                  ml.match_state IN ('unmatched', 'ambiguous')
-                OR (
-                  m.tmdb_id IS NOT NULL
-                  AND (m.poster_override_url IS NULL OR TRIM(m.poster_override_url) = '')
-                  AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')
-                  AND (smr.cached_poster_url IS NULL OR TRIM(smr.cached_poster_url) = '')
-                ))
+                  (
+                    ml.match_state IN ('unmatched', 'ambiguous')
+                    OR (
+                      m.tmdb_id IS NOT NULL
+                      AND (m.poster_override_url IS NULL OR TRIM(m.poster_override_url) = '')
+                      AND (m.poster_path IS NULL OR TRIM(m.poster_path) = '')
+                      AND (smr.cached_poster_url IS NULL OR TRIM(smr.cached_poster_url) = '')
+                    )
+                  )
+                  AND (ml.tmdb_checked_at IS NULL OR datetime(ml.tmdb_checked_at) < datetime('now', '-7 days'))
+             )
                AND (smr.source_type != 'letterboxd_rss'
                     OR LOWER(COALESCE(smr.external_id, '')) LIKE '%/film/%')",
         )
@@ -861,6 +912,17 @@ fn cache_missing_tmdb_artwork(
     tmdb_id: i64,
     media_type: TmdbMediaType,
 ) -> Result<Option<String>, String> {
+    let media_type = db
+        .conn()
+        .query_row(
+            "SELECT tmdb_media_type FROM movies WHERE id = ?1",
+            params![movie_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .map(|kind| TmdbMediaType::from_raw(Some(&kind)))
+        .unwrap_or(media_type);
     let has_poster: bool = db
         .conn()
         .query_row(
@@ -1281,6 +1343,16 @@ fn refresh_tmdb_catalog(
     media_type: TmdbMediaType,
     force: bool,
 ) -> Result<String, String> {
+    refresh_tmdb_catalog_with_fallback(db, tmdb_id, media_type, force, true)
+}
+
+fn refresh_tmdb_catalog_with_fallback(
+    db: &Database,
+    tmdb_id: i64,
+    media_type: TmdbMediaType,
+    force: bool,
+    allow_alternate_type: bool,
+) -> Result<String, String> {
     if !force {
         if let Some((
             existing_id,
@@ -1334,11 +1406,31 @@ fn refresh_tmdb_catalog(
     }
 
     let api_key = get_api_key()?.ok_or("missing api key")?;
-    let path = format!(
-        "/{}/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords,images",
-        media_type.endpoint()
-    );
-    let body = tmdb_get(&api_key, &path)?;
+    let path = tmdb_details_path(tmdb_id, media_type);
+    let body = match tmdb_get(&api_key, &path) {
+        Ok(body) => body,
+        Err(error) if allow_alternate_type && tmdb_not_found(&error) => {
+            let alternate = media_type.alternate();
+            match tmdb_get(&api_key, &tmdb_details_path(tmdb_id, alternate)) {
+                Ok(_) => {
+                    reclassify_tmdb_media_type(db, tmdb_id, media_type, alternate)?;
+                    return refresh_tmdb_catalog_with_fallback(db, tmdb_id, alternate, force, false);
+                }
+                Err(alternate_error) => {
+                    if tmdb_not_found(&alternate_error) {
+                        defer_unavailable_tmdb_metadata(db, tmdb_id)?;
+                    }
+                    return Err(alternate_error);
+                }
+            }
+        }
+        Err(error) => {
+            if tmdb_not_found(&error) {
+                defer_unavailable_tmdb_metadata(db, tmdb_id)?;
+            }
+            return Err(error);
+        }
+    };
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let title = if media_type == TmdbMediaType::Tv {
         v["name"].as_str()
@@ -1488,6 +1580,39 @@ fn refresh_tmdb_catalog(
         )
         .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+fn tmdb_details_path(tmdb_id: i64, media_type: TmdbMediaType) -> String {
+    format!(
+        "/{}/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords,images",
+        media_type.endpoint()
+    )
+}
+
+fn reclassify_tmdb_media_type(
+    db: &Database,
+    tmdb_id: i64,
+    old_type: TmdbMediaType,
+    new_type: TmdbMediaType,
+) -> Result<(), String> {
+    db.conn()
+        .execute(
+            "UPDATE movies SET tmdb_media_type = ?3, enriched_at = NULL
+             WHERE tmdb_id = ?1 AND tmdb_media_type = ?2",
+            params![tmdb_id, old_type.as_str(), new_type.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn defer_unavailable_tmdb_metadata(db: &Database, tmdb_id: i64) -> Result<(), String> {
+    db.conn()
+        .execute(
+            "UPDATE movies SET enriched_at = datetime('now') WHERE tmdb_id = ?1",
+            params![tmdb_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn parse_raw_title(raw: &str) -> String {
@@ -1970,8 +2095,8 @@ mod tests {
 
     #[test]
     fn match_progress_uses_library_total_not_batch_size() {
-        assert_eq!(match_progress_label(2, 1097), "Matching TMDB · 2/1097");
-        assert_ne!(match_progress_label(2, 1097), "Matching TMDB · 2/50");
+        assert_eq!(match_progress_label(2, 1097), "Checking title matches · 2 of 1097");
+        assert_ne!(match_progress_label(2, 1097), "Checking title matches · 2 of 50");
     }
 
     #[test]
@@ -2311,6 +2436,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(list_metadata_gaps(&db).unwrap(), vec![(77, TmdbMediaType::Tv)]);
+    }
+
+    #[test]
+    fn unavailable_tmdb_metadata_waits_before_retrying() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id, enriched_at)
+                 VALUES ('gone', 'Removed Listing', 88, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        assert!(list_metadata_gaps(&db).unwrap().is_empty());
+        db.conn()
+            .execute(
+                "UPDATE movies SET enriched_at = datetime('now', '-8 days') WHERE id = 'gone'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(list_metadata_gaps(&db).unwrap(), vec![(88, TmdbMediaType::Movie)]);
+    }
+
+    #[test]
+    fn unmatched_records_back_off_after_a_completed_check() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_movie_records(id, source_type, source_record_key, normalized_title, raw_identity, created_at)
+                 VALUES ('unmatched', 'letterboxd_export', 'unmatched', 'not found', '{\"title\":\"Not Found\"}', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movie_links(source_movie_record_id, match_state, tmdb_checked_at)
+                 VALUES ('unmatched', 'unmatched', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        assert!(list_unmatched(&db).unwrap().is_empty());
+        db.conn()
+            .execute(
+                "UPDATE movie_links SET tmdb_checked_at = datetime('now', '-8 days') WHERE source_movie_record_id = 'unmatched'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(list_unmatched(&db).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tmdb_errors_hide_credentials_and_recognize_not_found() {
+        let error = tmdb_request_error(
+            "/movie/88?append_to_response=credits",
+            "https://api.themoviedb.org/3/movie/88?api_key=secret: status code 404",
+        );
+        assert_eq!(error, "TMDB /movie/88: status code 404");
+        assert!(tmdb_not_found(&error));
+        assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn reclassifying_a_stale_tmdb_type_updates_the_existing_record() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(id, canonical_title, tmdb_id, tmdb_media_type)
+                 VALUES ('stale', 'A Special', 99, 'movie')",
+                [],
+            )
+            .unwrap();
+        reclassify_tmdb_media_type(&db, 99, TmdbMediaType::Movie, TmdbMediaType::Tv).unwrap();
+        let kind: String = db
+            .conn()
+            .query_row("SELECT tmdb_media_type FROM movies WHERE id = 'stale'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kind, "tv");
     }
 
     #[test]

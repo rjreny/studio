@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS movie_links (
   match_state TEXT NOT NULL,
   match_method TEXT,
   confidence REAL,
-  confirmed_at TEXT
+  confirmed_at TEXT,
+  tmdb_checked_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS movie_aliases (

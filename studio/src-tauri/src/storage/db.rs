@@ -218,6 +218,12 @@ impl Database {
                 [],
             );
         }
+        if version < 14 {
+            let _ = self.conn.execute(
+                "ALTER TABLE movie_links ADD COLUMN tmdb_checked_at TEXT",
+                [],
+            );
+        }
         Ok(())
     }
 
@@ -683,7 +689,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("13".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("14".into()));
     }
 
     #[test]
@@ -750,9 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v13_keeps_existing_taste_tables_and_adds_artwork_overrides() {
+    fn schema_v14_keeps_existing_taste_tables_and_adds_catalog_check_time() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("13".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("14".into()));
         let feedback: i64 = db
             .conn()
             .query_row(

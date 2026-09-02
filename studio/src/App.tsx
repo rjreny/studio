@@ -64,6 +64,7 @@ export default function App() {
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [job, setJob] = useState<JobProgress | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const launchHydrationStarted = useRef(false);
   const pendingLaunchEnrich = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const scrollIdleTimer = useRef<number | undefined>(undefined);
@@ -109,6 +110,8 @@ export default function App() {
   }, [theme, accent]);
 
   useEffect(() => {
+    if (launchHydrationStarted.current) return;
+    launchHydrationStarted.current = true;
     void (async () => {
       try {
         const [r, t, a, u, migrated, lib, v] = await Promise.all([

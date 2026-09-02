@@ -266,9 +266,9 @@ export function formatEnrich(r: EnrichReport): string {
   const parts = [
     `matched ${r.matched}/${r.attempted}`,
     `${r.posters} posters`,
-    `${r.remainingUnmatched} unmatched`,
-    `${r.remainingWithoutPoster} still without a poster`,
+    r.remainingWithoutPoster ? `${r.remainingWithoutPoster} without a poster` : "all posters available",
   ];
+  if (r.remainingUnmatched) parts.push(`${r.remainingUnmatched} title matches deferred`);
   if (!r.hasKey) parts.unshift("no TMDB key");
   if (r.errors) parts.push(`${r.errors} errors`);
   if (r.lastError) parts.push(r.lastError);
