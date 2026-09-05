@@ -48,6 +48,7 @@ const film: FilmDetail = {
   collectionName: null,
   collection: [],
   similar: [],
+  trailers: [],
 };
 
 function renderDetail(onBack = vi.fn()) {
@@ -103,6 +104,29 @@ describe("FilmDetailView", () => {
     expect(await screen.findByRole("heading", { name: "Last rating" })).toBeInTheDocument();
     expect(screen.getByText("Letterboxd RSS")).toBeInTheDocument();
     expect(screen.queryByText("Studio")).not.toBeInTheDocument();
+  });
+
+  it("plays trailers inside the detail view without leaving the app", async () => {
+    getFilm.mockResolvedValue({
+      ...film,
+      trailers: [
+        { key: "abc123", name: "Official Trailer", site: "YouTube", type: "Trailer", official: true },
+        { key: "def456", name: "Teaser", site: "YouTube", type: "Teaser", official: false },
+      ],
+    });
+    renderDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Play trailer (2)" }));
+    expect(screen.getByRole("dialog", { name: "Official Trailer trailer" })).toBeInTheDocument();
+    const frame = screen.getByTitle("Official Trailer");
+    expect(frame).toHaveAttribute("src", expect.stringContaining("youtube-nocookie.com/embed/abc123"));
+    fireEvent.click(screen.getByRole("tab", { name: "Teaser" }));
+    expect(screen.getByTitle("Teaser")).toHaveAttribute(
+      "src",
+      expect.stringContaining("youtube-nocookie.com/embed/def456"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("offers TMDB artwork choices and saves the selected poster", async () => {

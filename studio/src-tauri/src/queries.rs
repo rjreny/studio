@@ -2,7 +2,7 @@ use crate::catalog::tmdb::library_item_from_tmdb_value;
 use crate::letterboxd::posters::{backdrop_url, poster_from_rss_body, poster_url, tmdb_image_url};
 use crate::letterboxd::rss::parse_activity_payload;
 use crate::models::{
-    ConnectionFilm, FilmCastMember, FilmConnection, FilmCrewMember, FilmDetail,
+    ConnectionFilm, FilmCastMember, FilmConnection, FilmCrewMember, FilmDetail, FilmTrailer,
     FriendActivityItem, HomeViewModel, LibraryItem, LibraryPage, LibraryQuery,
     ProductionCompany, StatsBucket, StatsSnapshot, ViewingHistoryItem,
 };
@@ -412,7 +412,8 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
               m.collection_json,
               m.credits_json,
               m.production_companies_json,
-              m.keywords_json
+              m.keywords_json,
+              m.videos_json
             FROM source_movie_records smr
             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             LEFT JOIN movies m ON m.id = ml.movie_id
@@ -452,6 +453,7 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
                     row.get::<_, Option<String>>(21)?,
                     row.get::<_, Option<String>>(22)?,
                     row.get::<_, Option<String>>(23)?,
+                    row.get::<_, Option<String>>(24)?,
                 ))
             },
         )
@@ -471,6 +473,7 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
     let connections = film_connections(db, &cast, &crew, &companies, row.17)?;
     let similar = relink_catalog_items(db, parse_related(row.16.as_deref()));
     let collection = relink_catalog_items(db, parse_related(row.20.as_deref()));
+    let trailers = film_trailers(row.24.as_deref());
 
     Ok(Some(FilmDetail {
         id: row.0,
@@ -500,8 +503,13 @@ fn get_library_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         collection_name: row.19.filter(|s| !s.is_empty()),
         collection,
         similar,
+        trailers,
         collection_hydrated: row.20.is_some(),
-        detail_metadata_hydrated: structured_metadata_hydrated(row.21.as_deref(), row.22.as_deref()),
+        detail_metadata_hydrated: structured_metadata_hydrated(
+            row.21.as_deref(),
+            row.22.as_deref(),
+            row.24.as_deref(),
+        ),
     }))
 }
 
@@ -516,7 +524,7 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
                    COALESCE(backdrop_override_url, backdrop_path), overview, runtime,
                    genres_json, vote_average, vote_count, reviews_json, cast_json, crew_json,
                    similar_json, tmdb_id, tagline, collection_name, collection_json, credits_json,
-                   production_companies_json, keywords_json
+                   production_companies_json, keywords_json, videos_json
             FROM movies
             WHERE id = ?1
                OR CAST(tmdb_id AS TEXT) = ?1
@@ -547,6 +555,7 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
                     row.get::<_, Option<String>>(18)?,
                     row.get::<_, Option<String>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
                 ))
             },
         )
@@ -593,8 +602,13 @@ fn get_catalog_film(db: &Database, id: &str) -> Result<Option<FilmDetail>, Strin
         collection_name: row.16.filter(|s| !s.is_empty()),
         collection: parse_related(row.17.as_deref()),
         similar: parse_related(row.13.as_deref()),
+        trailers: film_trailers(row.21.as_deref()),
         collection_hydrated: row.17.is_some(),
-        detail_metadata_hydrated: structured_metadata_hydrated(row.18.as_deref(), row.19.as_deref()),
+        detail_metadata_hydrated: structured_metadata_hydrated(
+            row.18.as_deref(),
+            row.19.as_deref(),
+            row.21.as_deref(),
+        ),
     }))
 }
 
@@ -739,11 +753,23 @@ fn keyword_names(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn structured_metadata_hydrated(credits: Option<&str>, companies: Option<&str>) -> bool {
+fn structured_metadata_hydrated(
+    credits: Option<&str>,
+    companies: Option<&str>,
+    videos: Option<&str>,
+) -> bool {
     credits
         .map(|value| value.contains("\"detailVersion\":1"))
         .unwrap_or(false)
         && companies.is_some()
+        && videos.is_some()
+}
+
+fn film_trailers(raw: Option<&str>) -> Vec<FilmTrailer> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<FilmTrailer>>(raw).unwrap_or_default()
 }
 
 #[derive(Clone)]

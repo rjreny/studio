@@ -151,6 +151,15 @@ export type FilmDetail = {
   collectionName?: string | null;
   collection?: LibraryItem[];
   similar: LibraryItem[];
+  trailers?: FilmTrailer[];
+};
+
+export type FilmTrailer = {
+  key: string;
+  name: string;
+  site: string;
+  type: string;
+  official?: boolean;
 };
 
 export type ArtworkImage = {

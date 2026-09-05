@@ -288,10 +288,24 @@ pub struct FilmDetail {
     pub collection_name: Option<String>,
     pub collection: Vec<LibraryItem>,
     pub similar: Vec<LibraryItem>,
+    #[serde(default)]
+    pub trailers: Vec<FilmTrailer>,
     #[serde(skip)]
     pub collection_hydrated: bool,
     #[serde(skip)]
     pub detail_metadata_hydrated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmTrailer {
+    pub key: String,
+    pub name: String,
+    pub site: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub official: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

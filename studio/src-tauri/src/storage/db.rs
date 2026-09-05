@@ -233,6 +233,11 @@ impl Database {
                 .execute("DELETE FROM app_meta WHERE key = 'taste_report'", [])
                 .map_err(|e| e.to_string())?;
         }
+        if version < 16 {
+            let _ = self
+                .conn
+                .execute("ALTER TABLE movies ADD COLUMN videos_json TEXT", []);
+        }
         Ok(())
     }
 

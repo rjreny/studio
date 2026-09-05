@@ -8,6 +8,7 @@ import type {
   FilmCrewMember,
   FilmDetail,
   FilmArtwork,
+  FilmTrailer,
   LibraryItem,
   ProductionCompany,
   ViewingHistoryItem,
@@ -174,6 +175,72 @@ function RelatedShelf({ title, source, films, onSelect }: { title: string; sourc
   return <section className="detail-block detail-related"><Shelf title={title}>{films.map((film) => <FilmCard key={film.id} film={film} onSelect={onSelect} />)}</Shelf><p className="section-source">{source}</p></section>;
 }
 
+function youtubeEmbedUrl(key: string) {
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(key)}?autoplay=1&rel=0&modestbranding=1`;
+}
+
+function TrailerPlayer({ trailers, onClose }: { trailers: FilmTrailer[]; onClose: () => void }) {
+  const [activeKey, setActiveKey] = useState(trailers[0]?.key ?? "");
+  const active = trailers.find((trailer) => trailer.key === activeKey) ?? trailers[0];
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  if (!active) return null;
+
+  return (
+    <div
+      className="trailer-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${active.name} trailer`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="trailer-card">
+        <div className="trailer-head">
+          <div>
+            <h2>{active.name}</h2>
+            <span className="muted">{active.type}{active.official ? " · Official" : ""}</span>
+          </div>
+          <button type="button" className="ghost" onClick={onClose}>Close</button>
+        </div>
+        <div className="trailer-frame">
+          <iframe
+            key={active.key}
+            title={active.name}
+            src={youtubeEmbedUrl(active.key)}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+          />
+        </div>
+        {trailers.length > 1 ? (
+          <div className="trailer-picker" role="tablist" aria-label="Trailers">
+            {trailers.map((trailer) => (
+              <button
+                key={trailer.key}
+                type="button"
+                role="tab"
+                aria-selected={trailer.key === active.key}
+                className={trailer.key === active.key ? "is-active" : undefined}
+                onClick={() => setActiveKey(trailer.key)}
+              >
+                {trailer.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 const INITIAL_POSTER_CHOICES = 24;
 const INITIAL_BACKDROP_CHOICES = 12;
 
@@ -310,11 +377,13 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
   const [film, setFilm] = useState<FilmDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [heroImageFailed, setHeroImageFailed] = useState(false);
+  const [trailerOpen, setTrailerOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setFilm(null);
     setError(null);
+    setTrailerOpen(false);
     void getFilm(filmId).then((next) => !cancelled && setFilm(next)).catch((err) => {
       log("error", "film load failed", err);
       if (!cancelled) {
@@ -335,6 +404,7 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
   const runtime = runtimeLabel(film.runtime);
   const community = communityRatingOutOfFive(film.tmdbVoteAverage);
   const latestViewing = film.yourHistory[0] ?? null;
+  const trailers = (film.trailers ?? []).filter((trailer) => trailer.site === "YouTube" && trailer.key);
 
   return (
     <article className="film-detail">
@@ -353,10 +423,19 @@ export function FilmDetailView({ filmId, onBack, backLabel, onStatus, onSelectFi
                 <div className="rating-unit"><span className="rating-label">TMDB</span>{community != null ? <RatingDisplay value={community} compact /> : <span className="rating-unavailable">Not rated</span>}{film.tmdbVoteCount ? <small>{film.tmdbVoteCount.toLocaleString()} votes</small> : null}</div>
               </div>
               {film.tagline ? <p className="hero-lede">{film.tagline}</p> : null}
+              {trailers.length ? (
+                <div className="hero-actions">
+                  <button type="button" className="play-btn" onClick={() => setTrailerOpen(true)}>
+                    {trailers.length === 1 ? "Play trailer" : `Play trailer (${trailers.length})`}
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
       </header>
+
+      {trailerOpen && trailers.length ? <TrailerPlayer trailers={trailers} onClose={() => setTrailerOpen(false)} /> : null}
 
       <ArtworkPicker film={film} onUpdated={(updated) => { setFilm(updated); onArtworkChange?.(); }} onStatus={onStatus} />
 

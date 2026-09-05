@@ -3,7 +3,7 @@ use crate::letterboxd::posters::{
     backdrop_url, backfill_letterboxd_posters, cache_poster_for_siblings, full_poster_url,
     letterboxd_page_metadata, poster_url,
 };
-use crate::models::{ArtworkImage, EnrichReport, FilmArtwork, JobProgress, LibraryItem, SetArtworkInput, TmdbKeyStatus};
+use crate::models::{ArtworkImage, EnrichReport, FilmArtwork, FilmTrailer, JobProgress, LibraryItem, SetArtworkInput, TmdbKeyStatus};
 use crate::storage::db::Database;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -660,6 +660,7 @@ fn list_metadata_gaps(db: &Database) -> Result<Vec<(i64, TmdbMediaType)>, String
                  OR production_companies_json IS NULL
                  OR keywords_json IS NULL
                  OR similar_json IS NULL
+                 OR videos_json IS NULL
                )",
         )
         .map_err(|error| error.to_string())?;
@@ -1363,12 +1364,14 @@ fn refresh_tmdb_catalog_with_fallback(
             production_companies_json,
             keywords_json,
             similar_json,
+            videos_json,
             fresh,
         )) = db
             .conn()
             .query_row(
                 "SELECT id, COALESCE(poster_override_url, poster_path, ''), collection_json,
                         genres_json, credits_json, production_companies_json, keywords_json, similar_json,
+                        videos_json,
                         CASE WHEN enriched_at IS NOT NULL
                               AND datetime(enriched_at) >= datetime('now', '-30 days')
                              THEN 1 ELSE 0 END
@@ -1384,7 +1387,8 @@ fn refresh_tmdb_catalog_with_fallback(
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
-                        row.get::<_, i64>(8)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, i64>(9)?,
                     ))
                 },
             )
@@ -1398,6 +1402,7 @@ fn refresh_tmdb_catalog_with_fallback(
                 && keywords_json.is_some()
                 && similar_json.is_some()
                 && production_companies_json.is_some()
+                && videos_json.is_some()
                 && fresh == 1
             {
                 return Ok(existing_id);
@@ -1500,6 +1505,7 @@ fn refresh_tmdb_catalog_with_fallback(
     let credits_blob = serde_json::to_string(&credit_entries(&v)).unwrap_or_else(|_| "{}".into());
     let production_companies_json = serde_json::to_string(&production_companies(&v))
         .unwrap_or_else(|_| "[]".into());
+    let videos_json = serde_json::to_string(&video_entries(&v)).unwrap_or_else(|_| "[]".into());
 
     if existing_id.is_some() {
         db.conn()
@@ -1509,6 +1515,7 @@ fn refresh_tmdb_catalog_with_fallback(
                  genres_json = ?12, cast_json = ?13, crew_json = ?14, similar_json = ?15,
                  reviews_json = ?16, tagline = ?17, collection_name = ?18, collection_json = ?19,
                  keywords_json = ?20, credits_json = ?21, production_companies_json = ?22,
+                 videos_json = ?23,
                  enriched_at = datetime('now')
                  WHERE id = ?1",
                 params![
@@ -1534,6 +1541,7 @@ fn refresh_tmdb_catalog_with_fallback(
                     keywords_json,
                     credits_blob,
                     production_companies_json,
+                    videos_json,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -1544,8 +1552,9 @@ fn refresh_tmdb_catalog_with_fallback(
         .execute(
             "INSERT INTO movies(id, canonical_title, release_year, tmdb_id, tmdb_media_type, poster_path, backdrop_path,
              overview, runtime, vote_average, vote_count, genres_json, cast_json, crew_json, similar_json,
-             reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, production_companies_json, enriched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, datetime('now'))",
+             reviews_json, tagline, collection_name, collection_json, keywords_json, credits_json, production_companies_json,
+             videos_json, enriched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, datetime('now'))",
             params![
                 id,
                 title,
@@ -1569,6 +1578,7 @@ fn refresh_tmdb_catalog_with_fallback(
                 keywords_json,
                 credits_blob,
                 production_companies_json,
+                videos_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1584,7 +1594,7 @@ fn refresh_tmdb_catalog_with_fallback(
 
 fn tmdb_details_path(tmdb_id: i64, media_type: TmdbMediaType) -> String {
     format!(
-        "/{}/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords,images",
+        "/{}/{tmdb_id}?append_to_response=credits,reviews,recommendations,similar,keywords,images,videos",
         media_type.endpoint()
     )
 }
@@ -1829,6 +1839,78 @@ fn production_companies(v: &serde_json::Value) -> Vec<serde_json::Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn video_type_rank(kind: &str) -> u8 {
+    match kind {
+        "Trailer" => 0,
+        "Teaser" => 1,
+        "Clip" => 2,
+        _ => 3,
+    }
+}
+
+fn video_entries(v: &serde_json::Value) -> Vec<FilmTrailer> {
+    let mut videos: Vec<(u8, u8, u8, String, FilmTrailer)> = v["videos"]["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|video| {
+            let site = video["site"].as_str()?.trim();
+            if !site.eq_ignore_ascii_case("YouTube") {
+                return None;
+            }
+            let key = video["key"].as_str()?.trim();
+            if key.is_empty() {
+                return None;
+            }
+            let kind = video["type"].as_str().unwrap_or("Trailer").trim();
+            let name = video["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(kind)
+                .to_string();
+            let official = video["official"].as_bool().unwrap_or(false);
+            let language_rank = match video["iso_639_1"].as_str() {
+                Some("en") => 0,
+                None => 1,
+                _ => 2,
+            };
+            let official_rank = if official { 0 } else { 1 };
+            Some((
+                video_type_rank(kind),
+                official_rank,
+                language_rank,
+                video["published_at"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                FilmTrailer {
+                    key: key.to_string(),
+                    name,
+                    site: "YouTube".into(),
+                    kind: kind.to_string(),
+                    official,
+                },
+            ))
+        })
+        .collect();
+    videos.sort_by(|a, b| {
+        (a.0, a.1, a.2, std::cmp::Reverse(a.3.as_str()))
+            .cmp(&(b.0, b.1, b.2, std::cmp::Reverse(b.3.as_str())))
+    });
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_, _, _, _, trailer) in videos {
+        if seen.insert(trailer.key.clone()) {
+            out.push(trailer);
+        }
+        if out.len() == 8 {
+            break;
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2323,6 +2405,58 @@ mod tests {
     }
 
     #[test]
+    fn trailers_prefer_official_english_youtube_trailers() {
+        let payload = serde_json::json!({
+            "videos": {
+                "results": [
+                    {
+                        "site": "Vimeo",
+                        "key": "vimeo1",
+                        "type": "Trailer",
+                        "official": true,
+                        "iso_639_1": "en",
+                        "name": "Vimeo trailer",
+                        "published_at": "2024-06-01T00:00:00.000Z"
+                    },
+                    {
+                        "site": "YouTube",
+                        "key": "teaser1",
+                        "type": "Teaser",
+                        "official": true,
+                        "iso_639_1": "en",
+                        "name": "Teaser",
+                        "published_at": "2024-05-01T00:00:00.000Z"
+                    },
+                    {
+                        "site": "YouTube",
+                        "key": "fr-trailer",
+                        "type": "Trailer",
+                        "official": true,
+                        "iso_639_1": "fr",
+                        "name": "Bande-annonce",
+                        "published_at": "2024-04-01T00:00:00.000Z"
+                    },
+                    {
+                        "site": "YouTube",
+                        "key": "official-en",
+                        "type": "Trailer",
+                        "official": true,
+                        "iso_639_1": "en",
+                        "name": "Official Trailer",
+                        "published_at": "2024-03-01T00:00:00.000Z"
+                    }
+                ]
+            }
+        });
+        let trailers = video_entries(&payload);
+        assert_eq!(trailers.len(), 3);
+        assert_eq!(trailers[0].key, "official-en");
+        assert_eq!(trailers[0].kind, "Trailer");
+        assert_eq!(trailers[1].key, "fr-trailer");
+        assert_eq!(trailers[2].key, "teaser1");
+    }
+
+    #[test]
     fn artwork_picker_keeps_only_high_resolution_portrait_and_landscape_images() {
         let images = serde_json::json!({
             "posters": [
@@ -2430,8 +2564,8 @@ mod tests {
             .execute(
                 "INSERT INTO movies(
                    id, canonical_title, tmdb_id, tmdb_media_type, enriched_at,
-                   genres_json, credits_json, production_companies_json, keywords_json, similar_json
-                 ) VALUES ('complete', 'Complete', 78, 'movie', datetime('now'), '[]', '{}', '[]', '[]', '{}')",
+                   genres_json, credits_json, production_companies_json, keywords_json, similar_json, videos_json
+                 ) VALUES ('complete', 'Complete', 78, 'movie', datetime('now'), '[]', '{}', '[]', '[]', '{}', '[]')",
                 [],
             )
             .unwrap();
