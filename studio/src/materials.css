@@ -182,7 +182,7 @@ html[data-theme="light"] .scroll-thumb::before {
   align-items: center;
   width: 100%;
   height: var(--nav-height);
-  padding: 0 calc(var(--caption-width) * 3) 0 var(--gutter);
+  padding: 0 calc(var(--caption-island-width) + 20px) 0 var(--gutter);
   gap: 10px;
   pointer-events: none;
 }
@@ -270,7 +270,7 @@ html[data-theme="light"] .scroll-thumb::before {
 .nav-utility {
   position: absolute;
   top: 50%;
-  right: calc(var(--caption-width) * 3 + 16px);
+  right: calc(var(--caption-island-width) + 18px);
   z-index: 1;
   display: flex;
   align-items: center;
@@ -3181,7 +3181,7 @@ html[data-theme="light"] .ghost {
 
   .nav-utility {
     top: 18px;
-    right: calc(var(--caption-width) * 3 + 12px);
+    right: calc(var(--caption-island-width) + 12px);
   }
 
   .nav-pill-link {

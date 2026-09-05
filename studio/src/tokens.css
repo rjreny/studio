@@ -1,11 +1,12 @@
 :root {
-  --titlebar-height: 40px;
+  --titlebar-height: 52px;
   --sidebar-width: 220px;
   --sidebar-collapsed: 52px;
   --sidebar-row: 44px;
   --nav-height: 112px;
   --nav-control-height: 56px;
   --caption-width: 46px;
+  --caption-island-width: 132px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

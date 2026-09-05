@@ -19,7 +19,7 @@ export function TitleBar() {
   return (
     <header className="titlebar">
       <div className="tb-drag" data-tauri-drag-region onDoubleClick={() => void win.toggleMaximize()} />
-      <div className="tb-controls">
+      <div className="tb-controls glass" role="toolbar" aria-label="Window">
         <button type="button" className="tb-btn" aria-label="Minimize" title="Minimize" onClick={() => void win.minimize()}>
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
             <path fill="currentColor" d="M2.5 5.75h7v.9h-7z" />
