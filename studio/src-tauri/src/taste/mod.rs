@@ -930,10 +930,7 @@ pub fn analyze_with_run_log(
     });
     let critic = match run_json(&key, &model, CALL1_SYSTEM, &call1_body, false)
     {
-        Ok((raw, _)) => match parse_critic(&extract_json(&raw)?) {
-            Ok(c) => c,
-            Err(_) => empty_critic(),
-        },
+        Ok((raw, _)) => critic_from_model_text(&raw),
         Err(err) if should_fallback(&err) => {
             let next = fallback_model(&model);
             used_model = next.to_string();
@@ -944,8 +941,7 @@ pub fn analyze_with_run_log(
             ));
             run_json(&key, next, CALL1_SYSTEM, &call1_body, false)
                 .ok()
-                .and_then(|(raw, _)| extract_json(&raw).ok())
-                .and_then(|v| parse_critic(&v).ok())
+                .map(|(raw, _)| critic_from_model_text(&raw))
                 .unwrap_or_else(empty_critic)
         }
         Err(_) => empty_critic(),
@@ -1203,6 +1199,14 @@ fn finish_from_snapshot(
     };
     db.set_meta(META_REPORT, &serde_json::to_string(&report).unwrap_or_default())?;
     Ok(report)
+}
+
+/// Critic pass is best-effort: prose / empty / broken JSON must not abort Taste.
+fn critic_from_model_text(raw: &str) -> CriticReport {
+    extract_json(raw)
+        .ok()
+        .and_then(|v| parse_critic(&v).ok())
+        .unwrap_or_else(empty_critic)
 }
 
 fn run_reasoner(key: &str, model: &str, payload: &Value) -> Result<reason::ReasonerReport, String> {
@@ -1899,6 +1903,13 @@ mod tests {
         let raw = "```json\n{\"title\":\"Night owl\",\"summary\":\"x\",\"picks\":[]}\n```";
         let v = extract_json(raw).unwrap();
         assert_eq!(v["title"], "Night owl");
+    }
+
+    #[test]
+    fn critic_pass_survives_non_json_model_text() {
+        let critic = critic_from_model_text("sorry, I can't critique that right now");
+        assert!(critic.candidate_assessments.is_empty());
+        assert!(critic.discovery_queries.is_empty());
     }
 
     #[test]
