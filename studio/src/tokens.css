@@ -1,9 +1,10 @@
 :root {
-  --titlebar-height: 36px;
+  --titlebar-height: 40px;
   --sidebar-width: 220px;
   --sidebar-collapsed: 52px;
   --sidebar-row: 44px;
-  --nav-height: 92px;
+  --nav-height: 112px;
+  --nav-control-height: 56px;
   --caption-width: 46px;
   --space-1: 4px;
   --space-2: 8px;
@@ -17,6 +18,7 @@
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --dur: 180ms;
   --z-nav: 20;
+  --z-scrollbar: 24;
   --z-toast: 28;
   --z-palette: 50;
   --accent-app: oklch(0.78 0.19 145);

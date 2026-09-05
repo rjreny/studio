@@ -43,6 +43,7 @@ export function NavTabs({
           key={item.id}
           type="button"
           className={`nav-pill-link${active === item.id ? " is-active" : ""}`}
+          aria-current={active === item.id ? "page" : undefined}
           onClick={() => onGo(item.id)}
         >
           {item.label}

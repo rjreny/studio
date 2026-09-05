@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { DevUpdateButton } from "./app/shell/DevUpdateButton";
 import { NavTabs } from "./app/shell/NavTabs";
+import { ScrollArea } from "./app/shell/ScrollArea";
 import { TitleBar } from "./app/shell/TitleBar";
 import { ConnectView } from "./features/films/ConnectView";
 import { FilmDetailView } from "./features/films/FilmDetailView";
@@ -82,24 +83,7 @@ export default function App() {
   const launchHydrationStarted = useRef(false);
   const pendingLaunchEnrich = useRef(false);
   const updateCheckStarted = useRef(false);
-  const stageRef = useRef<HTMLDivElement>(null);
-  const scrollIdleTimer = useRef<number | undefined>(undefined);
   const detailReturnFocus = useRef<HTMLElement | null>(null);
-
-  const handleStageScroll = useCallback(() => {
-    stageRef.current?.classList.add("is-scrolling");
-    window.clearTimeout(scrollIdleTimer.current);
-    scrollIdleTimer.current = window.setTimeout(() => {
-      stageRef.current?.classList.remove("is-scrolling");
-    }, 600);
-  }, []);
-
-  useEffect(
-    () => () => {
-      window.clearTimeout(scrollIdleTimer.current);
-    },
-    [],
-  );
 
   useEffect(() => {
     if (!status) return;
@@ -332,18 +316,21 @@ export default function App() {
   return (
     <div className="app canvas-surface">
       <TitleBar />
-      <div ref={stageRef} className="stage" onScroll={handleStageScroll}>
+      <ScrollArea scrollKey={selectedFilm ? `film:${selectedFilm.id}` : route === "films" ? `films:${libraryQuery}` : route}>
         <header className="cinema-nav">
           <div className="cinema-nav-inner">
             <NavTabs items={NAV} active={route} onGo={go} />
-            <input
-              className="nav-search glass"
-              aria-label="Search your log"
-              value={libraryQuery}
-              onChange={(e) => onNavSearch(e.target.value)}
-              placeholder="Search your log"
-              spellCheck={false}
-            />
+            <label className="nav-search glass">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+              <input
+                type="search"
+                aria-label="Search your log"
+                value={libraryQuery}
+                onChange={(e) => onNavSearch(e.target.value)}
+                placeholder="Search your log"
+                spellCheck={false}
+              />
+            </label>
             <div className="nav-utility"><DevUpdateButton /></div>
           </div>
         </header>
@@ -410,7 +397,7 @@ export default function App() {
             )}
           </div>
         </main>
-      </div>
+      </ScrollArea>
       {job || status || (availableUpdate && !updateDismissed) ? (
         <div className="toast-stack">
           {job || status ? (

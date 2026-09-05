@@ -20,27 +20,27 @@ export function TitleBar() {
     <header className="titlebar">
       <div className="tb-drag" data-tauri-drag-region onDoubleClick={() => void win.toggleMaximize()} />
       <div className="tb-controls">
-        <button type="button" className="tb-btn" title="Minimize" onClick={() => void win.minimize()}>
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-            <path fill="currentColor" d="M1 5h8v1H1z" />
+        <button type="button" className="tb-btn" aria-label="Minimize" title="Minimize" onClick={() => void win.minimize()}>
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+            <path fill="currentColor" d="M2.5 5.75h7v.9h-7z" />
           </svg>
         </button>
-        <button type="button" className="tb-btn" title={maximized ? "Restore" : "Maximize"} onClick={() => void win.toggleMaximize()}>
+        <button type="button" className="tb-btn" aria-label={maximized ? "Restore" : "Maximize"} title={maximized ? "Restore" : "Maximize"} onClick={() => void win.toggleMaximize()}>
           {maximized ? (
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-              <path fill="none" stroke="currentColor" d="M2.5 3.5h5v5h-5zM3.5 3.5V2h5v5H7" />
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+              <path fill="none" stroke="currentColor" strokeWidth="1.2" d="M3.4 4.2h5.2v5.2H3.4zM4.4 4.2V2.8h5.2v5.2H8.2" />
             </svg>
           ) : (
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-              <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" />
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+              <rect x="2.6" y="2.6" width="6.8" height="6.8" fill="none" stroke="currentColor" strokeWidth="1.2" rx="0.6" />
             </svg>
           )}
         </button>
-        <button type="button" className="tb-btn close" title="Close" onClick={() => void win.close()}>
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+        <button type="button" className="tb-btn close" aria-label="Close" title="Close" onClick={() => void win.close()}>
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
             <path
               fill="currentColor"
-              d="M2.2 1.5 5 4.3 7.8 1.5 8.5 2.2 5.7 5l2.8 2.8-.7.7L5 5.7 2.2 8.5l-.7-.7L4.3 5 1.5 2.2z"
+              d="M3.1 2.4 6 5.3l2.9-2.9.7.7L6.7 6l2.9 2.9-.7.7L6 6.7 3.1 9.6l-.7-.7L5.3 6 2.4 3.1z"
             />
           </svg>
         </button>

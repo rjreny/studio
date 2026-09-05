@@ -44,23 +44,38 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .tb-brand { gap: var(--space-2); padding: 0 var(--space-3); font-weight: 600; }
 .tb-mark { width: 14px; height: 14px; border-radius: 3px; background: var(--accent); }
 .tb-drag {
-  height: 8px;
+  height: 10px;
   align-self: start;
   padding: 0;
   color: transparent;
 }
 .tb-controls {
   display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 0 0;
   pointer-events: auto;
-  background: rgb(0 0 0 / .28);
+  background: transparent;
 }
 .tb-btn {
-  width: var(--caption-width); height: var(--titlebar-height);
-  display: inline-flex; align-items: center; justify-content: center; color: var(--text);
-  border-radius: 0;
+  width: 40px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in oklch, var(--text) 72%, transparent);
+  border-radius: 8px;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.tb-btn:hover { background: rgb(255 255 255 / .12); }
-.tb-btn.close:hover { background: var(--danger); color: white; }
+.tb-btn svg { opacity: .9; }
+.tb-btn:hover {
+  background: color-mix(in oklch, var(--text) 10%, transparent);
+  color: var(--text);
+}
+.tb-btn.close:hover {
+  background: var(--danger);
+  color: white;
+}
 .sidebar {
   display: flex; flex-direction: column; background: var(--bg-sidebar);
   border-right: 1px solid var(--border); user-select: none;
