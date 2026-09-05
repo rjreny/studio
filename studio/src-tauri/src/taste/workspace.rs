@@ -10,7 +10,7 @@ pub const NEW_MAX: usize = 50;
 pub const WATCHLIST_MAX: usize = 30;
 pub const EXPLORATION_MAX: usize = 0;
 pub const NEW_FILMOGRAPHY_PER_PERSON: usize = 6;
-pub const ALGORITHM_VERSION: &str = "taste-workspace-22-semantic-qwen3-embedding-4b";
+pub const ALGORITHM_VERSION: &str = "taste-workspace-23-effective-viewings";
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {

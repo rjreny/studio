@@ -224,6 +224,15 @@ impl Database {
                 [],
             );
         }
+        if version < 15 {
+            self.backfill_viewing_projections()?;
+            self.conn
+                .execute("DELETE FROM taste_run_snapshot WHERE id = 1", [])
+                .map_err(|e| e.to_string())?;
+            self.conn
+                .execute("DELETE FROM app_meta WHERE key = 'taste_report'", [])
+                .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -232,62 +241,9 @@ impl Database {
             .conn
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
-        tx.execute(
-            r#"
-            DELETE FROM viewings
-            WHERE id IN (
-              SELECT id FROM (
-                SELECT
-                  v.id,
-                  ROW_NUMBER() OVER (
-                    PARTITION BY
-                      smr.normalized_title,
-                      smr.release_year,
-                      COALESCE(NULLIF(v.occurred_at, ''), NULLIF(v.published_at, ''))
-                    ORDER BY
-                      CASE v.source_type
-                        WHEN 'letterboxd_export' THEN 0
-                        WHEN 'legacy_json' THEN 1
-                        ELSE 2
-                      END,
-                      v.observed_at,
-                      v.id
-                  ) AS duplicate_rank
-                FROM viewings v
-                JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
-                WHERE COALESCE(NULLIF(v.occurred_at, ''), NULLIF(v.published_at, '')) IS NOT NULL
-              )
-              WHERE duplicate_rank > 1
-            )
-            "#,
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            r#"
-            DELETE FROM viewings
-            WHERE id IN (
-              SELECT summary.id
-              FROM viewings summary
-              JOIN source_movie_records smr ON smr.id = summary.source_movie_record_id
-              WHERE summary.source_type = 'letterboxd_export'
-                AND summary.diary_entry_id LIKE 'https://boxd.it/%'
-                AND LENGTH(SUBSTR(summary.diary_entry_id, LENGTH('https://boxd.it/') + 1)) = 4
-                AND EXISTS (
-                  SELECT 1
-                  FROM viewings other
-                  JOIN source_movie_records other_smr ON other_smr.id = other.source_movie_record_id
-                  WHERE other.id != summary.id
-                    AND other_smr.normalized_title = smr.normalized_title
-                    AND other_smr.release_year IS smr.release_year
-                    AND DATE(other.occurred_at) BETWEEN DATE(summary.occurred_at, '-1 day')
-                                                     AND DATE(summary.occurred_at, '+1 day')
-                )
-            )
-            "#,
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        // Keep source evidence intact. Duplicate source representations are
+        // classified by `viewing_projections` instead of being deleted.
+        Self::rebuild_viewing_projections(&tx)?;
         tx.execute(
             r#"
             UPDATE source_movie_records
@@ -322,6 +278,16 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Self::rebuild_projections(&tx)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    fn backfill_viewing_projections(&self) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        Self::rebuild_viewing_projections(&tx)?;
+        Self::refresh_last_watched_at(&tx)?;
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -364,6 +330,7 @@ impl Database {
     }
 
     pub fn rebuild_projections(tx: &Transaction<'_>) -> Result<(), String> {
+        Self::rebuild_viewing_projections(tx)?;
         tx.execute("DELETE FROM user_movie_state", [])
             .map_err(|e| e.to_string())?;
         tx.execute(
@@ -376,7 +343,11 @@ impl Database {
               smr.id,
               ml.movie_id,
               CASE WHEN EXISTS (
-                SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id
+                SELECT 1
+                FROM viewings v
+                LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+                WHERE v.source_movie_record_id = smr.id
+                  AND COALESCE(vp.counted, 1) = 1
               ) OR EXISTS (
                 SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id
               ) OR json_extract(smr.raw_identity, '$.review') IS NOT NULL THEN 1 ELSE 0 END,
@@ -389,8 +360,11 @@ impl Database {
                 LIMIT 1
               ),
               (
-                SELECT v.occurred_at FROM viewings v
+                SELECT v.occurred_at
+                FROM viewings v
+                LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
                 WHERE v.source_movie_record_id = smr.id
+                  AND COALESCE(vp.counted, 1) = 1
                 ORDER BY COALESCE(v.occurred_at, v.observed_at) DESC
                 LIMIT 1
               ),
@@ -399,6 +373,125 @@ impl Database {
             LEFT JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             "#,
             params![Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn rebuild_viewing_projections(tx: &Transaction<'_>) -> Result<(), String> {
+        let projected_at = Utc::now().to_rfc3339();
+        tx.execute("DELETE FROM viewing_projections", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO viewing_projections(viewing_id, counted, duplicate_reason, projected_at)
+             SELECT id, 1, NULL, ?1 FROM viewings",
+            params![projected_at],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // The same diary date arriving from two transports is one viewing.
+        // Prefer the full export, which has the most complete history.
+        tx.execute(
+            r#"
+            UPDATE viewing_projections
+            SET counted = 0, duplicate_reason = 'cross_source_same_day'
+            WHERE viewing_id IN (
+              SELECT duplicate.id
+              FROM viewings duplicate
+              JOIN source_movie_records duplicate_movie
+                ON duplicate_movie.id = duplicate.source_movie_record_id
+              JOIN viewings canonical
+              JOIN source_movie_records canonical_movie
+                ON canonical_movie.id = canonical.source_movie_record_id
+              WHERE duplicate.id != canonical.id
+                AND duplicate.source_type != canonical.source_type
+                AND duplicate_movie.normalized_title = canonical_movie.normalized_title
+                AND duplicate_movie.release_year IS canonical_movie.release_year
+                AND DATE(COALESCE(NULLIF(duplicate.occurred_at, ''), NULLIF(duplicate.published_at, ''), duplicate.observed_at))
+                    = DATE(COALESCE(NULLIF(canonical.occurred_at, ''), NULLIF(canonical.published_at, ''), canonical.observed_at))
+                AND CASE duplicate.source_type
+                      WHEN 'letterboxd_export' THEN 0
+                      WHEN 'letterboxd_rss' THEN 1
+                      WHEN 'legacy_json' THEN 2
+                      ELSE 3
+                    END
+                    > CASE canonical.source_type
+                        WHEN 'letterboxd_export' THEN 0
+                        WHEN 'letterboxd_rss' THEN 1
+                        WHEN 'legacy_json' THEN 2
+                        ELSE 3
+                      END
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Older Studio data could persist malformed payloads as duplicate
+        // export rows, usually one calendar day apart. An unmarked adjacent
+        // pair is ambiguous, so count it once unless the user explicitly
+        // logged a rewatch. Valid source events are intentionally untouched.
+        tx.execute(
+            r#"
+            UPDATE viewing_projections
+            SET counted = 0, duplicate_reason = 'unconfirmed_adjacent_duplicate'
+            WHERE viewing_id IN (
+              SELECT duplicate.id
+              FROM viewings duplicate
+              JOIN source_movie_records duplicate_movie
+                ON duplicate_movie.id = duplicate.source_movie_record_id
+              JOIN viewing_projections duplicate_projection
+                ON duplicate_projection.viewing_id = duplicate.id
+              JOIN viewings canonical
+              JOIN source_movie_records canonical_movie
+                ON canonical_movie.id = canonical.source_movie_record_id
+              JOIN viewing_projections canonical_projection
+                ON canonical_projection.viewing_id = canonical.id
+              WHERE duplicate_projection.counted = 1
+                AND canonical_projection.counted = 1
+                AND duplicate.rewatch = 0
+                AND canonical.rewatch = 0
+                AND json_valid(COALESCE(duplicate.raw_payload, '')) = 0
+                AND json_valid(COALESCE(canonical.raw_payload, '')) = 0
+                AND duplicate_movie.normalized_title = canonical_movie.normalized_title
+                AND duplicate_movie.release_year IS canonical_movie.release_year
+                AND DATE(COALESCE(NULLIF(duplicate.occurred_at, ''), NULLIF(duplicate.published_at, ''), duplicate.observed_at)) IS NOT NULL
+                AND DATE(COALESCE(NULLIF(canonical.occurred_at, ''), NULLIF(canonical.published_at, ''), canonical.observed_at)) IS NOT NULL
+                AND julianday(DATE(COALESCE(NULLIF(duplicate.occurred_at, ''), NULLIF(duplicate.published_at, ''), duplicate.observed_at)))
+                    - julianday(DATE(COALESCE(NULLIF(canonical.occurred_at, ''), NULLIF(canonical.published_at, ''), canonical.observed_at)))
+                    BETWEEN 0 AND 1
+                AND (
+                  DATE(COALESCE(NULLIF(canonical.occurred_at, ''), NULLIF(canonical.published_at, ''), canonical.observed_at))
+                    < DATE(COALESCE(NULLIF(duplicate.occurred_at, ''), NULLIF(duplicate.published_at, ''), duplicate.observed_at))
+                  OR (
+                    DATE(COALESCE(NULLIF(canonical.occurred_at, ''), NULLIF(canonical.published_at, ''), canonical.observed_at))
+                      = DATE(COALESCE(NULLIF(duplicate.occurred_at, ''), NULLIF(duplicate.published_at, ''), duplicate.observed_at))
+                    AND canonical.id < duplicate.id
+                  )
+                )
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn refresh_last_watched_at(tx: &Transaction<'_>) -> Result<(), String> {
+        tx.execute(
+            r#"
+            UPDATE user_movie_state
+            SET last_watched_at = (
+              SELECT v.occurred_at
+              FROM viewings v
+              LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+              WHERE v.source_movie_record_id = user_movie_state.source_movie_record_id
+                AND COALESCE(vp.counted, 1) = 1
+              ORDER BY COALESCE(v.occurred_at, v.observed_at) DESC
+              LIMIT 1
+            )
+            "#,
+            [],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -424,7 +517,16 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
-        let total_viewings = self.count_table("viewings")?;
+        let total_viewings: u32 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM viewings v
+                 LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+                 WHERE COALESCE(vp.counted, 1) = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         let rating_events = self.count_table("rating_events")?;
         let unresolved_movies: u32 = self
             .conn
@@ -606,7 +708,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reconciliation_keeps_one_viewing_and_unlinks_wrong_search_results() {
+    fn reconciliation_keeps_one_effective_viewing_and_unlinks_wrong_search_results() {
         let db = Database::in_memory().unwrap();
         db.conn()
             .execute(
@@ -666,7 +768,16 @@ mod tests {
 
         db.reconcile_duplicate_history().unwrap();
 
-        assert_eq!(db.count_table("viewings").unwrap(), 1);
+        assert_eq!(db.count_table("viewings").unwrap(), 3);
+        let counted: u32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM viewing_projections WHERE counted = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(counted, 1);
         let unmatched: u32 = db
             .conn()
             .query_row(
@@ -689,7 +800,49 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("14".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("15".into()));
+    }
+
+    #[test]
+    fn projection_collapses_legacy_adjacent_duplicates_but_keeps_explicit_rewatches() {
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        for (id, occurred_at, rewatch) in [
+            ("first", "2026-02-28", 0),
+            ("duplicate", "2026-03-01", 0),
+            ("rewatch", "2026-03-01", 1),
+        ] {
+            tx.execute(
+                "INSERT INTO source_movie_records(
+                   id, source_type, source_record_key, normalized_title, release_year, raw_identity, created_at
+                 ) VALUES (?1, 'letterboxd_export', ?1, 'source code', 2011, '{\"title\":\"Source Code\"}', '2026-03-01T00:00:00Z')",
+                params![id],
+            )
+            .expect("source movie");
+            tx.execute(
+                "INSERT INTO viewings(
+                   id, source_movie_record_id, source_record_key, occurred_at, observed_at, source_type, rewatch, raw_payload
+                 ) VALUES (?1, ?1, ?1, ?2, ?2, 'letterboxd_export', ?3, 'legacy payload')",
+                params![id, occurred_at, rewatch],
+            )
+            .expect("viewing");
+        }
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        let (counted, duplicates): (u32, u32) = db
+            .conn()
+            .query_row(
+                "SELECT
+                   SUM(CASE WHEN counted = 1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN duplicate_reason = 'unconfirmed_adjacent_duplicate' THEN 1 ELSE 0 END)
+                 FROM viewing_projections",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("projection counts");
+        assert_eq!((counted, duplicates), (2, 1));
+        assert_eq!(db.compute_coverage().expect("coverage").total_viewings, 2);
     }
 
     #[test]
@@ -756,9 +909,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v14_keeps_existing_taste_tables_and_adds_catalog_check_time() {
+    fn schema_v15_keeps_existing_tables_and_adds_viewing_projection() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("14".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("15".into()));
         let feedback: i64 = db
             .conn()
             .query_row(
@@ -804,6 +957,15 @@ mod tests {
         assert_eq!(embeddings, 1);
         assert_eq!(exposures, 1);
         assert_eq!(events, 1);
+        let viewing_projection: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'viewing_projections'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(viewing_projection, 1);
         let company_column: i64 = db
             .conn()
             .query_row(

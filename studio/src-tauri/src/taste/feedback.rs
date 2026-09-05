@@ -625,7 +625,7 @@ pub fn observation_summary(db: &Database) -> Result<TasteObservationSummary, Str
     let exposure_count = scalar("SELECT COUNT(*) FROM taste_recommendation_exposures")? as u32;
     let mood_fallbacks = scalar("SELECT COUNT(*) FROM taste_feedback_events WHERE mood_fallback = 1")? as u32;
     let later_outcomes = scalar(
-        "SELECT COUNT(DISTINCT exposure.id) FROM taste_recommendation_exposures exposure JOIN movies movie ON movie.tmdb_id = exposure.tmdb_id JOIN user_movie_state state ON state.movie_id = movie.id WHERE EXISTS (SELECT 1 FROM viewings viewing WHERE viewing.source_movie_record_id = state.source_movie_record_id AND viewing.observed_at > exposure.created_at) OR EXISTS (SELECT 1 FROM rating_events rating WHERE rating.source_movie_record_id = state.source_movie_record_id AND rating.observed_at > exposure.created_at)",
+        "SELECT COUNT(DISTINCT exposure.id) FROM taste_recommendation_exposures exposure JOIN movies movie ON movie.tmdb_id = exposure.tmdb_id JOIN user_movie_state state ON state.movie_id = movie.id WHERE EXISTS (SELECT 1 FROM viewings viewing LEFT JOIN viewing_projections projection ON projection.viewing_id = viewing.id WHERE viewing.source_movie_record_id = state.source_movie_record_id AND COALESCE(projection.counted, 1) = 1 AND viewing.observed_at > exposure.created_at) OR EXISTS (SELECT 1 FROM rating_events rating WHERE rating.source_movie_record_id = state.source_movie_record_id AND rating.observed_at > exposure.created_at)",
     )? as u32;
 
     let mut exposure_by_feature = HashMap::<String, u32>::new();

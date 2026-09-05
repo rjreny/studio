@@ -179,10 +179,17 @@ pub fn load_films(db: &Database) -> Result<Vec<FilmRecord>, String> {
               COALESCE(ums.liked, 0),
               COALESCE(ums.watched, 0),
               COALESCE(ums.watchlist, smr.on_watchlist, 0),
-              (SELECT COUNT(*) FROM viewings v WHERE v.source_movie_record_id = smr.id),
+              (SELECT COUNT(*)
+               FROM viewings v
+               LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+               WHERE v.source_movie_record_id = smr.id
+                 AND COALESCE(vp.counted, 1) = 1),
               COALESCE(ums.last_watched_at,
-                (SELECT COALESCE(v.occurred_at, v.observed_at) FROM viewings v
+                (SELECT COALESCE(v.occurred_at, v.observed_at)
+                 FROM viewings v
+                 LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
                  WHERE v.source_movie_record_id = smr.id
+                   AND COALESCE(vp.counted, 1) = 1
                  ORDER BY COALESCE(v.occurred_at, v.observed_at) DESC LIMIT 1),
                 (SELECT COALESCE(re.occurred_at, re.observed_at) FROM rating_events re
                  WHERE re.source_movie_record_id = smr.id
@@ -1333,6 +1340,7 @@ fn parse_similar(raw: Option<String>) -> Vec<LibraryItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
 
     #[test]
     fn friend_overlap_gate() {
@@ -1396,6 +1404,35 @@ mod tests {
         assert_eq!(films.len(), 1);
         assert_eq!(films[0].viewings, 1);
         assert_eq!(films[0].rating, Some(4.5));
+    }
+
+    #[test]
+    fn load_films_uses_effective_viewings_for_taste_signals() {
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        for (id, occurred_at) in [("first", "2026-02-28"), ("duplicate", "2026-03-01")] {
+            tx.execute(
+                "INSERT INTO source_movie_records(
+                   id, source_type, source_record_key, normalized_title, release_year, raw_identity, created_at
+                 ) VALUES (?1, 'letterboxd_export', ?1, 'source code', 2011, '{\"title\":\"Source Code\"}', '2026-03-01T00:00:00Z')",
+                params![id],
+            )
+            .expect("source movie");
+            tx.execute(
+                "INSERT INTO viewings(
+                   id, source_movie_record_id, source_record_key, occurred_at, observed_at, source_type, raw_payload
+                 ) VALUES (?1, ?1, ?1, ?2, ?2, 'letterboxd_export', 'legacy payload')",
+                params![id, occurred_at],
+            )
+            .expect("viewing");
+        }
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        let films = load_films(&db).expect("taste films");
+        assert_eq!(films.len(), 1);
+        assert_eq!(films[0].viewings, 1);
+        assert_eq!(films[0].last_date.as_deref(), Some("2026-02-28"));
     }
 
     #[test]

@@ -10,7 +10,8 @@ Imports and RSS append or reconcile source events. Library state is derived from
 
 - `viewings` and `rating_events` are immutable source history.
 - User actions create local source events with provenance.
-- `user_movie_state` is rebuildable; never deletes history.
+- `user_movie_state` and `viewing_projections` are rebuildable; never delete history.
+- `viewing_projections` determines effective watch counts. It collapses only proven cross-source duplicates and clearly malformed legacy adjacent pairs; explicit rewatches remain distinct.
 
 ## Source identity
 

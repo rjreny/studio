@@ -184,6 +184,13 @@ fn ingest_viewing(
         reconcile_source_movie(tx, &movie_key, &name, year)?;
         return Ok(false);
     }
+    if kind == CsvKind::Diary
+        && has_semantic_export_viewing(tx, &name, year, &watched_date, &uri, rewatch)?
+    {
+        stats.skipped += 1;
+        reconcile_source_movie(tx, &movie_key, &name, year)?;
+        return Ok(false);
+    }
 
     let smr_id = upsert_source_movie(
         tx,
@@ -314,6 +321,40 @@ fn has_rss_viewing(
              AND v.occurred_at = ?3
          )",
         params![normalize_title(title), year, watched_date],
+        |row| row.get::<_, i32>(0),
+    )
+    .map(|n| n != 0)
+    .map_err(|e| e.to_string())
+}
+
+fn has_semantic_export_viewing(
+    tx: &Transaction<'_>,
+    title: &str,
+    year: Option<i32>,
+    watched_date: &str,
+    uri: &str,
+    rewatch: bool,
+) -> Result<bool, String> {
+    if watched_date.is_empty() {
+        return Ok(false);
+    }
+    tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1
+           FROM viewings v
+           JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
+           WHERE v.source_type = 'letterboxd_export'
+             AND smr.normalized_title = ?1 AND smr.release_year IS ?2
+             AND v.occurred_at = ?3 AND v.rewatch = ?4
+             AND (?5 = '' OR v.diary_entry_id = ?5)
+         )",
+        params![
+            normalize_title(title),
+            year,
+            watched_date,
+            rewatch as i32,
+            uri
+        ],
         |row| row.get::<_, i32>(0),
     )
     .map(|n| n != 0)

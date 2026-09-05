@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (
@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS viewings (
   raw_payload TEXT
 );
 
+-- Source viewings are immutable. This rebuildable projection records which
+-- source rows are distinct watches and which are duplicate representations.
+CREATE TABLE IF NOT EXISTS viewing_projections (
+  viewing_id TEXT PRIMARY KEY REFERENCES viewings(id) ON DELETE CASCADE,
+  counted INTEGER NOT NULL DEFAULT 1,
+  duplicate_reason TEXT,
+  projected_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rating_events (
   id TEXT PRIMARY KEY,
   source_movie_record_id TEXT NOT NULL REFERENCES source_movie_records(id),
@@ -153,6 +162,7 @@ CREATE TABLE IF NOT EXISTS friend_activity (
 );
 
 CREATE INDEX IF NOT EXISTS idx_viewings_source_movie ON viewings(source_movie_record_id);
+CREATE INDEX IF NOT EXISTS idx_viewing_projections_counted ON viewing_projections(counted);
 CREATE INDEX IF NOT EXISTS idx_rating_events_source_movie ON rating_events(source_movie_record_id);
 CREATE INDEX IF NOT EXISTS idx_source_movie_title ON source_movie_records(normalized_title, release_year);
 CREATE INDEX IF NOT EXISTS idx_movie_links_state ON movie_links(match_state);

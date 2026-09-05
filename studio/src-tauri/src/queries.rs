@@ -71,7 +71,11 @@ pub fn get_library(db: &Database, query: &LibraryQuery) -> Result<LibraryPage, S
             COALESCE(ums.watched, 0) AS watched,
             COALESCE(ums.watchlist, smr.on_watchlist, 0) AS watchlist,
             COALESCE(ums.liked, 0) AS liked,
-            (SELECT COUNT(*) FROM viewings v WHERE v.source_movie_record_id = smr.id) AS source_viewing_count,
+            (SELECT COUNT(*)
+             FROM viewings v
+             LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+             WHERE v.source_movie_record_id = smr.id
+               AND COALESCE(vp.counted, 1) = 1) AS source_viewing_count,
             COALESCE(ml.match_state, 'unmatched') AS match_state,
             smr.source_type,
             ums.last_watched_at
@@ -184,9 +188,11 @@ pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
         .conn()
         .prepare(
             r#"
-            SELECT strftime('%Y-%m', COALESCE(occurred_at, observed_at)) AS month, COUNT(*)
-            FROM viewings
-            WHERE strftime('%Y-%m', COALESCE(occurred_at, observed_at)) IS NOT NULL
+            SELECT strftime('%Y-%m', COALESCE(v.occurred_at, v.observed_at)) AS month, COUNT(*)
+            FROM viewings v
+            LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+            WHERE COALESCE(vp.counted, 1) = 1
+              AND strftime('%Y-%m', COALESCE(v.occurred_at, v.observed_at)) IS NOT NULL
             GROUP BY month
             "#,
         )
@@ -212,11 +218,13 @@ pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
             WITH watched_movies AS (
               SELECT DISTINCT m.id, ums.current_rating
               FROM viewings v
+              LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
               JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
               JOIN movie_links ml ON ml.source_movie_record_id = smr.id
               JOIN movies m ON m.id = ml.movie_id
               LEFT JOIN user_movie_state ums ON ums.source_movie_record_id = smr.id
-              WHERE m.genres_json IS NOT NULL
+              WHERE COALESCE(vp.counted, 1) = 1
+                AND m.genres_json IS NOT NULL
             )
             SELECT genre.value, COUNT(*) AS film_count, AVG(current_rating)
             FROM watched_movies wm
@@ -243,7 +251,13 @@ pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
 
     let rewatch_count: u32 = db
         .conn()
-        .query_row("SELECT COUNT(*) FROM viewings WHERE rewatch = 1", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM viewings v
+             LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+             WHERE v.rewatch = 1 AND COALESCE(vp.counted, 1) = 1",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
 
     let (total_runtime_minutes, runtime_viewings): (u32, u32) = db
@@ -252,10 +266,12 @@ pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
             r#"
             SELECT COALESCE(SUM(m.runtime), 0), COUNT(*)
             FROM viewings v
+            LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
             JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
             JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             JOIN movies m ON m.id = ml.movie_id
-            WHERE m.runtime IS NOT NULL AND m.runtime > 0
+            WHERE COALESCE(vp.counted, 1) = 1
+              AND m.runtime IS NOT NULL AND m.runtime > 0
             "#,
             [],
             |row| Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u32)),
@@ -268,10 +284,12 @@ pub fn get_stats(db: &Database) -> Result<StatsSnapshot, String> {
             r#"
             SELECT COUNT(DISTINCT m.id)
             FROM viewings v
+            LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
             JOIN source_movie_records smr ON smr.id = v.source_movie_record_id
             JOIN movie_links ml ON ml.source_movie_record_id = smr.id
             JOIN movies m ON m.id = ml.movie_id
-            WHERE m.genres_json IS NOT NULL
+            WHERE COALESCE(vp.counted, 1) = 1
+              AND m.genres_json IS NOT NULL
             "#,
             [],
             |row| row.get(0),
@@ -590,7 +608,10 @@ fn viewing_history(db: &Database, source_ids: &[String]) -> Result<Vec<ViewingHi
               (SELECT rating FROM rating_events re WHERE re.source_movie_record_id = v.source_movie_record_id
                AND COALESCE(re.occurred_at, re.observed_at) = COALESCE(v.occurred_at, v.observed_at) LIMIT 1),
               source_type
-         FROM viewings v WHERE v.source_movie_record_id IN ({marks})
+         FROM viewings v
+         LEFT JOIN viewing_projections vp ON vp.viewing_id = v.id
+         WHERE v.source_movie_record_id IN ({marks})
+           AND COALESCE(vp.counted, 1) = 1
          ORDER BY COALESCE(occurred_at, observed_at) DESC"
     );
     let mut stmt = db.conn().prepare(&sql).map_err(|e| e.to_string())?;
@@ -1174,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn library_deduplicates_linked_source_records() {
+    fn library_collapses_same_day_linked_source_records_to_one_effective_viewing() {
         use crate::letterboxd::import::upsert_source_movie;
         use crate::letterboxd::posters::SourceMovieMeta;
         use rusqlite::params;
@@ -1247,7 +1268,7 @@ mod tests {
         .expect("library");
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total, 1);
-        assert_eq!(page.items[0].viewing_count, 2);
+        assert_eq!(page.items[0].viewing_count, 1);
     }
 
     #[test]
