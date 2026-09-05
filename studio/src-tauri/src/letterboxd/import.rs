@@ -762,4 +762,53 @@ mod tests {
         assert_eq!(rating, 4.5);
         assert_eq!(review, "Beautifully shot and tightly paced");
     }
+
+    #[test]
+    fn lists_csv_is_not_imported_as_films() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("diary.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Name,Year,Watched Date,Letterboxd URI,Rating,Rewatch\nInception,2010,2020-01-01,/film/inception/,4.5,No\n",
+        )
+        .unwrap();
+        zip.start_file("lists.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Date,Name,Tags,URL,Description\n2024-01-01,Most Excited For In 2026,,https://letterboxd.com/example/list/most-excited-for-in-2026/,\n",
+        )
+        .unwrap();
+        zip.start_file("lists/favorites.csv", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"Position,Name,Year,Letterboxd URI,Description\n1,Fake List Film,1999,/film/fake-list-film/,\n",
+        )
+        .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let discovery = discover_zip_bytes(&bytes).unwrap();
+        assert!(discovery
+            .files
+            .iter()
+            .all(|f| !f.relative_path.contains("lists")));
+        assert!(discovery
+            .warnings
+            .iter()
+            .any(|w| w.contains("list exports")));
+
+        let mut db = Database::in_memory().unwrap();
+        let result = import_zip_discovery(&mut db, &discovery).unwrap();
+        assert_eq!(result.viewings, 1);
+        let (viewings, movies, _) = count_events(&db).unwrap();
+        assert_eq!((viewings, movies), (1, 1));
+        let titles: Vec<String> = db
+            .conn()
+            .prepare("SELECT normalized_title FROM source_movie_records ORDER BY normalized_title")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(titles, vec!["inception".to_string()]);
+    }
 }

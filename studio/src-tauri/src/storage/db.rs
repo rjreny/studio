@@ -238,7 +238,144 @@ impl Database {
                 .conn
                 .execute("ALTER TABLE movies ADD COLUMN videos_json TEXT", []);
         }
+        if version < 17 {
+            self.purge_letterboxd_list_exports()?;
+        }
         Ok(())
+    }
+
+    /// Remove faux films that came from Letterboxd `lists.csv` / `lists/*`
+    /// (list titles misclassified as diary) and list URLs from RSS.
+    fn purge_letterboxd_list_exports(&self) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+
+        // source_record_key = letterboxd_export|{dataset}|v1|{fp}[|rating]
+        const LIST_KEY: &str = r#"
+            source_record_key LIKE 'letterboxd_export|lists.csv|%'
+            OR source_record_key LIKE 'letterboxd_export|lists/%'
+            OR source_record_key LIKE 'letterboxd_export|%/lists.csv|%'
+            OR source_record_key LIKE 'letterboxd_export|%/lists/%'
+        "#;
+
+        tx.execute(
+            &format!("DELETE FROM rating_events WHERE {LIST_KEY}"),
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(&format!("DELETE FROM viewings WHERE {LIST_KEY}"), [])
+            .map_err(|e| e.to_string())?;
+
+        // List index rows store a /list/ URL in diary_entry_id; RSS list activity
+        // used the same shape before it was filtered out.
+        tx.execute(
+            "DELETE FROM viewings
+             WHERE diary_entry_id LIKE '%/list/%'
+                OR raw_payload LIKE '%/list/%'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.execute(
+            "DELETE FROM import_entries
+             WHERE lower(replace(source_path, '\\', '/')) = 'lists.csv'
+                OR lower(replace(source_path, '\\', '/')) LIKE '%/lists.csv'
+                OR lower(replace(source_path, '\\', '/')) LIKE 'lists/%'
+                OR lower(replace(source_path, '\\', '/')) LIKE '%/lists/%'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Drop orphan source rows that only existed because of list imports.
+        tx.execute(
+            "DELETE FROM user_movie_state
+             WHERE source_movie_record_id IN (
+               SELECT smr.id FROM source_movie_records smr
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id
+               )
+               AND COALESCE(smr.on_watchlist, 0) = 0
+               AND json_extract(smr.raw_identity, '$.review') IS NULL
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM movie_links
+             WHERE source_movie_record_id IN (
+               SELECT smr.id FROM source_movie_records smr
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewings v WHERE v.source_movie_record_id = smr.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = smr.id
+               )
+               AND COALESCE(smr.on_watchlist, 0) = 0
+               AND json_extract(smr.raw_identity, '$.review') IS NULL
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM source_movie_records
+             WHERE NOT EXISTS (
+               SELECT 1 FROM viewings v WHERE v.source_movie_record_id = source_movie_records.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM rating_events re WHERE re.source_movie_record_id = source_movie_records.id
+             )
+             AND COALESCE(on_watchlist, 0) = 0
+             AND json_extract(raw_identity, '$.review') IS NULL",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Any remaining list-URI rows (watchlist/review noise) go next.
+        tx.execute(
+            "DELETE FROM user_movie_state
+             WHERE source_movie_record_id IN (
+               SELECT id FROM source_movie_records WHERE raw_identity LIKE '%/list/%'
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM movie_links
+             WHERE source_movie_record_id IN (
+               SELECT id FROM source_movie_records WHERE raw_identity LIKE '%/list/%'
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM rating_events
+             WHERE source_movie_record_id IN (
+               SELECT id FROM source_movie_records WHERE raw_identity LIKE '%/list/%'
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM viewings
+             WHERE source_movie_record_id IN (
+               SELECT id FROM source_movie_records WHERE raw_identity LIKE '%/list/%'
+             )",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM source_movie_records WHERE raw_identity LIKE '%/list/%'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Self::rebuild_projections(&tx)?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     fn reconcile_duplicate_history(&self) -> Result<(), String> {
@@ -805,7 +942,7 @@ mod tests {
     #[test]
     fn opens_in_memory() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("15".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("17".into()));
     }
 
     #[test]
@@ -914,9 +1051,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v15_keeps_existing_tables_and_adds_viewing_projection() {
+    fn schema_v17_keeps_existing_tables_and_adds_viewing_projection() {
         let db = Database::in_memory().expect("db");
-        assert_eq!(db.get_meta("schema_version").unwrap(), Some("15".into()));
+        assert_eq!(db.get_meta("schema_version").unwrap(), Some("17".into()));
         let feedback: i64 = db
             .conn()
             .query_row(
@@ -1004,5 +1141,48 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM taste_feedback", [], |row| row.get(0))
             .unwrap();
         assert_eq!(leftover, 0);
+    }
+
+    #[test]
+    fn purge_removes_previously_imported_list_titles() {
+        let mut db = Database::in_memory().expect("db");
+        let tx = db.transaction().expect("tx");
+        tx.execute(
+            "INSERT INTO source_movie_records(
+               id, source_type, source_record_key, normalized_title, release_year, raw_identity, created_at
+             ) VALUES
+             ('real', 'letterboxd_export', 'letterboxd_export|film|v1|real', 'inception', 2010, '{\"title\":\"Inception\",\"uri\":\"/film/inception/\"}', '2026-01-01T00:00:00Z'),
+             ('list', 'letterboxd_export', 'letterboxd_export|film|v1|list', 'most excited for in 2026', NULL, '{\"title\":\"Most Excited For In 2026\",\"uri\":\"https://letterboxd.com/example/list/most-excited-for-in-2026/\"}', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("smr");
+        tx.execute(
+            "INSERT INTO viewings(
+               id, source_movie_record_id, source_record_key, occurred_at, observed_at, source_type, diary_entry_id, raw_payload
+             ) VALUES
+             ('v-real', 'real', 'letterboxd_export|diary.csv|v1|real', '2020-01-01', '2026-01-01', 'letterboxd_export', '/film/inception/', '{}'),
+             ('v-list', 'list', 'letterboxd_export|lists.csv|v1|list', '2024-01-01', '2026-01-01', 'letterboxd_export', 'https://letterboxd.com/example/list/most-excited-for-in-2026/', '{}')",
+            [],
+        )
+        .expect("viewings");
+        Database::rebuild_projections(&tx).expect("rebuild");
+        tx.commit().expect("commit");
+
+        db.purge_letterboxd_list_exports().expect("purge");
+
+        let titles: Vec<String> = db
+            .conn()
+            .prepare("SELECT normalized_title FROM source_movie_records")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(titles, vec!["inception".to_string()]);
+        let viewings: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM viewings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(viewings, 1);
     }
 }

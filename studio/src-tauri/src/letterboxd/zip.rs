@@ -1,8 +1,7 @@
-use super::csv::{classify_csv, parse_headers, CsvKind};
+use super::csv::{classify_csv, is_letterboxd_list_export_path, parse_headers, CsvKind};
 use super::fingerprint::content_hash;
-use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use zip::ZipArchive;
 
 pub const MAX_ENTRIES: usize = 500;
@@ -54,6 +53,10 @@ pub fn discover_zip(path: &str) -> Result<ZipDiscovery, String> {
         entry.read_to_string(&mut text).map_err(|e| e.to_string())?;
         let text = text.trim_start_matches('\u{feff}').to_string();
         let headers = parse_headers(&text);
+        if is_letterboxd_list_export_path(&relative) {
+            unknown_paths.push(relative);
+            continue;
+        }
         match classify_csv(&relative, &headers) {
             Some(kind) => files.push(ZipCsvFile {
                 relative_path: relative,
@@ -65,6 +68,13 @@ pub fn discover_zip(path: &str) -> Result<ZipDiscovery, String> {
                 warnings.push("Unrecognized CSV schema preserved in diagnostics".into());
             }
         }
+    }
+
+    if unknown_paths
+        .iter()
+        .any(|path| is_letterboxd_list_export_path(path))
+    {
+        warnings.push("Skipped Letterboxd list exports (lists.csv / lists/)".into());
     }
 
     if files.is_empty() {
@@ -128,6 +138,10 @@ pub fn discover_zip_bytes(bytes: &[u8]) -> Result<ZipDiscovery, String> {
         entry.read_to_string(&mut text).map_err(|e| e.to_string())?;
         let text = text.trim_start_matches('\u{feff}').to_string();
         let headers = parse_headers(&text);
+        if is_letterboxd_list_export_path(&relative) {
+            unknown_paths.push(relative);
+            continue;
+        }
         match classify_csv(&relative, &headers) {
             Some(kind) => files.push(ZipCsvFile {
                 relative_path: relative,
@@ -136,6 +150,12 @@ pub fn discover_zip_bytes(bytes: &[u8]) -> Result<ZipDiscovery, String> {
             }),
             None => unknown_paths.push(relative),
         }
+    }
+    if unknown_paths
+        .iter()
+        .any(|path| is_letterboxd_list_export_path(path))
+    {
+        warnings.push("Skipped Letterboxd list exports (lists.csv / lists/)".into());
     }
     if files.is_empty() {
         return Err("No recognized CSV datasets".into());

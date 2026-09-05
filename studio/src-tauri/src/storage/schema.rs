@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 pub const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS app_meta (

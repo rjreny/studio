@@ -82,7 +82,24 @@ fn split_csv_line(line: &str) -> Vec<String> {
     out
 }
 
+/// Letterboxd data exports include `lists.csv` (an index of list titles) and
+/// per-list CSVs under `lists/`. Those are not films. `lists.csv` has Date+Name
+/// columns, so without this guard it was misclassified as diary and list titles
+/// landed in the Films library.
+pub fn is_letterboxd_list_export_path(path: &str) -> bool {
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if file_name == "lists.csv" {
+        return true;
+    }
+    lower.starts_with("lists/") || lower.contains("/lists/")
+}
+
 pub fn classify_csv(path: &str, headers: &[String]) -> Option<CsvKind> {
+    if is_letterboxd_list_export_path(path) {
+        return None;
+    }
+
     let lower = path.to_ascii_lowercase();
     let joined = headers
         .iter()
@@ -149,6 +166,24 @@ mod tests {
         assert_eq!(
             classify_csv("diary.csv", &parse_headers(text)),
             Some(CsvKind::Diary)
+        );
+    }
+
+    #[test]
+    fn list_export_paths_are_never_classified_as_films() {
+        let list_index = parse_headers("Date,Name,Tags,URL,Description");
+        let list_films = parse_headers("Position,Name,Year,Letterboxd URI,Description");
+        assert!(is_letterboxd_list_export_path("lists.csv"));
+        assert!(is_letterboxd_list_export_path("export/lists.csv"));
+        assert!(is_letterboxd_list_export_path("lists/favorites.csv"));
+        assert!(is_letterboxd_list_export_path("backup/lists/2024.csv"));
+        assert!(!is_letterboxd_list_export_path("watchlist.csv"));
+        assert!(!is_letterboxd_list_export_path("diary.csv"));
+        assert_eq!(classify_csv("lists.csv", &list_index), None);
+        assert_eq!(classify_csv("lists/favorites.csv", &list_films), None);
+        assert_eq!(
+            classify_csv("lists/films-i-watched.csv", &list_films),
+            None
         );
     }
 }
