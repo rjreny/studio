@@ -649,18 +649,30 @@ fn list_metadata_gaps(db: &Database) -> Result<Vec<(i64, TmdbMediaType)>, String
     let mut stmt = db
         .conn()
         .prepare(
+            // Immediate backfill when a row already has catalog detail but is
+            // missing a newer column (e.g. videos_json). Keep the 7-day backoff
+            // for deferred unavailable titles, which set enriched_at with no
+            // detail payloads.
             "SELECT DISTINCT tmdb_id, tmdb_media_type
              FROM movies
              WHERE tmdb_id IS NOT NULL
-               AND (enriched_at IS NULL OR datetime(enriched_at) < datetime('now', '-7 days'))
                AND (
-                 enriched_at IS NULL
-                 OR genres_json IS NULL
-                 OR credits_json IS NULL
-                 OR production_companies_json IS NULL
-                 OR keywords_json IS NULL
-                 OR similar_json IS NULL
-                 OR videos_json IS NULL
+                 (
+                   videos_json IS NULL
+                   AND (genres_json IS NOT NULL OR credits_json IS NOT NULL)
+                 )
+                 OR (
+                   (enriched_at IS NULL OR datetime(enriched_at) < datetime('now', '-7 days'))
+                   AND (
+                     enriched_at IS NULL
+                     OR genres_json IS NULL
+                     OR credits_json IS NULL
+                     OR production_companies_json IS NULL
+                     OR keywords_json IS NULL
+                     OR similar_json IS NULL
+                     OR videos_json IS NULL
+                   )
+                 )
                )",
         )
         .map_err(|error| error.to_string())?;
@@ -2570,6 +2582,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(list_metadata_gaps(&db).unwrap(), vec![(77, TmdbMediaType::Tv)]);
+    }
+
+    #[test]
+    fn missing_videos_backfill_immediately_on_enriched_rows() {
+        let db = crate::storage::db::Database::in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO movies(
+                   id, canonical_title, tmdb_id, tmdb_media_type, enriched_at,
+                   genres_json, credits_json, production_companies_json, keywords_json, similar_json
+                 ) VALUES ('needs-trailers', 'Needs Trailers', 91, 'movie', datetime('now'), '[]', '{}', '[]', '[]', '{}')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            list_metadata_gaps(&db).unwrap(),
+            vec![(91, TmdbMediaType::Movie)]
+        );
     }
 
     #[test]
